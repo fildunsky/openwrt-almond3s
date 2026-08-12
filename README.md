@@ -65,8 +65,15 @@ Then in `make menuconfig`:
 * `Kernel modules` → `Video Support` → `kmod-lcd-almond3s`
 * `Utilities` → `lcd-ui`
 
-and `make package/kernel/lcd-almond3s/compile package/utils/lcd-ui/compile`, or
-just build the whole image.
+and `make package/feeds/almond3s/lcd-almond3s/compile package/feeds/almond3s/lcd-ui/compile`,
+or just build the whole image.
+
+While hacking on the code, point the feed at a local checkout instead of
+GitHub, so a rebuild picks up your edits without a push:
+
+```
+src-link almond3s /home/user/openwrt-almond3s
+```
 
 ## Configuration
 

@@ -65,8 +65,15 @@ echo "src-git almond3s https://github.com/fildunsky/openwrt-almond3s.git" >> fee
 * `Kernel modules` → `Video Support` → `kmod-lcd-almond3s`
 * `Utilities` → `lcd-ui`
 
-и `make package/kernel/lcd-almond3s/compile package/utils/lcd-ui/compile` либо
-обычная сборка образа целиком.
+и `make package/feeds/almond3s/lcd-almond3s/compile package/feeds/almond3s/lcd-ui/compile`
+либо обычная сборка образа целиком.
+
+Когда правишь код, удобнее направить фид на локальную копию, а не на GitHub, -
+тогда сборка подхватывает правки без пуша:
+
+```
+src-link almond3s /home/user/openwrt-almond3s
+```
 
 ## Настройка
 
