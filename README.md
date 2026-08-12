@@ -160,9 +160,12 @@ ssh root@192.168.1.1 lcdshot > shot.ppm
 
 * A full frame flush takes ~75 ms — the bus is bit-banged and the driver
   redraws the whole screen. Dirty-row updates are on the to-do list.
-* Backlight brightness cannot be changed yet. On the stock firmware it went
-  through the PIC (`ioctl(/dev/almond_backlight, 14, N)`); this is still being
-  worked out.
+* Backlight brightness is done with software PWM inside the driver: the MT7621
+  has no hardware PWM on that pin, so a kernel timer toggles GPIO 31 at 250 Hz.
+  The level is set on the Display page (25/50/75/100 %) or by hand:
+  `touch_poll dim 0..255`, current level via `touch_poll level`. The stock
+  firmware had no brightness control at all — its "BackLight Settings" screen
+  only picks the hours the backlight stays on.
 * Zigbee (EM357) and the siren are not supported.
 * The driver talks to the GPIO block directly instead of going through pinctrl,
   which is why it is a feed package and not something submitted upstream yet.

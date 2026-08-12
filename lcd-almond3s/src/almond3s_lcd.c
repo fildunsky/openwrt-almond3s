@@ -23,6 +23,7 @@
 #include <linux/vmalloc.h>
 #include <linux/i2c.h>
 #include <linux/kmsg_dump.h>
+#include <linux/hrtimer.h>
 #include <linux/mutex.h>
 
 #include "splash_4pda.h"
@@ -91,8 +92,84 @@ static inline u32 gr(u32 off) { return __raw_readl(gpio_base + off); }
  * Write GPIO DIR register preserving non-LCD pins.
  * Only LCD_PIN_MASK bits come from lcd_bits, rest from base_dir.
  */
+/*
+ * Бит подсветки живёт ОТДЕЛЬНО от shadow_dir. Иначе шина дисплея и ШИМ
+ * подсветки дерутся за одну переменную: поток отрисовки читает-меняет-пишет
+ * shadow_dir по 150 тысяч раз на кадр, а таймер ШИМ вклинивается между чтением
+ * и записью - и либо гасит подсветку не вовремя, либо портит биты данных.
+ * Теперь каждая сторона владеет своей половиной регистра.
+ */
+static u32 bl_bit;
+
 static inline void gw_dir(u32 lcd_bits) {
-    gw(GPIO_DIR_OFF, base_dir | (lcd_bits & LCD_PIN_MASK));
+    gw(GPIO_DIR_OFF, base_dir | (lcd_bits & LCD_PIN_MASK & ~BIT_BL) | bl_bit);
+}
+
+/*
+ * ЯРКОСТЬ ПОДСВЕТКИ ПРОГРАММНЫМ ШИМ.
+ *
+ * У MT7621 нет аппаратного PWM на этом пине: подсветка висит на GPIO 31 и
+ * умеет только «включено/выключено». Стоковая прошивка яркость и не меняла -
+ * её «BackLight Settings» задаёт лишь часы, когда подсветка горит (строки
+ * BackLight_settings в /almond/en.xml, ioctl 14 у almond_backlight - это
+ * таймаут, а не уровень).
+ *
+ * Поэтому крутим пин сами: hrtimer с периодом BL_PERIOD_NS переключает его
+ * между «горит» и «погас» в пропорции level/BL_MAX. На краях (0 и максимум)
+ * таймер не нужен - там просто статический уровень, и это же состояние,
+ * которое видит класс светодиодов.
+ *
+ * Частота выбрана 250 Гц: на глаз мерцания нет, а нагрузка мизерная - один
+ * записанный регистр на прерывание.
+ */
+#define BL_MAX        255
+#define BL_PERIOD_NS  4000000L   /* 4 мс = 250 Гц */
+
+static struct hrtimer bl_timer;
+static int  bl_level = BL_MAX;   /* текущая яркость */
+static bool bl_timer_on;
+static bool bl_phase_on;         /* сейчас горит */
+
+static inline void bl_pin(bool on)
+{
+    bl_bit = on ? BIT_BL : 0;
+    gw_dir(shadow_dir);
+}
+
+static enum hrtimer_restart bl_tick(struct hrtimer *t)
+{
+    long on_ns  = (long)BL_PERIOD_NS * bl_level / BL_MAX;
+    long off_ns = (long)BL_PERIOD_NS - on_ns;
+
+    bl_phase_on = !bl_phase_on;
+    bl_pin(bl_phase_on);
+    hrtimer_forward_now(t, ns_to_ktime(bl_phase_on ? on_ns : off_ns));
+    return HRTIMER_RESTART;
+}
+
+static void bl_set_level(int level)
+{
+    if (level < 0) level = 0;
+    if (level > BL_MAX) level = BL_MAX;
+    bl_level = level;
+
+    if (level == 0 || level == BL_MAX) {
+        if (bl_timer_on) {
+            hrtimer_cancel(&bl_timer);
+            bl_timer_on = false;
+        }
+        bl_pin(level == BL_MAX);
+        return;
+    }
+
+    if (!bl_timer_on) {
+        bl_phase_on = true;
+        bl_pin(true);
+        bl_timer_on = true;
+        hrtimer_start(&bl_timer,
+                      ns_to_ktime((long)BL_PERIOD_NS * bl_level / BL_MAX),
+                      HRTIMER_MODE_REL);
+    }
 }
 
 static void gpio_set_byte(u8 val)
@@ -1556,11 +1633,18 @@ static long lcd_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
             return 0;
         }
         /* Backlight control: arg=0 off, arg=1 on */
-        if (arg)
-            shadow_dir |= BIT_BL;
-        else
-            shadow_dir &= ~BIT_BL;
-        gw_dir(shadow_dir);
+        bl_set_level(arg ? BL_MAX : 0);
+        return 0;
+    }
+    if (cmd == 16) {
+        /* Яркость 0..255 программным ШИМ (см. bl_set_level). */
+        bl_set_level((int)arg);
+        return 0;
+    }
+    if (cmd == 17) {
+        int lvl = bl_level;
+        if (copy_to_user((void __user *)arg, &lvl, sizeof(lvl)))
+            return -EFAULT;
         return 0;
     }
     if (cmd == 5) {
@@ -1708,6 +1792,11 @@ static int __init lcd_drv_init(void)
     for (i = 0; i < fb_npages; i++)
         fb_pages[i] = vmalloc_to_page(framebuffer + i * PAGE_SIZE);
 
+    /* Таймер ШИМ подсветки: заводим до первого использования, стартует он
+     * только когда яркость между краями. */
+    hrtimer_init(&bl_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+    bl_timer.function = bl_tick;
+
     /* Register device */
     ret = misc_register(&lcd_dev);
     if (ret) { kfree(framebuffer); kfree(fb_pages); iounmap(gpio_base); return ret; }
@@ -1716,7 +1805,7 @@ static int __init lcd_drv_init(void)
     lcd_gpio_init();
     lcd_hw_reset();
     lcd_init_ili9341();
-    shadow_dir |= BIT_BL; gw_dir(shadow_dir);
+    bl_set_level(BL_MAX);   /* подсветку зажигаем через тот же путь, что и ШИМ */
 
     /* First scene frame + logo — render thread continues animation.
      * Scene 6 = Matrix ("Wake up, Neo...") as the boot splash. */
@@ -1946,6 +2035,7 @@ static int __init lcd_drv_init(void)
 
 static void __exit lcd_drv_exit(void)
 {
+    if (bl_timer_on) hrtimer_cancel(&bl_timer);
     if (touch_thread) kthread_stop(touch_thread);
     if (render_thread) kthread_stop(render_thread);
     if (touch_i2c_adap) i2c_put_adapter(touch_i2c_adap);

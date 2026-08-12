@@ -209,6 +209,23 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    /* touch_poll dim <0..255> — яркость подсветки программным ШИМ (ioctl 16).
+     * 0 - погашено, 255 - полный накал, между ними драйвер крутит пин. */
+    if (argc >= 3 && argv[1][0] == 'd') {
+        int ret = ioctl(fd, 16, (unsigned long)atoi(argv[2]));
+        close(fd);
+        return ret < 0 ? 1 : 0;
+    }
+
+    /* touch_poll level — текущая яркость (ioctl 17). */
+    if (argc >= 2 && argv[1][0] == 'l') {
+        int lvl = -1;
+        if (ioctl(fd, 17, &lvl) == 0)
+            printf("%d\n", lvl);
+        close(fd);
+        return 0;
+    }
+
     /* touch_poll pic — сырые 17 байт статуса PIC (ioctl 3).
      * Нужно, чтобы ловить, докладывает ли PIC о нажатиях кнопки питания:
      * до ядра она не доходит, вся надежда на эти байты. */

@@ -269,6 +269,7 @@ let TR_RU = {
     "UPLINK - %s": "АПЛИНК - %s",
     "IP & clients": "адреса и клиенты",
     "VIEW": "ВИД",
+    "LIGHT": "ЯРКОСТЬ",
     "Shift": "Сдвиг",
     "Night": "Ночь",
     "NIGHT MODE": "НОЧНОЙ РЕЖИМ",
@@ -979,6 +980,23 @@ function saver_style() {
 // Ночной режим: заставка светится тускло-зелёным, чтобы не бить по глазам в
 // темноте. Достался от zipfo жёстко зашитым на 22:00-06:00; теперь это
 // настройка - можно выключить или сдвинуть часы.
+// Яркость в процентах. Пин один, и владеть им должен драйвер: там живёт ШИМ,
+// поэтому и включение, и гашение, и уровень идут одним путём - ioctl'ом через
+// touch_poll, а не записью в класс светодиодов.
+let BRIGHT_STEPS = [ 25, 50, 75, 100 ];
+
+function bright_cfg() {
+    let v = ucur ? ucur.get("lcd", "display", "brightness") : null;
+    v = (v == null || v == "") ? 100 : int(+v);
+    return clampi(v, 5, 100);
+}
+
+function bright_set(pct) {
+    if (!ucur) return;
+    ucur.set("lcd", "display", "brightness", sprintf("%d", pct));
+    ucur.commit("lcd");
+}
+
 function night_cfg() {
     let on = ucur ? ucur.get("lcd", "display", "night") : null;
     let f  = ucur ? ucur.get("lcd", "display", "night_from") : null;
@@ -1064,6 +1082,10 @@ function lang_btn() {
 
 // Переключатели: гашение, сдвиг, ночь. Состояние показывает цвет полоски,
 // поэтому слова «вкл/выкл» на кнопках не нужны.
+function bright_btn(i) {
+    return { x: 100 + i * 54, y: 186, w: 50, h: 22 };
+}
+
 function tog_btn(i) {
     if (i == 0) return { x: 10,  y: 146, w: 104, h: 32 };
     if (i == 1) return { x: 120, y: 146, w: 92,  h: 32 };
@@ -1982,6 +2004,18 @@ function draw_display_page() {
         lcd_rect(b.x, b.y, 4, b.h, togs[i][1]);
         lcd_text(b.x + int((b.w - tlen(t) * 12) / 2) + 2, b.y + 9, t,
                  C.white, C.widget, 2);
+    }
+
+    // Яркость: четыре шага, выбранный подсвечен.
+    let bp = bright_cfg();
+    lcd_text(20, 192, tr("LIGHT"), C.gray, C.bg, 1);
+    for (let i = 0; i < length(BRIGHT_STEPS); i++) {
+        let b = bright_btn(i), sel = (BRIGHT_STEPS[i] == bp);
+        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+        lcd_rect(b.x, b.y, 3, b.h, sel ? C.green : C.border);
+        let t = sprintf("%d%%", BRIGHT_STEPS[i]);
+        lcd_text(b.x + int((b.w - tlen(t) * 6) / 2) + 2, b.y + 7, t,
+                 sel ? C.white : C.gray, C.widget, 1);
     }
 
     draw_back();
@@ -3021,11 +3055,14 @@ function backlight_path() {
 }
 
 function backlight_write(on) {
+    // Уровень задаём драйверу напрямую: он крутит ШИМ и знает, что пин его.
+    let lvl = on ? int(bright_cfg() * 255 / 100) : 0;
+    system(sprintf("touch_poll dim %d >/dev/null 2>&1", lvl));
+    // Классу светодиодов оставляем согласованное состояние, чтобы очередная
+    // перезагрузка триггеров не зажгла панель мимо нас.
     let p = backlight_path();
     if (p != "")
         system(sprintf("echo %d > %s", on ? 1 : 0, p));
-    else
-        system(sprintf("touch_poll b %d >/dev/null 2>&1", on ? 1 : 0));
 }
 
 // Тач работает независимо от подсветки, поэтому разбудить экран можно пальцем.
@@ -3425,6 +3462,18 @@ function handle_touch(tx, ty) {
             }
         }
 
+        for (let i = 0; i < length(BRIGHT_STEPS); i++) {
+            let bb = bright_btn(i);
+            if (in_rect(tx, ty, bb.x, bb.y, bb.w, bb.h)) {
+                bright_set(BRIGHT_STEPS[i]);
+                if (!st.blank)
+                    system(sprintf("touch_poll dim %d >/dev/null 2>&1",
+                                   int(BRIGHT_STEPS[i] * 255 / 100)));
+                draw_display_page();
+                return;
+            }
+        }
+
         for (let i = 0; i < 3; i++) {
             let b = tog_btn(i);
             if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
@@ -3616,7 +3665,7 @@ function main() {
     // тогда запись того же значения в brightness ничего бы не сделала, а экран
     // «горел и горел» - гашение по таймауту молча превращалось в no-op.
     backlight_write(false);
-    backlight_write(true);
+    backlight_write(true);   /* внутри уже уровень из настроек */
 
     // Stop splash: ioctl(0) via flush
     system("printf '\\0' > /dev/lcd 2>/dev/null");
