@@ -84,6 +84,9 @@ src-link almond3s /home/user/openwrt-almond3s
 uci set lcd.display.lang='ru'          # ru | en
 uci set lcd.display.saver='60'          # секунды до заставки, 0 - выключить
 uci set lcd.display.saver_style='clock' # clock (часы) | full (погода) | line | off (гасить экран)
+uci set lcd.display.night='1'           # ночной режим заставки
+uci set lcd.display.night_from='22'      # с какого часа
+uci set lcd.display.night_to='6'         # до какого часа
 uci set lcd.weather.city='Voronezh'
 uci commit lcd
 /etc/init.d/lcd_ui restart

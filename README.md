@@ -84,6 +84,9 @@ screen itself, under `Menu → More → Display`:
 uci set lcd.display.lang='ru'          # ru | en
 uci set lcd.display.saver='60'          # seconds until the screensaver, 0 disables it
 uci set lcd.display.saver_style='clock' # clock | full (weather) | line | off
+uci set lcd.display.night='1'           # night mode for the screensaver
+uci set lcd.display.night_from='22'      # from this hour
+uci set lcd.display.night_to='6'         # until this hour
 uci set lcd.weather.city='Voronezh'
 uci commit lcd
 /etc/init.d/lcd_ui restart
