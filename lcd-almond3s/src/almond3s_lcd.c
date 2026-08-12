@@ -1078,7 +1078,13 @@ static ssize_t lcd_fb_write(struct file *f, const char __user *buf,
     if (pos == 0)
         fb_writing = 1;  /* block render thread from flushing */
 
-    mutex_lock(&fb_lock);
+    /* Ждём мьютекс ПРЕРЫВАЕМО. С обычным mutex_lock процесс, которому в этот
+     * момент прилетел SIGTERM (procd при перезапуске службы), уходил в
+     * непрерываемое ожидание: снять его не мог даже SIGKILL, задача навсегда
+     * оставалась в состоянии D и держала ссылку на модуль - rmmod после этого
+     * не проходил. */
+    if (mutex_lock_interruptible(&fb_lock))
+        return -ERESTARTSYS;
     if (copy_from_user(framebuffer + pos, buf, cnt)) {
         mutex_unlock(&fb_lock);
         return -EFAULT;

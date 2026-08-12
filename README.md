@@ -165,7 +165,9 @@ ssh root@192.168.1.1 lcdshot > shot.ppm
   The level is set on the Display page (25/50/75/100 %) or by hand:
   `touch_poll dim 0..255`, current level via `touch_poll level`. The stock
   firmware had no brightness control at all — its "BackLight Settings" screen
-  only picks the hours the backlight stays on.
+  only picks the hours the backlight stays on. During night-mode hours the
+  screensaver is additionally dimmed to a third of the level; the active screen
+  keeps full brightness.
 * Zigbee (EM357) and the siren are not supported.
 * The driver talks to the GPIO block directly instead of going through pinctrl,
   which is why it is a feed package and not something submitted upstream yet.

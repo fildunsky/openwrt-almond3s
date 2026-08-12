@@ -3054,9 +3054,18 @@ function backlight_path() {
     return bl_path;
 }
 
+// Ночью гасим заставку до трети яркости: зелёный цвет от zipfo экономил глаза
+// только по цвету, а панель светила в полную силу. Активный экран не трогаем -
+// если человек подошёл и ткнул, ему нужно видеть.
+function night_dim(lvl) {
+    if (!night_now() || st.screen != "screensaver") return lvl;
+    let d = int(lvl * 35 / 100);
+    return d < 10 ? 10 : d;
+}
+
 function backlight_write(on) {
     // Уровень задаём драйверу напрямую: он крутит ШИМ и знает, что пин его.
-    let lvl = on ? int(bright_cfg() * 255 / 100) : 0;
+    let lvl = on ? night_dim(int(bright_cfg() * 255 / 100)) : 0;
     system(sprintf("touch_poll dim %d >/dev/null 2>&1", lvl));
     // Классу светодиодов оставляем согласованное состояние, чтобы очередная
     // перезагрузка триггеров не зажгла панель мимо нас.
@@ -3610,6 +3619,7 @@ function set_screen(s) {
 
     if (s == "active") {
         set_blank(false);
+        backlight_write(true);   /* вернуть полный уровень после ночной заставки */
         // Из заставки просыпаемся на страницу модема: на неё смотрят чаще
         // всего, а «Сеть» доступна одним тапом из меню.
         st.page = "lte";
@@ -3618,10 +3628,12 @@ function set_screen(s) {
         draw_current();
     } else if (s == "screensaver") {
         st.saver_frame = 0;
-        if (saver_style() == "off")
+        if (saver_style() == "off") {
             set_blank(true);
-        else
+        } else {
+            backlight_write(true);   /* пересчитает уровень с учётом ночи */
             draw_screensaver();
+        }
     }
 }
 
