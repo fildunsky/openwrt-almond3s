@@ -262,6 +262,11 @@ let TR_RU = {
     "Traffic": "Трафик",
     "UPLINK - %s": "АПЛИНК - %s",
     "IP & clients": "адреса и клиенты",
+    "Model": "Модель",
+    "Band": "Диапазон",
+    "Mode": "Режим",
+    "Number": "Номер",
+    "Temp": "Темп.",
     "SMS": "СМС",
     "inbox": "входящие",
     "%d new": "новых: %d",
@@ -2476,43 +2481,66 @@ function draw_lte_page() {
     let temp = int(+(l.temp ?? 0));
     let nca  = int(+(l.nca ?? 0));
 
-    // Card 1: modem state
+    // Карточка 1: кто и как подключён. Сетка «подпись - значение» в две
+    // колонки, как в карточке модема на дашборде: подписи выровнены по левому
+    // краю колонки, значения - по своей. Уровня сигнала здесь нет намеренно:
+    // лесенка уже в шапке, а цифры - в карточке «Сигнал» ниже.
     let y1 = 28 + oy;
     lcd_rect(cx, y1, cw, 46, C.widget);
     lcd_rect(cx, y1, 4, 46, C.green);
-    lcd_text(cx + 10, y1 + 6, tr("MODEM"), C.gray, C.widget, 1);
-    // Номер симки в правом верхнем углу карточки; температура уехала
-    // строкой ниже, к диапазонам - там для неё есть место.
+
+    let LX1 = cx + 10,  VX1 = cx + 64;    // левая колонка: подпись, значение
+    let LX2 = cx + 158, VX2 = cx + 212;   // правая колонка
+
+    // Модель длиннее колонки обрезаем не как попало: сперва выбрасываем имя
+    // вендора («Telit LM960A18-ENS» -> «LM960A18-ENS»), от него толку меньше,
+    // чем от самой модели.
+    let model = l.modem ?? "-";
+    if (tlen(model) > 15) {
+        let w = split(model, " ");
+        if (length(w) > 1) model = join(" ", slice(w, 1));
+    }
+    lcd_text(LX1, y1 + 5, tr("Model"), C.gray, C.widget, 1);
+    lcd_text(VX1, y1 + 5, tcut(model, 15), C.white, C.widget, 1);
+
+    let mode_s = l.mode ?? "-";
+    if (nca > 1) mode_s += sprintf(" %dCA", nca);
+    lcd_text(LX2, y1 + 5, tr("Mode"), C.gray, C.widget, 1);
+    lcd_text(VX2, y1 + 5, mode_s, C.cyan, C.widget, 1);
+
+    lcd_text(LX1, y1 + 19, tr("Band"), C.gray, C.widget, 1);
+    lcd_text(VX1, y1 + 19, tcut(l.band ?? "-", 15), C.accent, C.widget, 1);
+
+    lcd_text(LX2, y1 + 19, tr("Temp"), C.gray, C.widget, 1);
+    if (temp > 0) {
+        let tc = temp >= 70 ? C.red : (temp >= 55 ? C.yellow : C.white);
+        lcd_text(VX2, y1 + 19, sprintf("%d°C%s", temp,
+                 int(+(l.therm ?? 0)) > 0 ? " !" : ""), tc, C.widget, 1);
+    } else {
+        lcd_text(VX2, y1 + 19, "-", C.dim, C.widget, 1);
+    }
+
+    // Номеру нужна вся ширина строки: с форматированием это 16 знаков, в
+    // колонку он не влезал. Справа от него - слот и роуминг.
     let phone = phone_fmt(l.phone);
-    if (phone != "")
-        lcd_text(cx + cw - 10 - tlen(phone) * 6, y1 + 6, phone, C.accent, C.widget, 1);
+    lcd_text(LX1, y1 + 33, tr("Number"), C.gray, C.widget, 1);
+    lcd_text(VX1, y1 + 33, phone != "" ? phone : "-",
+             phone != "" ? C.white : C.dim, C.widget, 1);
 
-    draw_sigbars(cx + 10, y1 + 14, sbars, scol);
-    if (sigp > 0)
-        lcd_text(cx + 58, y1 + 18, sprintf("%d%%", sigp), scol, C.widget, 1);
-    lcd_text(cx + 96, y1 + 18, sprintf("CSQ %d/31", csq), C.gray, C.widget, 1);
-    lcd_text(cx + 170, y1 + 18, l.mode ?? "-", C.cyan, C.widget, 1);
-    if (nca > 1)
-        lcd_text(cx + 250, y1 + 18, sprintf("%dCA", nca), C.accent, C.widget, 1);
-
-    lcd_text(cx + 10, y1 + 32, l.band ?? "-", C.accent, C.widget, 1);
     let slot = int(+(l.simslot ?? 0));
     if (slot > 0)
-        lcd_text(cx + 150, y1 + 32, sprintf(tr("SIM %d"), slot), C.gray, C.widget, 1);
+        lcd_text(VX2, y1 + 33, sprintf(tr("SIM %d"), slot), C.gray, C.widget, 1);
     if (int(+(l.roaming ?? 0)) > 0)
-        lcd_text(cx + 200, y1 + 32, tr("ROAM"), C.yellow, C.widget, 1);
-    if (temp > 0) {
-        let tc = temp >= 70 ? C.red : (temp >= 55 ? C.yellow : C.gray);
-        lcd_text(cx + 250, y1 + 32, sprintf("%d C", temp), tc, C.widget, 1);
-        if (int(+(l.therm ?? 0)) > 0)
-            lcd_text(cx + 284, y1 + 32, "!", C.red, C.widget, 1);
-    }
+        lcd_text(VX2 + 44, y1 + 33, tr("ROAM"), C.yellow, C.widget, 1);
 
     // Card 2: radio metrics with the same scales as the web dashboard
     let y2 = y1 + 52;
     lcd_rect(cx, y2, cw, 64, C.widget);
     lcd_rect(cx, y2, 4, 64, C.cyan);
     lcd_text(cx + 10, y2 + 6, tr("SIGNAL"), C.gray, C.widget, 1);
+    if (csq > 0)
+        lcd_text(cx + cw - 10 - 9 * 6, y2 + 6, sprintf("CSQ %d/31", csq),
+                 C.gray, C.widget, 1);
     draw_metric_row(cx + 10, y2 + 18, cw - 20, "rsrp", "RSRP", rsrp);
     draw_metric_row(cx + 10, y2 + 30, cw - 20, "rsrq", "RSRQ", int(+(l.rsrq ?? 0)));
     draw_metric_row(cx + 10, y2 + 42, cw - 20, "sinr", "SINR", int(+(l.sinr ?? 0)));
