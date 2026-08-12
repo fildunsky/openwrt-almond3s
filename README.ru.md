@@ -83,11 +83,26 @@ src-link almond3s /home/user/openwrt-almond3s
 ```sh
 uci set lcd.display.lang='ru'          # ru | en
 uci set lcd.display.saver='300'        # секунды до заставки, 0 - выключить
-uci set lcd.display.saver_style='full' # full (погода) | clock (часы) | line (строка)
+uci set lcd.display.saver_style='full' # full (погода) | clock | line | off (гасить экран)
 uci set lcd.weather.city='Voronezh'
 uci commit lcd
 /etc/init.d/lcd_ui restart
 ```
+
+`saver_style=off` вместо заставки гасит панель: подсветка снимается ioctl'ом
+драйвера, перерисовка останавливается, а тап по тёмному экрану будит обратно.
+То же самое доступно руками и вешается на любую кнопку, у которой есть события:
+
+```sh
+/etc/lcd/scripts/screen.sh off|on|toggle
+
+# /etc/rc.button/tamper
+[ "$ACTION" = released ] && [ "$SEEN" -lt 2 ] && /etc/lcd/scripts/screen.sh toggle
+```
+
+**Кнопка питания программе недоступна**: она заведена на PIC, и нажатие
+обрабатывает его прошивка. До ядра доходят только `reset` (GPIO 32) и
+`tamper` (GPIO 28).
 
 Погоду забирает `/etc/lcd/scripts/weather_fetch.sh` с wttr.in, пинги сервисов —
 `/etc/lcd/scripts/svcping.sh`; оба ставятся в cron при установке пакета.

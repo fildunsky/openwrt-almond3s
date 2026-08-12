@@ -152,6 +152,7 @@ let st = {
     ox: 0, oy: 0,     // burn-in pixel offset
     tp:     false,     // touch was pressed (edge detection)
     saver_frame: 0,    // screensaver animation
+    blank:  false,     // подсветка погашена (стиль заставки «выкл»)
 };
 
 // --- Connections ---
@@ -878,7 +879,7 @@ function saver_set(v) {
 // Теперь раз в пять минут и на пиксель, и это можно выключить.
 // Вид заставки: full - как раньше (часы, дата, погода), clock - только часы
 // с уровнем и батареей, line - одна строка как в шапке.
-let SAVER_STYLES = [ "full", "clock", "line" ];
+let SAVER_STYLES = [ "full", "clock", "line", "off" ];
 
 function saver_style() {
     let v = ucur ? ucur.get("lcd", "display", "saver_style") : null;
@@ -893,7 +894,7 @@ function saver_style_set(v) {
 }
 
 function style_btn(i) {
-    return { x: 100 + i * 72, y: 136, w: 68, h: 24 };
+    return { x: 100 + i * 54, y: 136, w: 50, h: 24 };
 }
 
 function burnin_cfg() {
@@ -1555,7 +1556,7 @@ function draw_display_page() {
     // Вид заставки
     let stl = saver_style();
     lcd_text(20, 142, tr("SCREENSAVER"), C.gray, C.bg, 1);
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < length(SAVER_STYLES); i++) {
         let b = style_btn(i), sel = (SAVER_STYLES[i] == stl);
         lcd_rect(b.x, b.y, b.w, b.h, C.widget);
         lcd_rect(b.x, b.y, 3, b.h, sel ? C.green : C.border);
@@ -2495,6 +2496,16 @@ function draw_screensaver() {
 // =============================================
 
 // Run shell script from SCRIPTS dir (non-blocking with &)
+let SCREEN_REQ = "/tmp/lcd_screen_req";
+
+// Гасим подсветку через ioctl(4) драйвера - тач при этом продолжает работать,
+// поэтому разбудить экран можно и пальцем, не только кнопкой.
+function set_blank(on) {
+    if (st.blank == on) return;
+    st.blank = on;
+    system(sprintf("touch_poll b %d >/dev/null 2>&1", on ? 0 : 1));
+}
+
 function run_script(name, bg) {
     let cmd = SCRIPTS + "/" + name;
     if (bg) cmd += " &";
@@ -2764,7 +2775,7 @@ function handle_touch(tx, ty) {
     }
 
     if (st.page == "display") {
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < length(SAVER_STYLES); i++) {
             let sb = style_btn(i);
             if (in_rect(tx, ty, sb.x, sb.y, sb.w, sb.h)) {
                 saver_style_set(SAVER_STYLES[i]);
@@ -2915,6 +2926,7 @@ function set_screen(s) {
     st.screen = s;
 
     if (s == "active") {
+        set_blank(false);
         // Из заставки просыпаемся на страницу модема: на неё смотрят чаще
         // всего, а «Сеть» доступна одним тапом из меню.
         st.page = "lte";
@@ -2923,7 +2935,29 @@ function set_screen(s) {
         draw_current();
     } else if (s == "screensaver") {
         st.saver_frame = 0;
-        draw_screensaver();
+        if (saver_style() == "off")
+            set_blank(true);
+        else
+            draw_screensaver();
+    }
+}
+
+// Запрос от screen.sh (кнопка). Гасим не «на месте», а переводя экран в то же
+// состояние, что и заставка «выкл», - иначе перерисовка продолжит долбить шину,
+// а тап не разбудит.
+function screen_req() {
+    let r = fs.readfile(SCREEN_REQ);
+    if (!r) return;
+    fs.unlink(SCREEN_REQ);
+    r = trim(r);
+    let off = (r == "off") || (r == "toggle" && !st.blank);
+    if (off) {
+        st.screen = "screensaver";
+        st.saver_frame = 0;
+        set_blank(true);
+    } else {
+        st.ltch = time();
+        set_screen("active");
     }
 }
 
@@ -2940,6 +2974,10 @@ function main() {
 
     // Wait for lcd_drv splash logo
     system("sleep 3");
+
+    // Подсветку включаем безусловно: если демон перезапустили с погашенным
+    // экраном, st.blank начнётся с false и сама она уже не включится.
+    system("touch_poll b 1 >/dev/null 2>&1");
 
     // Stop splash: ioctl(0) via flush
     system("printf '\\0' > /dev/lcd 2>/dev/null");
@@ -2958,7 +2996,7 @@ function main() {
             refresh_data();
             if (st.screen == "active")
                 draw_current();
-            else if (st.screen == "screensaver")
+            else if (st.screen == "screensaver" && !st.blank)
                 draw_screensaver();
             data_t.set(T.data * 1000);
         });
@@ -2966,6 +3004,7 @@ function main() {
         // Touch polling (every 100ms)
         let touch_t;
         touch_t = uloop_mod.timer(100, function() {
+            screen_req();
             let t = read_touch();
             if (t) {
                 st.ltch = time();

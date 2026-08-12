@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=lcd-ui
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -44,6 +44,7 @@ define Package/lcd-ui/install
 	$(INSTALL_DIR) $(1)/etc/lcd/scripts
 	$(INSTALL_BIN) ./files/weather_fetch.sh $(1)/etc/lcd/scripts/weather_fetch.sh
 	$(INSTALL_BIN) ./files/svcping.sh $(1)/etc/lcd/scripts/svcping.sh
+	$(INSTALL_BIN) ./files/screen.sh $(1)/etc/lcd/scripts/screen.sh
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./files/lcd.config $(1)/etc/config/lcd
 endef

@@ -83,11 +83,27 @@ screen itself, under `Menu → More → Display`:
 ```sh
 uci set lcd.display.lang='ru'          # ru | en
 uci set lcd.display.saver='300'        # seconds until the screensaver, 0 disables it
-uci set lcd.display.saver_style='full' # full (weather) | clock | line
+uci set lcd.display.saver_style='full' # full (weather) | clock | line | off
 uci set lcd.weather.city='Voronezh'
 uci commit lcd
 /etc/init.d/lcd_ui restart
 ```
+
+`saver_style=off` blanks the panel instead of drawing a screensaver — the
+backlight goes out via the driver's ioctl, redrawing stops, and a touch on the
+dark screen brings it back. The same switch is available by hand, and can be
+bound to any button that produces events:
+
+```sh
+/etc/lcd/scripts/screen.sh off|on|toggle
+
+# /etc/rc.button/tamper
+[ "$ACTION" = released ] && [ "$SEEN" -lt 2 ] && /etc/lcd/scripts/screen.sh toggle
+```
+
+The **power button is not available to software** on this device: it is wired to
+the PIC, which handles the press in its own firmware. Only `reset` (GPIO 32) and
+`tamper` (GPIO 28) reach the kernel as buttons.
 
 Weather is fetched by `/etc/lcd/scripts/weather_fetch.sh` from wttr.in and the
 service pings by `/etc/lcd/scripts/svcping.sh`; both are put on cron by the
