@@ -625,6 +625,18 @@ function arr_minmax(arr) {
 //  DATA COLLECTION
 // =============================================
 
+// Прочитанные ключи модема. Имя файла у 5gmodem собирается из usb-пути, где
+// всё, кроме букв и цифр, заменено подчёркиванием: 1-1 -> sms_seen.1_1.
+function sms_seen_set(path) {
+    let set = {};
+    let f = "/etc/5gmodem/sms_seen." + replace(path ?? "", /[^A-Za-z0-9]/g, "_");
+    let raw = fs.readfile(f);
+    if (raw)
+        for (let k in split(trim(raw), "\n"))
+            if (k != "") set[k] = true;
+    return set;
+}
+
 function refresh_data() {
     // Primary: data_collector JSON
     let raw = fs.readfile(DATA_PATH);
@@ -659,16 +671,29 @@ function refresh_data() {
         try { d.services = json(svc_raw); } catch(e) { }
     }
 
-    // Непрочитанные SMS: sessionwatch.sh в 5gmodem раз в ~30 с атомарно
-    // переписывает этот файл (recv минус seen, мультипарт уже склеен).
-    // Запись пропадает сама, когда сообщение прочитали или оно ушло в
-    // Telegram, поэтому свой курсор нам не нужен - показываем как есть.
+    // Непрочитанные SMS: sessionwatch.sh в 5gmodem раз в круг атомарно
+    // переписывает это зеркало (recv минус seen, мультипарт уже склеен).
+    //
+    // Но зеркало обновляется раз в круг, а отметка прочитанным ставится
+    // мгновенно - и конвертик висел бы до минуты после того, как сообщение
+    // прочитали на «Входящих» или его забрал Telegram. Поэтому seen вычитаем
+    // сами, по тем же файлам: ровно это делает `smsbridge.sh newcount
+    // for=<путь>`, но нам, локальной программе, дешевле прочитать их напрямую,
+    // чем форкать скрипт на каждом тике.
     let sms_raw = fs.readfile("/tmp/5gmodem_sms_new.json");
     if (sms_raw) {
         try {
             let sj = json(sms_raw);
-            d.sms_new = int(sj?.count ?? 0);
-            d.sms_list = type(sj?.sms) == "array" ? sj.sms : [];
+            let all = type(sj?.sms) == "array" ? sj.sms : [];
+            let fresh = [], seen = {};
+            for (let m in all) {
+                let path = m?.modem ?? "";
+                if (!exists(seen, path)) seen[path] = sms_seen_set(path);
+                if (m?.key && seen[path][m.key]) continue;
+                push(fresh, m);
+            }
+            d.sms_new = length(fresh);
+            d.sms_list = fresh;
         } catch (e) { }
     }
 

@@ -132,7 +132,8 @@ package on install.
 * **SMS** — the inbox read through `5gmodem`'s bridge: multipart messages are
   glued back together, unread ones are marked, and a message opens full-screen
   with paging when it does not fit. Reachable from the menu or by tapping the
-  envelope in the header
+  envelope in the header. The unread mark subtracts `5gmodem`'s live `seen`
+  state, so the envelope clears the moment a message is read elsewhere
 * **Services** — reachability of YouTube, Telegram, GitHub and others; tapping a
   card rechecks that one service immediately
 * **Weather** — current conditions with a city picker
