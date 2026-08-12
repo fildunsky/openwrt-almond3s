@@ -165,7 +165,6 @@ let st = {
     sms_i:  -1,        // открытое сообщение
     sms_tp: 0,         // страница текста открытого сообщения
     sms_wait: false,   // ждём фоновое чтение из модема
-    dpg:    0,         // страница настроек экрана
 };
 
 // --- Connections ---
@@ -269,10 +268,11 @@ let TR_RU = {
     "Traffic": "Трафик",
     "UPLINK - %s": "АПЛИНК - %s",
     "IP & clients": "адреса и клиенты",
-    "NIGHT MODE": "НОЧНОЙ РЕЖИМ",
-    "From": "С",
-    "To": "ДО",
-    "Screensaver dims to green at night": "Ночью заставка светится тускло-зелёным",
+    "VIEW": "ВИД",
+    "Shift": "Сдвиг",
+    "Night": "Ночь",
+    "NIGHT FROM": "НОЧЬ С",
+    "NIGHT TO": "ДО",
     "Model": "Модель",
     "Band": "Диапазон",
     "Number": "Номер",
@@ -979,7 +979,7 @@ function saver_style_set(v) {
 }
 
 function style_btn(i) {
-    return { x: 100 + i * 54, y: 136, w: 50, h: 24 };
+    return { x: 100 + i * 54, y: 76, w: 50, h: 24 };
 }
 
 function burnin_cfg() {
@@ -1005,34 +1005,28 @@ function saver_label(v) {
     return sprintf(tr("%d min"), int(v / 60));
 }
 
+// Страница «Экран» верстается в одну колонку по центру: значение таймаута
+// занимает треть ширины, минус и плюс стоят по бокам от него.
 function saver_btn(which) {
-    return which < 0 ? { x: 20, y: 70, w: 80, h: 32 }
-                     : { x: 220, y: 70, w: 80, h: 32 };
+    return which < 0 ? { x: 60, y: 42, w: 56, h: 30 }
+                     : { x: 204, y: 42, w: 56, h: 30 };
 }
 
-function night_btn() {
-    return { x: 200, y: 40, w: 100, h: 24 };
+function saver_val_box() {
+    return { x: 124, y: 42, w: 72, h: 30 };
 }
 
-// Часы «с» и «до»: минус, значение, плюс - в одну строку.
+// Ряд состояний: гашение, сдвиг, ночь, язык - по четверти ширины каждая.
+function quad_btn(i) {
+    return { x: 10 + i * 76, y: 112, w: 72, h: 26 };
+}
+
+// Часы «с» и «до»: две группы «минус - значение - плюс» в одной строке.
 function hour_btn(row, which) {
-    let y = row == 0 ? 84 : 124;
-    if (which < 0) return { x: 100, y: y, w: 44, h: 28 };
-    if (which > 0) return { x: 216, y: y, w: 44, h: 28 };
-    return { x: 148, y: y, w: 64, h: 28 };
-}
-
-function blank_btn() {
-    return { x: 104, y: 70, w: 112, h: 32 };
-}
-
-function burnin_btn() {
-    return { x: 200, y: 108, w: 100, h: 24 };
-}
-
-function lang_btn(which) {
-    return which == "ru" ? { x: 100, y: 166, w: 100, h: 24 }
-                         : { x: 208, y: 166, w: 100, h: 24 };
+    let base = row == 0 ? 14 : 166;
+    if (which < 0) return { x: base, y: 158, w: 40, h: 30 };
+    if (which > 0) return { x: base + 104, y: 158, w: 40, h: 30 };
+    return { x: base + 44, y: 158, w: 56, h: 30 };
 }
 
 
@@ -1873,75 +1867,27 @@ function qr_box(y) {
     return { x: 10 + 300 - 68, y: y + 9, w: 62, h: 62 };
 }
 
-function draw_display_night() {
-    lcd_clear(C.bg);
-    draw_header(tr("Display"));
-
-    let c = night_cfg();
-
-    lcd_text(20, 46, tr("NIGHT MODE"), C.gray, C.bg, 1);
-    let nb = night_btn();
-    lcd_rect(nb.x, nb.y, nb.w, nb.h, C.widget);
-    lcd_rect(nb.x, nb.y, 3, nb.h, c.on ? C.green : C.dim);
-    lcd_text(nb.x + 34, nb.y + 5, c.on ? tr("on") : tr("off"),
-             c.on ? C.white : C.gray, C.widget, 2);
-
-    // Часы: «с» и «до».
-    let rows = [ [ tr("From"), c.from ], [ tr("To"), c.to ] ];
-    for (let r = 0; r < 2; r++) {
-        let lab = rows[r][0], val = rows[r][1];
-        let m = hour_btn(r, -1), v = hour_btn(r, 0), pl = hour_btn(r, 1);
-        lcd_text(20, v.y + 10, lab, C.gray, C.bg, 1);
-        lcd_rect(m.x, m.y, m.w, m.h, C.widget);
-        lcd_text(m.x + 16, m.y + 4, "-", C.accent, C.widget, 3);
-        lcd_rect(v.x, v.y, v.w, v.h, C.widget);
-        lcd_text(v.x + 14, v.y + 7, sprintf("%02d:00", val), C.white, C.widget, 1);
-        lcd_rect(pl.x, pl.y, pl.w, pl.h, C.widget);
-        lcd_text(pl.x + 16, pl.y + 4, "+", C.accent, C.widget, 3);
-    }
-
-    lcd_text(20, 166, tr("Screensaver dims to green at night"), C.dim, C.bg, 1);
-
-    draw_back_pager(1, 2);
-    lcd_flush();
-}
-
 function draw_display_page() {
-    if (st.dpg == 1) { draw_display_night(); return; }
-
     lcd_clear(C.bg);
     draw_header(tr("Display"));
 
+    // Таймаут: подпись по центру, значение в рамке, минус и плюс по бокам.
     let cur = saver_cfg();
-    lcd_rect(10, 28, 300, 38, C.widget);
-    lcd_rect(10, 28, 4, 38, C.cyan);
-    lcd_text(20, 34, tr("SCREENSAVER AFTER"), C.gray, C.widget, 1);
-    lcd_text(20, 46, saver_label(cur), C.white, C.widget, 2);
+    let lab = tr("SCREENSAVER AFTER");
+    lcd_text(int((LCD_W - tlen(lab) * 6) / 2), 30, lab, C.gray, C.bg, 1);
 
-    let a = saver_btn(-1), z = saver_btn(1);
+    let a = saver_btn(-1), z = saver_btn(1), v = saver_val_box();
     lcd_rect(a.x, a.y, a.w, a.h, C.widget);
-    lcd_text(a.x + 30, a.y + 6, "-", C.accent, C.widget, 3);
+    lcd_text(a.x + 22, a.y + 3, "-", C.accent, C.widget, 3);
+    lcd_rect(v.x, v.y, v.w, v.h, C.widget);
+    let vs = saver_label(cur);
+    lcd_text(v.x + int((v.w - tlen(vs) * 6) / 2), v.y + 11, vs, C.white, C.widget, 1);
     lcd_rect(z.x, z.y, z.w, z.h, C.widget);
-    lcd_text(z.x + 30, z.y + 6, "+", C.accent, C.widget, 3);
-
-    let kb = blank_btn(), kt = tr("Blank now");
-    lcd_rect(kb.x, kb.y, kb.w, kb.h, C.widget);
-    lcd_rect(kb.x, kb.y, 3, kb.h, C.dim);
-    lcd_text(kb.x + int((kb.w - tlen(kt) * 12) / 2) + 2, kb.y + 9, kt,
-             C.white, C.widget, 2);
-
-    // Защита от выгорания
-    let bon = burnin_cfg();
-    lcd_text(20, 114, tr("BURN-IN SHIFT"), C.gray, C.bg, 1);
-    let bb = burnin_btn();
-    lcd_rect(bb.x, bb.y, bb.w, bb.h, C.widget);
-    lcd_rect(bb.x, bb.y, 3, bb.h, bon ? C.green : C.dim);
-    lcd_text(bb.x + 34, bb.y + 5, bon ? tr("on") : tr("off"),
-             bon ? C.white : C.gray, C.widget, 2);
+    lcd_text(z.x + 22, z.y + 3, "+", C.accent, C.widget, 3);
 
     // Вид заставки
     let stl = saver_style();
-    lcd_text(20, 142, tr("SCREENSAVER"), C.gray, C.bg, 1);
+    lcd_text(20, 82, tr("VIEW"), C.gray, C.bg, 1);
     for (let i = 0; i < length(SAVER_STYLES); i++) {
         let b = style_btn(i), sel = (SAVER_STYLES[i] == stl);
         lcd_rect(b.x, b.y, b.w, b.h, C.widget);
@@ -1951,18 +1897,38 @@ function draw_display_page() {
                  sel ? C.white : C.gray, C.widget, 1);
     }
 
-    lcd_text(20, 172, tr("LANGUAGE"), C.gray, C.bg, 1);
-    let cl = lang();
-    for (let code in [ "ru", "en" ]) {
-        let b = lang_btn(code);
-        let sel = (cl == code);
-        lcd_rect(b.x, b.y, b.w, b.h, sel ? C.btn : C.widget);
-        lcd_rect(b.x, b.y, 3, b.h, sel ? C.green : C.border);
-        lcd_text(b.x + 12, b.y + 8, code == "ru" ? "Русский" : "English",
-                 sel ? C.white : C.gray, sel ? C.btn : C.widget, 1);
+    // Ряд переключателей: гашение, сдвиг, ночь, язык.
+    let bon = burnin_cfg(), non = night_cfg().on, ru = (lang() == "ru");
+    let quads = [
+        [ tr("Blank now"), C.dim,                  C.white ],
+        [ tr("Shift") + " " + (bon ? tr("on") : tr("off")), bon ? C.green : C.dim, bon ? C.white : C.gray ],
+        [ tr("Night") + " " + (non ? tr("on") : tr("off")), non ? C.green : C.dim, non ? C.white : C.gray ],
+        [ ru ? "Ру / En" : "Ru / En",              C.cyan,                    C.white ],
+    ];
+    for (let i = 0; i < 4; i++) {
+        let b = quad_btn(i), q = quads[i];
+        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+        lcd_rect(b.x, b.y, 3, b.h, q[1]);
+        lcd_text(b.x + int((b.w - tlen(q[0]) * 6) / 2) + 2, b.y + 9, q[0], q[2], C.widget, 1);
     }
 
-    draw_back_pager(0, 2);
+    // Часы ночного режима.
+    let c = night_cfg();
+    let hcol = c.on ? C.white : C.dim;
+    lcd_text(14, 146, tr("NIGHT FROM"), C.gray, C.bg, 1);
+    lcd_text(166, 146, tr("NIGHT TO"), C.gray, C.bg, 1);
+    for (let r = 0; r < 2; r++) {
+        let m = hour_btn(r, -1), vb = hour_btn(r, 0), pl = hour_btn(r, 1);
+        let hv = sprintf("%02d", r == 0 ? c.from : c.to);
+        lcd_rect(m.x, m.y, m.w, m.h, C.widget);
+        lcd_text(m.x + 14, m.y + 3, "-", C.accent, C.widget, 3);
+        lcd_rect(vb.x, vb.y, vb.w, vb.h, C.widget);
+        lcd_text(vb.x + int((vb.w - tlen(hv) * 12) / 2), vb.y + 8, hv, hcol, C.widget, 2);
+        lcd_rect(pl.x, pl.y, pl.w, pl.h, C.widget);
+        lcd_text(pl.x + 14, pl.y + 3, "+", C.accent, C.widget, 3);
+    }
+
+    draw_back();
     lcd_flush();
 }
 
@@ -3077,8 +3043,11 @@ function handle_touch(tx, ty) {
         }
     }
 
-    // Back button (all sub-pages except menu)
-    if (st.page != "menu" && ty >= BACK_Y - 10) {
+    // Back button (all sub-pages except menu). Страницы со своей листалкой сюда
+    // не попадают: у них нижняя полоса поделена на стрелки и «назад», а общее
+    // правило «низ - это назад» съедало нажатия по стрелкам целиком.
+    if (st.page != "menu" && st.page != "sms" && st.page != "sms1" &&
+        ty >= BACK_Y - 10) {
         go_page("menu");
         return;
     }
@@ -3308,34 +3277,20 @@ function handle_touch(tx, ty) {
     }
 
     if (st.page == "display") {
-        // Полоса внизу общая для обеих страниц: стрелки листают, центр - назад.
-        let ph = pager_hit(tx, ty, st.dpg, 2);
-        if (ph == 2) { st.dpg = 0; go_page("menu"); return; }
-        if (ph != 0) { st.dpg += ph; draw_display_page(); return; }
+        let cur = saver_cfg();
+        let idx = 0;
+        for (let i = 0; i < length(SAVER_STEPS); i++)
+            if (SAVER_STEPS[i] == cur) idx = i;
 
-        if (st.dpg == 1) {
-            let nb = night_btn();
-            if (in_rect(tx, ty, nb.x, nb.y, nb.w, nb.h)) {
-                night_set("night", night_cfg().on ? "0" : "1");
-                draw_display_page();
-                return;
-            }
-            let c = night_cfg();
-            for (let r = 0; r < 2; r++) {
-                let key = r == 0 ? "night_from" : "night_to";
-                let val = r == 0 ? c.from : c.to;
-                let m = hour_btn(r, -1), pl = hour_btn(r, 1);
-                if (in_rect(tx, ty, m.x, m.y, m.w, m.h)) {
-                    night_set(key, (val + 23) % 24);
-                    draw_display_page();
-                    return;
-                }
-                if (in_rect(tx, ty, pl.x, pl.y, pl.w, pl.h)) {
-                    night_set(key, (val + 1) % 24);
-                    draw_display_page();
-                    return;
-                }
-            }
+        let a = saver_btn(-1), z = saver_btn(1);
+        if (in_rect(tx, ty, a.x, a.y, a.w, a.h)) {
+            saver_set(SAVER_STEPS[(idx + length(SAVER_STEPS) - 1) % length(SAVER_STEPS)]);
+            draw_display_page();
+            return;
+        }
+        if (in_rect(tx, ty, z.x, z.y, z.w, z.h)) {
+            saver_set(SAVER_STEPS[(idx + 1) % length(SAVER_STEPS)]);
+            draw_display_page();
             return;
         }
 
@@ -3347,41 +3302,39 @@ function handle_touch(tx, ty) {
                 return;
             }
         }
-        let kb = blank_btn();
-        if (in_rect(tx, ty, kb.x, kb.y, kb.w, kb.h)) {
-            st.screen = "screensaver";
-            st.saver_frame = 0;
-            set_blank(true);
-            return;
-        }
-        let bb = burnin_btn();
-        if (in_rect(tx, ty, bb.x, bb.y, bb.w, bb.h)) {
-            burnin_set(!burnin_cfg());
+
+        for (let i = 0; i < 4; i++) {
+            let b = quad_btn(i);
+            if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
+            switch (i) {
+            case 0:
+                st.screen = "screensaver";
+                st.saver_frame = 0;
+                set_blank(true);
+                return;
+            case 1: burnin_set(!burnin_cfg()); break;
+            case 2: night_set("night", night_cfg().on ? "0" : "1"); break;
+            case 3: lang_set(lang() == "ru" ? "en" : "ru"); break;
+            }
             draw_display_page();
             return;
         }
-        let cur = saver_cfg();
-        let idx = 0;
-        for (let i = 0; i < length(SAVER_STEPS); i++)
-            if (SAVER_STEPS[i] == cur) idx = i;
-        for (let code in [ "ru", "en" ]) {
-            let lb = lang_btn(code);
-            if (in_rect(tx, ty, lb.x, lb.y, lb.w, lb.h)) {
-                lang_set(code);
+
+        let c = night_cfg();
+        for (let r = 0; r < 2; r++) {
+            let key = r == 0 ? "night_from" : "night_to";
+            let val = r == 0 ? c.from : c.to;
+            let m = hour_btn(r, -1), pl = hour_btn(r, 1);
+            if (in_rect(tx, ty, m.x, m.y, m.w, m.h)) {
+                night_set(key, (val + 23) % 24);
                 draw_display_page();
                 return;
             }
-        }
-        let a = saver_btn(-1), z = saver_btn(1);
-        if (in_rect(tx, ty, a.x, a.y, a.w, a.h)) {
-            saver_set(SAVER_STEPS[(idx + length(SAVER_STEPS) - 1) % length(SAVER_STEPS)]);
-            draw_display_page();
-            return;
-        }
-        if (in_rect(tx, ty, z.x, z.y, z.w, z.h)) {
-            saver_set(SAVER_STEPS[(idx + 1) % length(SAVER_STEPS)]);
-            draw_display_page();
-            return;
+            if (in_rect(tx, ty, pl.x, pl.y, pl.w, pl.h)) {
+                night_set(key, (val + 1) % 24);
+                draw_display_page();
+                return;
+            }
         }
         return;
     }
