@@ -43,7 +43,7 @@ The repository is an OpenWrt feed with two packages:
 ```sh
 scp prebuilt/25.12.5/*.apk root@192.168.1.1:/tmp/
 ssh root@192.168.1.1
-apk add --allow-untrusted /tmp/kmod-lcd-almond3s-6.12.94-r1.apk /tmp/lcd-ui-1.apk
+apk add --allow-untrusted /tmp/kmod-lcd-almond3s-*.apk /tmp/lcd-ui-*.apk
 reboot
 ```
 

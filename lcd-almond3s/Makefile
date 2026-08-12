@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=lcd-almond3s
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -21,8 +21,15 @@ define KernelPackage/lcd-almond3s/description
  RGB565 framebuffer at /dev/lcd.
 endef
 
+# Версия драйвера - дата сборки, её видно на экране в «Инфо». Именно дата
+# сборки, а не SOURCE_DATE_EPOCH: тот берётся из даты коммита дерева OpenWrt и
+# не меняется, сколько драйвер ни правь, - на экране был бы вечный 2026-06-29.
+PKG_BUILD_DATE:=$(shell date -u +%Y-%m-%d)
+
 define Build/Compile
-	$(KERNEL_MAKE) M="$(PKG_BUILD_DIR)" modules
+	$(KERNEL_MAKE) M="$(PKG_BUILD_DIR)" \
+		EXTRA_CFLAGS="-DLCD_DRV_BUILD=\\\"$(PKG_BUILD_DATE)\\\"" \
+		modules
 endef
 
 $(eval $(call KernelPackage,lcd-almond3s))

@@ -128,6 +128,8 @@ let T = {
 
 // Layout
 let HDR_H   = 22;
+let TG_LINK = "t.me/openwrt_fun";
+
 let COLS    = 2;
 let BTN_PAD = 4;
 let BTN_W   = ((LCD_W - (BTN_PAD * 3)) / 2); // 154
@@ -1921,7 +1923,7 @@ function draw_info_page() {
     let badc = int(+(bat?.adc ?? 0));
     let bpct = int(+(bat?.percent ?? 0));
 
-    // lcd_drv version (via touch_poll version helper)
+    // Версия драйвера - дата сборки, отдаётся ioctl'ом через touch_poll.
     let drv_ver = "?";
     let p = fs.popen("touch_poll version 2>/dev/null", "r");
     if (p) {
@@ -1964,7 +1966,8 @@ function draw_info_page() {
     lcd_text(cx + 10, y3 + 6, tr("SOFTWARE"), C.gray, C.widget, 1);
     lcd_text(cx + 10, y3 + 20, sprintf("OpenWrt %s", board?.release?.version ?? "?"), C.white, C.widget, 1);
     lcd_text(cx + 10, y3 + 32, sprintf(tr("Kernel %s"), board?.kernel ?? "?"), C.dim, C.widget, 1);
-    lcd_text(cx + 10, y3 + 44, sprintf("lcd_drv %s", drv_ver), C.accent, C.widget, 1);
+    lcd_text(cx + 10, y3 + 44, sprintf("almond3s-lcd %s", drv_ver), C.accent, C.widget, 1);
+    lcd_text(cx + cw - 10 - tlen(TG_LINK) * 6, y3 + 44, TG_LINK, C.dim, C.widget, 1);
 
     draw_back();
     lcd_flush();

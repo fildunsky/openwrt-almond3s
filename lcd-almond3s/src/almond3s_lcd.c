@@ -29,7 +29,7 @@
 #include "pic_calib.h"
 
 #define DEVICE_NAME  "lcd"
-#define LCD_DRV_VERSION "V260401"
+/* Версия драйвера - дата сборки, её подставляет пакетный Makefile. */
 #ifndef LCD_DRV_BUILD
 #define LCD_DRV_BUILD "unknown"
 #endif
@@ -1595,7 +1595,7 @@ static long lcd_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
         /* Version info: copy "v1.0 Mar 22 2026 18:00:00" to userspace */
         char ver[64];
         int len;
-        len = snprintf(ver, sizeof(ver), "v%s %s", LCD_DRV_VERSION, LCD_DRV_BUILD);
+        len = snprintf(ver, sizeof(ver), "%s", LCD_DRV_BUILD);
         if (copy_to_user((void __user *)arg, ver, len + 1))
             return -EFAULT;
         return 0;
@@ -1940,7 +1940,7 @@ static int __init lcd_drv_init(void)
     touch_thread = kthread_run(touch_fn, NULL, "lcd_touch");
 
     pr_info("%s by Sublimity — START (fb=%dx%d, %d bytes)\n",
-            LCD_DRV_VERSION, LCD_W, LCD_H, FB_SIZE);
+            LCD_DRV_BUILD, LCD_W, LCD_H, FB_SIZE);
     return 0;
 }
 
@@ -1953,12 +1953,12 @@ static void __exit lcd_drv_exit(void)
     vfree(framebuffer);
     kfree(fb_pages);
     if (gpio_base) iounmap(gpio_base);
-    pr_info("%s by Sublimity — STOP\n", LCD_DRV_VERSION);
+    pr_info("%s by Sublimity — STOP\n", LCD_DRV_BUILD);
 }
 
 module_init(lcd_drv_init);
 module_exit(lcd_drv_exit);
-MODULE_VERSION(LCD_DRV_VERSION);
+MODULE_VERSION(LCD_DRV_BUILD);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("ILI9341 LCD + SX8650 Touch + PIC16 Battery for Almond 3S");
 MODULE_AUTHOR("Sublimity");
