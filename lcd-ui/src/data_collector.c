@@ -422,8 +422,16 @@ static int get_lte_from_5gmodem(struct lte_info *li) {
         for (b = li->band; *b; b++)
             if (*b == '+') li->nca++;
         if (li->band[0]) li->nca++;
-        sep = strstr(mode, " | ");
+        /* 5gmodem отдаёт режим как "LTE | B7 (FDD 2600 MHz)", а на простом LTE
+         * без агрегации - как "LTE |": хвост пустой, но палка остаётся. Режем
+         * по первой палке и подчищаем пробелы, иначе она уезжала на экран. */
+        sep = strchr(mode, '|');
         if (sep) *sep = 0;
+        {
+            size_t n = strlen(mode);
+            while (n > 0 && (mode[n - 1] == ' ' || mode[n - 1] == '\t'))
+                mode[--n] = 0;
+        }
         snprintf(li->mode, sizeof(li->mode), "%s", mode);
     }
 
