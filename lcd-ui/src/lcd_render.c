@@ -167,8 +167,37 @@ static const uint8_t font5x7_cyr[66][5] = {
     {0x7C,0x55,0x54,0x55,0x44},{0x38,0x55,0x54,0x55,0x18},
 };
 
+/* Спецсимволы: то, что реально встречается в SMS операторов и в нашем
+   интерфейсе. Ищем перебором - записей мало, а таблица разрежена. */
+static const struct { uint16_t cp; uint8_t g[5]; } font5x7_sym[] = {
+    { 0x00B0, {0x02,0x05,0x05,0x02,0x00} },   /* degree */
+    { 0x00AB, {0x08,0x14,0x2A,0x14,0x22} },   /* laquo */
+    { 0x00BB, {0x22,0x14,0x2A,0x14,0x08} },   /* raquo */
+    { 0x2116, {0x1F,0x06,0x1F,0x20,0x23} },   /* numero */
+    { 0x20BD, {0x20,0x7F,0x29,0x29,0x26} },   /* rouble */
+    { 0x2192, {0x08,0x08,0x2A,0x1C,0x08} },   /* rarr */
+    { 0x2190, {0x08,0x1C,0x2A,0x08,0x08} },   /* larr */
+    { 0x2191, {0x04,0x02,0x7F,0x02,0x04} },   /* uarr */
+    { 0x2193, {0x10,0x20,0x7F,0x20,0x10} },   /* darr */
+    { 0x2197, {0x10,0x09,0x05,0x03,0x07} },   /* nearr */
+    { 0x2198, {0x01,0x12,0x14,0x18,0x1C} },   /* searr */
+    { 0x2196, {0x07,0x03,0x05,0x09,0x10} },   /* nwarr */
+    { 0x2199, {0x1C,0x18,0x14,0x12,0x01} },   /* swarr */
+    { 0x2022, {0x00,0x1C,0x1C,0x1C,0x00} },   /* bullet */
+    { 0x2713, {0x08,0x10,0x20,0x1C,0x02} },   /* check */
+    { 0x2026, {0x40,0x00,0x40,0x00,0x40} },   /* hellip */
+    { 0x2013, {0x08,0x08,0x08,0x08,0x08} },   /* ndash */
+    { 0x2014, {0x08,0x08,0x08,0x08,0x08} },   /* mdash */
+    { 0x2011, {0x00,0x08,0x08,0x08,0x00} },   /* nbhyph */
+    { 0x201C, {0x03,0x00,0x03,0x00,0x00} },   /* ldquo */
+    { 0x201D, {0x03,0x00,0x03,0x00,0x00} },   /* rdquo */
+    { 0x2018, {0x00,0x00,0x03,0x00,0x00} },   /* lsquo */
+    { 0x2019, {0x00,0x00,0x03,0x00,0x00} },   /* rsquo */
+};
+
 /* cp - код символа Unicode. Латиница берётся из font5x7, кириллица - из
-   font5x7_cyr; порядок там юникодный, поэтому индекс это арифметика. */
+   font5x7_cyr (порядок юникодный, индекс - арифметика), остальное ищем в
+   font5x7_sym. */
 static void fb_char(int x, int y, unsigned cp, uint16_t fg, uint16_t bg, int scale)
 {
     const uint8_t *g;
@@ -178,6 +207,13 @@ static void fb_char(int x, int y, unsigned cp, uint16_t fg, uint16_t bg, int sca
     else if (cp >= 0x0430 && cp <= 0x044F) g = font5x7_cyr[32 + (cp - 0x0430)];
     else if (cp == 0x0401)                 g = font5x7_cyr[64];
     else if (cp == 0x0451)                 g = font5x7_cyr[65];
+    else if (cp > 0x7F) {
+        unsigned i;
+        g = NULL;
+        for (i = 0; i < sizeof(font5x7_sym) / sizeof(font5x7_sym[0]); i++)
+            if (font5x7_sym[i].cp == cp) { g = font5x7_sym[i].g; break; }
+        if (!g) g = font5x7[0];   /* нечем рисовать - пробел, а не мусор */
+    }
     else {
         int idx = (int)cp - 32;
         if (idx < 0 || idx > 95) idx = 0;
@@ -209,8 +245,9 @@ static void fb_text(int x, int y, const char *s, uint16_t fg, uint16_t bg, int s
             cp = ((unsigned)(*p & 0x1F) << 6) | (p[1] & 0x3F);
             p += 2;
         } else if ((*p & 0xF0) == 0xE0 && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80) {
-            p += 3;   /* трёхбайтовые рисовать нечем - пропускаем целиком */
-            continue;
+            cp = ((unsigned)(*p & 0x0F) << 12) | ((unsigned)(p[1] & 0x3F) << 6)
+                 | (p[2] & 0x3F);
+            p += 3;
         } else {
             cp = *p;
             p++;

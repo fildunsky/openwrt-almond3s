@@ -1460,17 +1460,14 @@ function sms_clean(t) {
     if (!t) return "";
     t = replace(t, /\xff\xff+/g, "");
     t = replace(t, /ÿffffa0/g, " ");
-    t = replace(t, /ÿffffab/g, "\"");
-    t = replace(t, /ÿffffbb/g, "\"");
+    t = replace(t, /ÿffffab/g, "«");
+    t = replace(t, /ÿffffbb/g, "»");
     t = replace(t, /ÿffff[0-9a-f][0-9a-f]/g, "");
-    t = replace(t, /→/g, "->");
-    t = replace(t, /‑/g, "-");
-    t = replace(t, /–/g, "-");
-    t = replace(t, /—/g, "-");
-    t = replace(t, /«/g, "\"");
-    t = replace(t, /»/g, "\"");
-    t = replace(t, /…/g, "...");
+    // Ёлочки, тире, стрелки и прочее теперь есть в шрифте - не трогаем.
+    // Неразрывный пробел заменяем обязательно: он не только не рисуется, но и
+    // не разделяет слова при переносе - строка резалась бы посреди слова.
     t = replace(t, /\u00a0/g, " ");
+    t = replace(t, /\u202f/g, " ");
     return t;
 }
 
@@ -1481,6 +1478,34 @@ function sms_refresh() {
     // держит наши дескрипторы и ucode ждёт его завершения.
     system("(/usr/share/5gmodem/smsbridge.sh recv > " + SMS_CACHE + ".new 2>/dev/null" +
            " && mv " + SMS_CACHE + ".new " + SMS_CACHE + ") >/dev/null 2>&1 &");
+}
+
+// Отправитель: цифровой номер приводим к виду +7 (962) 699-90-32 - так же, как
+// на «Входящих» в 5gmodem. Буквенные имена вроде «T-Mob» phone_fmt вернёт как
+// есть, поэтому проверять тип отправителя отдельно не нужно.
+function sms_from(raw) {
+    let f = phone_fmt(raw);
+    if (f == "") return raw ?? "?";
+    // В списке место делится с отметкой времени, поэтому пробелы убираем:
+    // «+7(962)699-90-32» - те же данные, но 16 знаков вместо 18. На карточке
+    // модема номер остаётся с пробелами, там ширина не поджимает.
+    return replace(f, / /g, "");
+}
+
+// В карточке отметка времени делит ширину с отправителем, а формат номера
+// съедает 18 знаков. Поэтому у сегодняшних показываем время, у остальных -
+// дату: и то, и другое укладывается в пять знаков.
+function sms_short_time(t) {
+    t = t ?? "";
+    let p = split(trim(t), " ");
+    if (length(p) < 2) return t;
+    let d = split(p[0], "-");
+    if (length(d) < 3) return t;
+    let now = localtime();
+    if (now && int(+d[0]) == now.year && int(+d[1]) == now.mon &&
+        int(+d[2]) == now.mday)
+        return substr(p[1], 0, 5);
+    return sprintf("%s.%s", d[2], d[1]);
 }
 
 function sms_unread() {
@@ -1614,8 +1639,9 @@ function draw_sms_page() {
         let neu = exists(unread, m.key);
         lcd_rect(10, y, 300, 40, C.widget);
         lcd_rect(10, y, 4, 40, neu ? C.green : C.dim);
-        lcd_text(20, y + 5, tcut(m.sender, 14), neu ? C.white : C.gray, C.widget, 2);
-        lcd_text(310 - tlen(m.time) * 6 - 8, y + 8, m.time, C.dim, C.widget, 1);
+        let from = sms_from(m.sender), when = sms_short_time(m.time);
+        lcd_text(20, y + 5, tcut(from, 18), neu ? C.white : C.gray, C.widget, 2);
+        lcd_text(310 - tlen(when) * 6 - 8, y + 8, when, C.dim, C.widget, 1);
         lcd_text(20, y + 25, tcut(replace(m.text, /\n/g, " "), 47),
                  neu ? C.white : C.gray, C.widget, 1);
     }
@@ -1634,7 +1660,7 @@ function draw_sms_one() {
     if (!m) { st.page = "sms"; draw_sms_page(); return; }
 
     lcd_rect(10, 28, 300, 22, C.widget);
-    lcd_text(20, 34, tcut(m.sender, 16), C.white, C.widget, 1);
+    lcd_text(20, 34, tcut(sms_from(m.sender), 24), C.white, C.widget, 1);
     lcd_text(310 - tlen(m.time) * 6 - 8, 34, m.time, C.dim, C.widget, 1);
 
     let lines = sms_wrap(m.text, SMS_COLS);

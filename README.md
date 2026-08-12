@@ -140,6 +140,10 @@ package on install.
 * **Display** — screensaver style and timeout, language
 * Header shows an envelope when `luci-app-5gmodem` reports unread SMS
 
+The 5x7 font carries ASCII, Cyrillic and the punctuation that actually turns up
+in operator SMS and on the pages: `° « » № ₽ → ← ↑ ↓ ↖ ↗ ↘ ↙ • ✓ … – — “ ” ‘ ’`.
+Anything else falls back to a blank rather than a garbage glyph.
+
 ## Debugging the layout
 
 `lcdshot` dumps the framebuffer as a PPM, so you can see exactly what the panel

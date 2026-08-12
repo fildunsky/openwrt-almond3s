@@ -61,12 +61,8 @@ else
 fi
 
 if [ "$rc" -eq 0 ] && [ -s "$TMP" ]; then
-    # Кириллицу теперь оставляем - её есть чем рисовать. Убираем только то,
-    # чего в шрифте нет: знак градуса и стрелки направления ветра.
-    sed -e 's/°//g' \
-        -e 's/↑//g' -e 's/↓//g' -e 's/←//g' -e 's/→//g' \
-        -e 's/↖//g' -e 's/↗//g' -e 's/↘//g' -e 's/↙//g' \
-        < "$TMP" > "$TMP.clean" && mv "$TMP.clean" "$TMP"
+    # Раньше здесь вырезались градус и стрелки ветра - рисовать их было нечем.
+    # Теперь они есть в шрифте, и ответ wttr.in идёт на экран как есть.
 
     # Append the city name as field 6 (see DISPLAY_CITY above). Strip any
     # trailing newline from wttr.in's output first so we get one clean line.
