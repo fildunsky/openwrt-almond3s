@@ -8,7 +8,6 @@ start_service() {
 	[ -c /dev/lcd ] || return
 
 	echo -n "touch_start" > /dev/lcd 2>/dev/null
-	sleep 1
 
 	procd_open_instance lcd_render
 	procd_set_param command /usr/bin/lcd_render
@@ -25,8 +24,6 @@ start_service() {
 	procd_set_param respawn
 	procd_close_instance
 
-	sleep 2
-
 	procd_open_instance lcd_ui
 	procd_set_param command /usr/bin/ucode /usr/bin/lcd_ui.uc
 	procd_set_param respawn
@@ -34,6 +31,14 @@ start_service() {
 	procd_close_instance
 }
 
+# Подчищаем за собой ЯВНО. Раньше здесь глушился только touch_poll, а внутри
+# start_service стояли sleep - и два перезапуска подряд (например, postinst
+# пакета и ручной restart) успевали наплодить вторые копии: старый lcd_ui
+# продолжал рисовать по старому коду, а старый data_collector - переписывать
+# снимок, из-за чего правки «не применялись».
 stop_service() {
-	killall touch_poll 2>/dev/null
+	killall lcd_render touch_poll data_collector 2>/dev/null
+	for _p in $(pgrep -f "ucode /usr/bin/lcd_ui.uc" 2>/dev/null); do
+		kill "$_p" 2>/dev/null
+	done
 }

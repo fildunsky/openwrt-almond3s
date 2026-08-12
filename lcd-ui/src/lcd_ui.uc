@@ -825,6 +825,35 @@ function lte_quality(rsrp) {
 // Подпись на кнопке «Модем»: раньше там было качество сигнала («ОК»), что
 // ничего не говорило о состоянии. Дозвонился - показываем адрес, не дозвонился
 // - на какой стадии застряли.
+// Телефонный ярлык технологии - тот же, что в 5gmodem (mutil.js: ratLabel):
+// LTE-A -> 4G+, LTE -> 4G, HSPA -> H+ и так далее. Порядок правил важен:
+// «LTE-A» должно проверяться раньше «LTE», иначе останется «4G-A».
+let RAT_LABELS = [
+    [ /^5G[ -]?SA\b/,  "5G"  ],
+    [ /^5G[ -]?NSA\b/, "5G"  ],
+    [ /^5G\b/,         "5G"  ],
+    [ /^LTE-A\b/,      "4G+" ],
+    [ /^LTE\b/,        "4G"  ],
+    [ /^HSPA\+/,       "H+"  ],
+    [ /^HSPA\b/,       "H+"  ],
+    [ /^HSDPA\b/,      "H"   ],
+    [ /^HSUPA\b/,      "H"   ],
+    [ /^UMTS\b/,       "3G"  ],
+    [ /^WCDMA\b/,      "3G"  ],
+    [ /^EDGE\b/,       "E"   ],
+    [ /^GPRS\b/,       "2G"  ],
+    [ /^GSM\b/,        "2G"  ],
+];
+
+function rat_label(mv) {
+    mv = trim(mv ?? "");
+    if (mv == "") return mv;
+    for (let r in RAT_LABELS)
+        if (match(mv, r[0]))
+            return replace(mv, r[0], r[1]);
+    return mv;
+}
+
 function modem_status(l) {
     let ip = l?.ip ?? "";
     if (ip != "" && ip != "-") return ip;
@@ -2619,7 +2648,7 @@ function draw_lte_page() {
 
     // Правая колонка идёт без подписей: «LTE», «45°C» и «SIM 1» говорят сами
     // за себя, а подписи только съедали ширину.
-    let mode_s = l.mode ?? "-";
+    let mode_s = rat_label(l.mode ?? "-");
     if (nca > 1) mode_s += sprintf(" %dCA", nca);
     lcd_text(rx(mode_s), y1 + 5, mode_s, C.cyan, C.widget, 1);
 
