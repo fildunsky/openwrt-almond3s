@@ -252,7 +252,7 @@ let TR_RU = {
     "No Clients": "Нет клиентов",
     "Traffic": "Трафик",
     "UPLINK - %s": "АПЛИНК - %s",
-    "Back to dash": "управления",
+    "IP & clients": "адреса и клиенты",
     "MORE >>>": "ЕЩЁ >>>",
     "<<< BACK": "<<< НАЗАД",
     "< BACK": "< НАЗАД",
@@ -1395,7 +1395,7 @@ function draw_menu() {
 
     if (st.mpg == 1) {
         // 1: Сеть
-        draw_btn(1, tr("Network"), tr("Back to dash"), C.white, C.gray);
+        draw_btn(1, tr("Network"), tr("IP & clients"), C.white, C.gray);
 
         // 2: WiFi
         let nc = type(d?.wifi?.clients) == "array" ? length(d.wifi.clients) : 0;
