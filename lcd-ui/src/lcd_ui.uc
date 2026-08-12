@@ -99,6 +99,12 @@ function phone_fmt(raw) {
     return s;
 }
 
+// Компактный номер: «+7(993)335-01-29» - те же данные, что и с пробелами, но
+// 16 знаков вместо 18. Используем везде, где номер делит строку с чем-то ещё.
+function phone_short(raw) {
+    return replace(phone_fmt(raw), / /g, "");
+}
+
 function tcut(s, max) {
     s ??= "";
     if (tlen(s) <= max) return s;
@@ -264,9 +270,7 @@ let TR_RU = {
     "IP & clients": "адреса и клиенты",
     "Model": "Модель",
     "Band": "Диапазон",
-    "Mode": "Режим",
     "Number": "Номер",
-    "Temp": "Темп.",
     "SMS": "СМС",
     "inbox": "входящие",
     "%d new": "новых: %d",
@@ -1489,12 +1493,8 @@ function sms_refresh() {
 // на «Входящих» в 5gmodem. Буквенные имена вроде «T-Mob» phone_fmt вернёт как
 // есть, поэтому проверять тип отправителя отдельно не нужно.
 function sms_from(raw) {
-    let f = phone_fmt(raw);
-    if (f == "") return raw ?? "?";
-    // В списке место делится с отметкой времени, поэтому пробелы убираем:
-    // «+7(962)699-90-32» - те же данные, но 16 знаков вместо 18. На карточке
-    // модема номер остаётся с пробелами, там ширина не поджимает.
-    return replace(f, / /g, "");
+    let f = phone_short(raw);
+    return f != "" ? f : (raw ?? "?");
 }
 
 // В карточке отметка времени делит ширину с отправителем, а формат номера
@@ -2489,8 +2489,11 @@ function draw_lte_page() {
     lcd_rect(cx, y1, cw, 46, C.widget);
     lcd_rect(cx, y1, 4, 46, C.green);
 
-    let LX1 = cx + 10,  VX1 = cx + 64;    // левая колонка: подпись, значение
-    let LX2 = cx + 158, VX2 = cx + 212;   // правая колонка
+    let LX1 = cx + 10, VX1 = cx + 64;   // левая колонка: подпись, значение
+    // Правая колонка - только значения, и они прижаты к правому краю карточки
+    // с тем же отступом, что CSQ в «Сигнале»: длина у них разная, а край общий.
+    let REDGE = cx + cw - 10;
+    let rx = function(t) { return REDGE - tlen(t) * 6; };
 
     // Модель длиннее колонки обрезаем не как попало: сперва выбрасываем имя
     // вендора («Telit LM960A18-ENS» -> «LM960A18-ENS»), от него толку меньше,
@@ -2503,35 +2506,45 @@ function draw_lte_page() {
     lcd_text(LX1, y1 + 5, tr("Model"), C.gray, C.widget, 1);
     lcd_text(VX1, y1 + 5, tcut(model, 15), C.white, C.widget, 1);
 
+    // Правая колонка идёт без подписей: «LTE», «45°C» и «SIM 1» говорят сами
+    // за себя, а подписи только съедали ширину.
     let mode_s = l.mode ?? "-";
     if (nca > 1) mode_s += sprintf(" %dCA", nca);
-    lcd_text(LX2, y1 + 5, tr("Mode"), C.gray, C.widget, 1);
-    lcd_text(VX2, y1 + 5, mode_s, C.cyan, C.widget, 1);
+    lcd_text(rx(mode_s), y1 + 5, mode_s, C.cyan, C.widget, 1);
 
     lcd_text(LX1, y1 + 19, tr("Band"), C.gray, C.widget, 1);
     lcd_text(VX1, y1 + 19, tcut(l.band ?? "-", 15), C.accent, C.widget, 1);
 
-    lcd_text(LX2, y1 + 19, tr("Temp"), C.gray, C.widget, 1);
     if (temp > 0) {
         let tc = temp >= 70 ? C.red : (temp >= 55 ? C.yellow : C.white);
-        lcd_text(VX2, y1 + 19, sprintf("%d°C%s", temp,
-                 int(+(l.therm ?? 0)) > 0 ? " !" : ""), tc, C.widget, 1);
+        let ts = sprintf("%d°C%s", temp, int(+(l.therm ?? 0)) > 0 ? " !" : "");
+        lcd_text(rx(ts), y1 + 19, ts, tc, C.widget, 1);
     } else {
-        lcd_text(VX2, y1 + 19, "-", C.dim, C.widget, 1);
+        lcd_text(rx("-"), y1 + 19, "-", C.dim, C.widget, 1);
     }
 
     // Номеру нужна вся ширина строки: с форматированием это 16 знаков, в
     // колонку он не влезал. Справа от него - слот и роуминг.
-    let phone = phone_fmt(l.phone);
+    let phone = phone_short(l.phone);
     lcd_text(LX1, y1 + 33, tr("Number"), C.gray, C.widget, 1);
     lcd_text(VX1, y1 + 33, phone != "" ? phone : "-",
              phone != "" ? C.white : C.dim, C.widget, 1);
 
+    // Слот и роуминг прижимаем тем же краем, но цвета разные - поэтому считаем
+    // ширину пары целиком, а рисуем двумя кусками.
     let slot = int(+(l.simslot ?? 0));
-    if (slot > 0)
-        lcd_text(VX2, y1 + 33, sprintf(tr("SIM %d"), slot), C.gray, C.widget, 1);
-    if (int(+(l.roaming ?? 0)) > 0)
-        lcd_text(VX2 + 44, y1 + 33, tr("ROAM"), C.yellow, C.widget, 1);
+    let sim_s = slot > 0 ? sprintf(tr("SIM %d"), slot) : "";
+    let roam_s = int(+(l.roaming ?? 0)) > 0 ? tr("ROAM") : "";
+    let tail = roam_s != "" ? (sim_s != "" ? roam_s + " " + sim_s : roam_s) : sim_s;
+    if (tail != "") {
+        let tx0 = rx(tail);
+        if (roam_s != "") {
+            lcd_text(tx0, y1 + 33, roam_s, C.yellow, C.widget, 1);
+            tx0 += (tlen(roam_s) + 1) * 6;
+        }
+        if (sim_s != "")
+            lcd_text(tx0, y1 + 33, sim_s, C.gray, C.widget, 1);
+    }
 
     // Card 2: radio metrics with the same scales as the web dashboard
     let y2 = y1 + 52;
@@ -2551,19 +2564,25 @@ function draw_lte_page() {
     lcd_rect(cx, y3, cw, 58, C.widget);
     lcd_rect(cx, y3, 4, 58, "#D2A8FF");
     lcd_text(cx + 10, y3 + 6, tr("CELL / NETWORK"), C.gray, C.widget, 1);
+    // Три колонки с общими краями: слева, по центру карточки и по правому краю
+    // с тем же отступом, что и в карточках выше.
+    let enb_s = sprintf("eNB %d", int(+(u?.enb_id ?? 0)));
+    let earf_s = sprintf("EARFCN %d", int(+(l.earfcn ?? 0)));
     lcd_text(cx + 10, y3 + 18, sprintf("PCI %d", int(+(u?.pci ?? 0))), C.white, C.widget, 1);
-    lcd_text(cx + 85, y3 + 18, sprintf("eNB %d", int(+(u?.enb_id ?? 0))), C.white, C.widget, 1);
-    lcd_text(cx + 180, y3 + 18, sprintf("EARFCN %d", int(+(l.earfcn ?? 0))), C.white, C.widget, 1);
+    lcd_text(cx + int((cw - tlen(enb_s) * 6) / 2), y3 + 18, enb_s, C.white, C.widget, 1);
+    lcd_text(rx(earf_s), y3 + 18, earf_s, C.white, C.widget, 1);
 
     let mcc = int(+(u?.mcc ?? 0)), mnc = int(+(u?.mnc ?? 0));
     let plmn_name = get_plmn_name(mcc, mnc);
     lcd_text(cx + 10, y3 + 30, l.operator ?? "Unknown", C.white, C.widget, 1);
-    if (mcc > 0)
-        lcd_text(cx + 150, y3 + 30, sprintf("%d-%02d%s", mcc, mnc,
-            plmn_name ? " " + plmn_name : ""), C.gray, C.widget, 1);
+    if (mcc > 0) {
+        let plmn_s = sprintf("%d-%02d%s", mcc, mnc, plmn_name ? " " + plmn_name : "");
+        lcd_text(rx(plmn_s), y3 + 30, plmn_s, C.gray, C.widget, 1);
+    }
 
+    let conn_s = conn_fmt(l.conn_time);
     lcd_text(cx + 10, y3 + 42, l.ip ?? "-", C.green, C.widget, 1);
-    lcd_text(cx + 150, y3 + 42, conn_fmt(l.conn_time), C.gray, C.widget, 1);
+    lcd_text(rx(conn_s), y3 + 42, conn_s, C.gray, C.widget, 1);
 
     draw_back();
     lcd_flush();
