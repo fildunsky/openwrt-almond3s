@@ -82,8 +82,8 @@ screen itself, under `Menu → More → Display`:
 
 ```sh
 uci set lcd.display.lang='ru'          # ru | en
-uci set lcd.display.saver='300'        # seconds until the screensaver, 0 disables it
-uci set lcd.display.saver_style='full' # full (weather) | clock | line | off
+uci set lcd.display.saver='60'          # seconds until the screensaver, 0 disables it
+uci set lcd.display.saver_style='clock' # clock | full (weather) | line | off
 uci set lcd.weather.city='Voronezh'
 uci commit lcd
 /etc/init.d/lcd_ui restart
