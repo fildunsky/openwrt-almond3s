@@ -2875,15 +2875,19 @@ function backlight_path() {
     return bl_path;
 }
 
+function backlight_write(on) {
+    let p = backlight_path();
+    if (p != "")
+        system(sprintf("echo %d > %s", on ? 1 : 0, p));
+    else
+        system(sprintf("touch_poll b %d >/dev/null 2>&1", on ? 1 : 0));
+}
+
 // Тач работает независимо от подсветки, поэтому разбудить экран можно пальцем.
 function set_blank(on) {
     if (st.blank == on) return;
     st.blank = on;
-    let p = backlight_path();
-    if (p != "")
-        system(sprintf("echo %d > %s", on ? 0 : 1, p));
-    else
-        system(sprintf("touch_poll b %d >/dev/null 2>&1", on ? 0 : 1));
+    backlight_write(!on);
 }
 
 function run_script(name, bg) {
@@ -3421,9 +3425,14 @@ function main() {
     // Wait for lcd_drv splash logo
     system("sleep 3");
 
-    // Подсветку включаем безусловно: если демон перезапустили с погашенным
-    // экраном, st.blank начнётся с false и сама она уже не включится.
-    system("touch_poll b 1 >/dev/null 2>&1");
+    // Подсветку включаем безусловно и ИМЕННО через светодиод: если демон
+    // перезапустили с погашенным экраном, st.blank начнётся с false и сама она
+    // уже не включится. Сначала 0, потом 1 - нужен настоящий переход: пин мог
+    // остаться поднятым ioctl'ом мимо светодиода (так было до этой правки), и
+    // тогда запись того же значения в brightness ничего бы не сделала, а экран
+    // «горел и горел» - гашение по таймауту молча превращалось в no-op.
+    backlight_write(false);
+    backlight_write(true);
 
     // Stop splash: ioctl(0) via flush
     system("printf '\\0' > /dev/lcd 2>/dev/null");
