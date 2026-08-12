@@ -14,10 +14,11 @@ REQ=/tmp/lcd_screen_req
 
 # Без работающего lcd_ui запрос никто не подхватит - тогда дёргаем светодиод
 # подсветки напрямую, иначе команда молча ничего не сделает.
+# Имя светодиода зависит от DTS (без цвета «:power», с белым «white:power»),
+# поэтому ищем маской, а не по списку.
 LED=""
-for l in /sys/class/leds/:power /sys/class/leds/display:power \
-	 /sys/class/leds/display_power; do
-	[ -e "$l/brightness" ] && { LED="$l/brightness"; break; }
+for l in /sys/class/leds/*power/brightness /sys/class/leds/*power*/brightness; do
+	[ -e "$l" ] && { LED="$l"; break; }
 done
 
 direct() {

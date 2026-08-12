@@ -2514,15 +2514,19 @@ let SCREEN_REQ = "/tmp/lcd_screen_req";
 // с прежним значением brightness, и любая перезагрузка триггеров светодиода
 // вернёт подсветку сама по себе. ioctl оставлен запасным путём - на случай, если
 // светодиода в DTS нет.
-let BL_LEDS = [ "/sys/class/leds/:power/brightness",
-                "/sys/class/leds/display:power/brightness",
-                "/sys/class/leds/display_power/brightness" ];
+// Имя светодиода собирается ядром из color и function, поэтому оно зависит от
+// DTS: без цвета получается «:power», с белым - «white:power». Ищем маской,
+// чтобы не переписывать список при каждой правке дерева.
+let BL_GLOBS = [ "/sys/class/leds/*power/brightness",
+                 "/sys/class/leds/*power*/brightness" ];
 let bl_path = null;
 
 function backlight_path() {
     if (bl_path != null) return bl_path;
-    for (let p in BL_LEDS)
-        if (fs.stat(p)) { bl_path = p; return bl_path; }
+    for (let g in BL_GLOBS) {
+        let m = fs.glob(g);
+        if (length(m) > 0) { bl_path = m[0]; return bl_path; }
+    }
     bl_path = "";
     return bl_path;
 }
