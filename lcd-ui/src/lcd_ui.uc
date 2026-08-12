@@ -256,6 +256,7 @@ let TR_RU = {
     "Traffic": "Трафик",
     "UPLINK - %s": "АПЛИНК - %s",
     "IP & clients": "адреса и клиенты",
+    "Blank now": "Погасить",
     "MORE >>>": "ЕЩЁ >>>",
     "<<< BACK": "<<< НАЗАД",
     "< BACK": "< НАЗАД",
@@ -925,6 +926,10 @@ function saver_btn(which) {
                      : { x: 220, y: 70, w: 80, h: 32 };
 }
 
+function blank_btn() {
+    return { x: 104, y: 70, w: 112, h: 32 };
+}
+
 function burnin_btn() {
     return { x: 200, y: 108, w: 100, h: 24 };
 }
@@ -1543,6 +1548,12 @@ function draw_display_page() {
     lcd_text(a.x + 30, a.y + 6, "-", C.accent, C.widget, 3);
     lcd_rect(z.x, z.y, z.w, z.h, C.widget);
     lcd_text(z.x + 30, z.y + 6, "+", C.accent, C.widget, 3);
+
+    let kb = blank_btn(), kt = tr("Blank now");
+    lcd_rect(kb.x, kb.y, kb.w, kb.h, C.widget);
+    lcd_rect(kb.x, kb.y, 3, kb.h, C.dim);
+    lcd_text(kb.x + int((kb.w - tlen(kt) * 12) / 2) + 2, kb.y + 9, kt,
+             C.white, C.widget, 2);
 
     // Защита от выгорания
     let bon = burnin_cfg();
@@ -2498,12 +2509,33 @@ function draw_screensaver() {
 // Run shell script from SCRIPTS dir (non-blocking with &)
 let SCREEN_REQ = "/tmp/lcd_screen_req";
 
-// Гасим подсветку через ioctl(4) драйвера - тач при этом продолжает работать,
-// поэтому разбудить экран можно и пальцем, не только кнопкой.
+// Подсветка - это GPIO 31, он же светодиод из DTS. Гасим именно через него, а
+// не через ioctl(4) драйвера: оба дёргают тот же пин, но при ioctl ядро остаётся
+// с прежним значением brightness, и любая перезагрузка триггеров светодиода
+// вернёт подсветку сама по себе. ioctl оставлен запасным путём - на случай, если
+// светодиода в DTS нет.
+let BL_LEDS = [ "/sys/class/leds/:power/brightness",
+                "/sys/class/leds/display:power/brightness",
+                "/sys/class/leds/display_power/brightness" ];
+let bl_path = null;
+
+function backlight_path() {
+    if (bl_path != null) return bl_path;
+    for (let p in BL_LEDS)
+        if (fs.stat(p)) { bl_path = p; return bl_path; }
+    bl_path = "";
+    return bl_path;
+}
+
+// Тач работает независимо от подсветки, поэтому разбудить экран можно пальцем.
 function set_blank(on) {
     if (st.blank == on) return;
     st.blank = on;
-    system(sprintf("touch_poll b %d >/dev/null 2>&1", on ? 0 : 1));
+    let p = backlight_path();
+    if (p != "")
+        system(sprintf("echo %d > %s", on ? 0 : 1, p));
+    else
+        system(sprintf("touch_poll b %d >/dev/null 2>&1", on ? 0 : 1));
 }
 
 function run_script(name, bg) {
@@ -2782,6 +2814,13 @@ function handle_touch(tx, ty) {
                 draw_display_page();
                 return;
             }
+        }
+        let kb = blank_btn();
+        if (in_rect(tx, ty, kb.x, kb.y, kb.w, kb.h)) {
+            st.screen = "screensaver";
+            st.saver_frame = 0;
+            set_blank(true);
+            return;
         }
         let bb = burnin_btn();
         if (in_rect(tx, ty, bb.x, bb.y, bb.w, bb.h)) {

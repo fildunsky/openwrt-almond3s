@@ -101,9 +101,20 @@ bound to any button that produces events:
 [ "$ACTION" = released ] && [ "$SEEN" -lt 2 ] && /etc/lcd/scripts/screen.sh toggle
 ```
 
+Blanking drives the backlight LED from the device tree (GPIO 31, exported as
+`/sys/class/leds/:power`) rather than the driver's own ioctl. Both flip the same
+pin, but going through the LED keeps the kernel's idea of `brightness` in sync —
+otherwise the next LED trigger reload would silently light the panel back up.
+The driver ioctl (`touch_poll b 0|1`) stays as a fallback when the DTS has no
+such LED. The `Blank now` button on the Display page does the same thing on
+demand.
+
 The **power button is not available to software** on this device: it is wired to
-the PIC, which handles the press in its own firmware. Only `reset` (GPIO 32) and
-`tamper` (GPIO 28) reach the kernel as buttons.
+the PIC, which handles the press in its own firmware — a short press produces no
+kernel event at all. Only `reset` (GPIO 32, `linux,code = KEY_RESTART`) and
+`tamper` (GPIO 28, `BTN_0`) reach the kernel. Note that the hotplug script name
+comes from the key code, not from the DTS label: the tamper button runs
+`/etc/rc.button/BTN_0`.
 
 Weather is fetched by `/etc/lcd/scripts/weather_fetch.sh` from wttr.in and the
 service pings by `/etc/lcd/scripts/svcping.sh`; both are put on cron by the

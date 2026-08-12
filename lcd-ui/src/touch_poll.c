@@ -209,6 +209,22 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    /* touch_poll pic — сырые 17 байт статуса PIC (ioctl 3).
+     * Нужно, чтобы ловить, докладывает ли PIC о нажатиях кнопки питания:
+     * до ядра она не доходит, вся надежда на эти байты. */
+    if (argc >= 2 && argv[1][0] == 'p') {
+        unsigned char buf[17] = {0};
+        int i;
+        /* ioctl 2 - последний периодический снимок, который делает поток тача.
+         * ioctl 3 читает шину прямо здесь и на живом устройстве отваливается:
+         * SM0 в этот момент занят потоком тача. */
+        if (ioctl(fd, 2, buf) < 0) { close(fd); return 1; }
+        for (i = 0; i < 17; i++)
+            printf("%02x%s", buf[i], i == 16 ? "\n" : " ");
+        close(fd);
+        return 0;
+    }
+
     /* touch_poll daemon — background poller (fork) */
     if (argc >= 2 && strcmp(argv[1], "daemon") == 0) {
         return daemon_mode(fd);

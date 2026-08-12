@@ -12,9 +12,32 @@
 
 REQ=/tmp/lcd_screen_req
 
+# Без работающего lcd_ui запрос никто не подхватит - тогда дёргаем светодиод
+# подсветки напрямую, иначе команда молча ничего не сделает.
+LED=""
+for l in /sys/class/leds/:power /sys/class/leds/display:power \
+	 /sys/class/leds/display_power; do
+	[ -e "$l/brightness" ] && { LED="$l/brightness"; break; }
+done
+
+direct() {
+	[ -n "$LED" ] || return 1
+	case "$1" in
+		on)  echo 1 > "$LED" ;;
+		off) echo 0 > "$LED" ;;
+		toggle)
+			[ "$(cat "$LED")" = "0" ] && echo 1 > "$LED" || echo 0 > "$LED"
+			;;
+	esac
+}
+
 case "$1" in
 	on|off|toggle)
-		printf '%s' "$1" > "$REQ"
+		if pgrep -f lcd_ui.uc >/dev/null 2>&1; then
+			printf '%s' "$1" > "$REQ"
+		else
+			direct "$1"
+		fi
 		;;
 	*)
 		echo "usage: screen.sh on|off|toggle" >&2
