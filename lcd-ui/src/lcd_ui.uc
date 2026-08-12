@@ -2569,9 +2569,16 @@ function draw_lte_page() {
     lcd_text(cx + 10, y3 + 6, tr("CELL / NETWORK"), C.gray, C.widget, 1);
     // Три колонки с общими краями: слева, по центру карточки и по правому краю
     // с тем же отступом, что и в карточках выше.
-    let enb_s = sprintf("eNB %d", int(+(u?.enb_id ?? 0)));
-    let earf_s = sprintf("EARFCN %d", int(+(l.earfcn ?? 0)));
-    lcd_text(cx + 10, y3 + 18, sprintf("PCI %d", int(+(u?.pci ?? 0))), C.white, C.widget, 1);
+    // Ноль тут - это «модем не сказал», а не «нулевая сота»: SIM7100E, например,
+    // PCI и EARFCN не отдаёт вовсе. Показываем прочерк, иначе выглядит как
+    // настоящее значение.
+    let cell_id = function(label, v) {
+        let n = int(+(v ?? 0));
+        return sprintf("%s %s", label, n > 0 ? sprintf("%d", n) : "-");
+    };
+    let enb_s = cell_id("eNB", u?.enb_id);
+    let earf_s = cell_id("EARFCN", l.earfcn);
+    lcd_text(cx + 10, y3 + 18, cell_id("PCI", u?.pci), C.white, C.widget, 1);
     lcd_text(cx + int((cw - tlen(enb_s) * 6) / 2), y3 + 18, enb_s, C.white, C.widget, 1);
     lcd_text(rx(earf_s), y3 + 18, earf_s, C.white, C.widget, 1);
 
