@@ -129,6 +129,10 @@ package on install.
   pathloss, CQI, MIMO, neighbouring cells)
 * **Traffic** — RX/TX with log-scaled history graphs
 * **Info** — uptime, load, memory, battery
+* **SMS** — the inbox read through `5gmodem`'s bridge: multipart messages are
+  glued back together, unread ones are marked, and a message opens full-screen
+  with paging when it does not fit. Reachable from the menu or by tapping the
+  envelope in the header
 * **Services** — reachability of YouTube, Telegram, GitHub and others; tapping a
   card rechecks that one service immediately
 * **Weather** — current conditions with a city picker

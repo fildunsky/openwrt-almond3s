@@ -153,6 +153,12 @@ let st = {
     tp:     false,     // touch was pressed (edge detection)
     saver_frame: 0,    // screensaver animation
     blank:  false,     // подсветка погашена (стиль заставки «выкл»)
+    sms:    null,      // разобранный список SMS
+    sms_ts: 0,         // mtime кэша, по которому разбирали
+    sms_pg: 0,         // страница списка
+    sms_i:  -1,        // открытое сообщение
+    sms_tp: 0,         // страница текста открытого сообщения
+    sms_wait: false,   // ждём фоновое чтение из модема
 };
 
 // --- Connections ---
@@ -256,6 +262,12 @@ let TR_RU = {
     "Traffic": "Трафик",
     "UPLINK - %s": "АПЛИНК - %s",
     "IP & clients": "адреса и клиенты",
+    "SMS": "СМС",
+    "inbox": "входящие",
+    "%d new": "новых: %d",
+    "Reading inbox...": "Читаю ящик...",
+    "No messages": "Сообщений нет",
+    "BACK": "НАЗАД",
     "Blank now": "Погасить",
     "MORE >>>": "ЕЩЁ >>>",
     "<<< BACK": "<<< НАЗАД",
@@ -330,8 +342,9 @@ function lcd_rect(x, y, w, h, c) {
 }
 
 function lcd_text(x, y, text, color, bg, sz) {
-    // Escape quotes and backslashes for JSON
-    text = replace(replace(text ?? "", '\\', '\\\\'), '"', '\\"');
+    // Экранируем для JSON. Перевод строки обязателен: команды разделяются
+    // именно \n, и живой перевод строки в тексте разрезал бы команду пополам.
+    text = replace(replace(replace(text ?? "", '\\', '\\\\'), '"', '\\"'), "\n", "\\n");
     Q(sprintf('{"cmd":"text","x":%d,"y":%d,"text":"%s","color":"%s","bg":"%s","size":%d}',
         x, y, text, color ?? C.white, bg ?? C.bg, sz ?? 2));
 }
@@ -1396,6 +1409,220 @@ function draw_dashboard() {
 //  DRAWING: MAIN MENU
 // =============================================
 
+// =============================================
+//  SMS
+// =============================================
+//
+// Читаем ящик тем же мостом, что и веб-морда 5gmodem: `smsbridge.sh recv`.
+// Он ходит в модем по AT (~1 с), поэтому зовём его в фоне и только когда
+// пользователь открыл страницу, а не по таймеру: AT-порт общий, дёргать его
+// впустую нельзя. Непрочитанные приходят отдельным зеркалом (sms_new.json) -
+// оттуда берём только пометку «новое».
+
+let SMS_CACHE = "/tmp/lcd_sms.json";
+let SMS_ROWS  = 4;
+let SMS_COLS  = 46;   // (300 - 20) / 6 - знаков в строке текста
+let SMS_LINES = 12;   // строк текста на экран
+
+// Мост местами отдаёт битую кодировку: неразрывный пробел приезжает как
+// «ÿffffa0», кавычки-ёлочки - как «ÿffffab/bb». Плюс юникодная пунктуация,
+// которой нет в нашем шрифте 5x7. Приводим к тому, что экран умеет рисовать.
+function sms_clean(t) {
+    if (!t) return "";
+    t = replace(t, /\xff\xff+/g, "");
+    t = replace(t, /ÿffffa0/g, " ");
+    t = replace(t, /ÿffffab/g, "\"");
+    t = replace(t, /ÿffffbb/g, "\"");
+    t = replace(t, /ÿffff[0-9a-f][0-9a-f]/g, "");
+    t = replace(t, /→/g, "->");
+    t = replace(t, /‑/g, "-");
+    t = replace(t, /–/g, "-");
+    t = replace(t, /—/g, "-");
+    t = replace(t, /«/g, "\"");
+    t = replace(t, /»/g, "\"");
+    t = replace(t, /…/g, "...");
+    t = replace(t, /\u00a0/g, " ");
+    return t;
+}
+
+function sms_refresh() {
+    if (st.sms_wait) return;
+    st.sms_wait = true;
+    // Перенаправление вешаем на подоболочку целиком, иначе фоновый процесс
+    // держит наши дескрипторы и ucode ждёт его завершения.
+    system("(/usr/share/5gmodem/smsbridge.sh recv > " + SMS_CACHE + ".new 2>/dev/null" +
+           " && mv " + SMS_CACHE + ".new " + SMS_CACHE + ") >/dev/null 2>&1 &");
+}
+
+function sms_unread() {
+    let u = {};
+    let l = st.data?.sms_list;
+    if (type(l) == "array")
+        for (let m in l) if (m?.key) u[m.key] = true;
+    return u;
+}
+
+// Части мультипарта приходят отдельными записями с общим отправителем и
+// временем - склеиваем их по этому ключу, как это делает newdump.
+function sms_parse(raw) {
+    let j;
+    try { j = json(raw); } catch (e) { return []; }
+    let msgs = j?.msg;
+    if (type(msgs) != "array") return [];
+
+    let by = {}, order = [];
+    for (let m in msgs) {
+        let k = (m?.sender ?? "?") + "|" + (m?.timestamp ?? "");
+        if (!exists(by, k)) {
+            by[k] = { sender: m?.sender ?? "?", time: m?.timestamp ?? "",
+                      key: k, parts: [] };
+            push(order, k);
+        }
+        push(by[k].parts, m);
+    }
+
+    let out = [];
+    for (let k in order) {
+        let e = by[k];
+        sort(e.parts, function(x, y) {
+            return int(+(x?.part ?? x?.index ?? 0)) - int(+(y?.part ?? y?.index ?? 0));
+        });
+        let txt = "";
+        for (let p in e.parts) txt += (p?.content ?? "");
+        push(out, { sender: e.sender, time: e.time, key: e.key,
+                    text: sms_clean(txt) });
+    }
+    // Свежие сверху: модем отдаёт ящик от старых к новым.
+    let rev = [];
+    for (let i = length(out) - 1; i >= 0; i--) push(rev, out[i]);
+    return rev;
+}
+
+function sms_list() {
+    let st_ = fs.stat(SMS_CACHE);
+    if (!st_) return st.sms;
+    if (st.sms == null || st_.mtime != st.sms_ts) {
+        let raw = fs.readfile(SMS_CACHE);
+        if (raw) {
+            st.sms = sms_parse(raw);
+            st.sms_ts = st_.mtime;
+            st.sms_wait = false;
+        }
+    }
+    return st.sms;
+}
+
+// Перенос по словам с оглядкой на UTF-8: length() считает байты, поэтому
+// длину меряем tlen(), а режем tcut().
+function sms_wrap(txt, cols) {
+    let out = [];
+    for (let para in split(txt, "\n")) {
+        let line = "";
+        for (let w in split(para, " ")) {
+            while (tlen(w) > cols) {
+                if (line != "") { push(out, line); line = ""; }
+                push(out, tcut(w, cols));
+                w = substr(w, length(tcut(w, cols)));
+            }
+            if (line == "") line = w;
+            else if (tlen(line) + 1 + tlen(w) <= cols) line += " " + w;
+            else { push(out, line); line = w; }
+        }
+        push(out, line);
+    }
+    return out;
+}
+
+// Полоса «назад» со стрелками страниц. Стрелки рисуем только когда есть куда
+// листать, иначе на них жмут вслепую.
+function draw_back_pager(pg, pages) {
+    lcd_rect(0, BACK_Y, LCD_W, 32, C.back);
+    lcd_text(120, BACK_Y + 9, "< " + tr("BACK"), C.white, C.back, 2);
+    if (pages > 1) {
+        lcd_text(16, BACK_Y + 9, "<<", pg > 0 ? C.white : "#8B3A3A", C.back, 2);
+        lcd_text(LCD_W - 40, BACK_Y + 9, ">>",
+                 pg < pages - 1 ? C.white : "#8B3A3A", C.back, 2);
+        // Счётчик прижимаем к левой стрелке: по центру он налезал на «НАЗАД».
+        lcd_text(48, BACK_Y + 13, sprintf("%d/%d", pg + 1, pages),
+                 C.white, C.back, 1);
+    }
+}
+
+function sms_pager_hit(tx, ty, pg, pages) {
+    if (ty < BACK_Y - 4) return 0;
+    if (pages > 1 && tx < 70) return pg > 0 ? -1 : 0;
+    if (pages > 1 && tx > LCD_W - 70) return pg < pages - 1 ? 1 : 0;
+    return 2;   // «назад»
+}
+
+function draw_sms_page() {
+    lcd_clear(C.bg);
+    draw_header(tr("SMS"));
+
+    let list = sms_list();
+    if (list == null) {
+        lcd_text(20, 100, tr("Reading inbox..."), C.gray, C.bg, 2);
+        draw_back();
+        lcd_flush();
+        return;
+    }
+    if (length(list) == 0) {
+        lcd_text(20, 100, tr("No messages"), C.dim, C.bg, 2);
+        draw_back();
+        lcd_flush();
+        return;
+    }
+
+    let unread = sms_unread();
+    let pages = int((length(list) + SMS_ROWS - 1) / SMS_ROWS);
+    if (st.sms_pg >= pages) st.sms_pg = pages - 1;
+
+    for (let r = 0; r < SMS_ROWS; r++) {
+        let idx = st.sms_pg * SMS_ROWS + r;
+        if (idx >= length(list)) break;
+        let m = list[idx];
+        let y = 32 + r * 44;
+        let neu = exists(unread, m.key);
+        lcd_rect(10, y, 300, 40, C.widget);
+        lcd_rect(10, y, 4, 40, neu ? C.green : C.dim);
+        lcd_text(20, y + 5, tcut(m.sender, 14), neu ? C.white : C.gray, C.widget, 2);
+        lcd_text(310 - tlen(m.time) * 6 - 8, y + 8, m.time, C.dim, C.widget, 1);
+        lcd_text(20, y + 25, tcut(replace(m.text, /\n/g, " "), 47),
+                 neu ? C.white : C.gray, C.widget, 1);
+    }
+
+    draw_back_pager(st.sms_pg, pages);
+    lcd_flush();
+}
+
+function draw_sms_one() {
+    lcd_clear(C.bg);
+    draw_header(tr("SMS"));
+
+    let list = sms_list();
+    let m = (type(list) == "array" && st.sms_i >= 0 && st.sms_i < length(list))
+            ? list[st.sms_i] : null;
+    if (!m) { st.page = "sms"; draw_sms_page(); return; }
+
+    lcd_rect(10, 28, 300, 22, C.widget);
+    lcd_text(20, 34, tcut(m.sender, 16), C.white, C.widget, 1);
+    lcd_text(310 - tlen(m.time) * 6 - 8, 34, m.time, C.dim, C.widget, 1);
+
+    let lines = sms_wrap(m.text, SMS_COLS);
+    let pages = int((length(lines) + SMS_LINES - 1) / SMS_LINES);
+    if (pages < 1) pages = 1;
+    if (st.sms_tp >= pages) st.sms_tp = pages - 1;
+
+    for (let i = 0; i < SMS_LINES; i++) {
+        let li = st.sms_tp * SMS_LINES + i;
+        if (li >= length(lines)) break;
+        lcd_text(16, 58 + i * 12, lines[li], C.white, C.bg, 1);
+    }
+
+    draw_back_pager(st.sms_tp, pages);
+    lcd_flush();
+}
+
 function draw_menu() {
     let d = st.data;
     lcd_clear(C.bg);
@@ -1433,20 +1660,22 @@ function draw_menu() {
         lcd_rect(b.x, b.y, b.w, b.h, C.hdr);
         lcd_text(b.x + 20, b.y + 20, tr("MORE >>>"), C.white, C.hdr, 2);
 
+    } else if (st.mpg == 2) {
+        let ns = int(d?.sms_new ?? 0);
+        draw_btn(1, tr("SMS"),
+            ns > 0 ? sprintf(tr("%d new"), ns) : tr("inbox"),
+            C.white, ns > 0 ? C.green : C.gray);
+        draw_btn(2, tr("Services"), tr("check"), C.white, C.gray);
+        draw_btn(3, tr("Weather"), tr("Update now"), C.white, C.gray);
+        draw_btn(4, tr("Display"), saver_label(saver_cfg()), C.white, C.gray);
+        draw_btn(5, tr("Modem Reset"), tr("LTE restart"), C.white, C.gray);
+
+        let b = btn_pos(6);
+        lcd_rect(b.x, b.y, b.w, b.h, C.hdr);
+        lcd_text(b.x + 20, b.y + 20, tr("MORE >>>"), C.white, C.hdr, 2);
+
     } else {
-        // Page 2
-        // 1: Reboot (with confirmation)
-        draw_btn(1, tr("Services"), tr("check"), C.white, C.gray);
-
-        // 2: Modem Reset
-        draw_btn(2, tr("Weather"), tr("Update now"), C.white, C.gray);
-
-        // 3: Weather
-        draw_btn(3, tr("Display"), saver_label(saver_cfg()), C.white, C.gray);
-
-        // 4: Display
-        draw_btn(4, tr("Modem Reset"), tr("LTE restart"), C.white, C.gray);
-        draw_btn(5, tr("Reboot"), tr("System"), C.white, C.gray);
+        draw_btn(1, tr("Reboot"), tr("System"), C.white, C.gray);
 
         // 6: <<< BACK. Ровно одна ячейка: растянутая на две выглядела единой
         // кнопкой, а тач считал половины разными - нажатие слева уходило мимо.
@@ -2361,6 +2590,8 @@ function draw_current() {
     case "ip":        draw_ip_page(); break;
     case "lte":       draw_lte_page(); break;
     case "traffic":   draw_traffic_page(); break;
+    case "sms":       draw_sms_page(); break;
+    case "sms1":      draw_sms_one(); break;
     }
 }
 
@@ -2626,6 +2857,19 @@ function handle_touch(tx, ty) {
         return;
     }
 
+    // Конвертик в шапке - быстрый вход в SMS с любой страницы.
+    if (ty < HDR_H && int(st.data?.sms_new ?? 0) > 0 &&
+        st.page != "sms" && st.page != "sms1") {
+        let ex = 4 + tlen(clock_str()) * 12 + 10 + 5 * 8 + 8;
+        if (in_rect(tx, ty, ex - 4, 0, ENV_W + 8, HDR_H)) {
+            st.sms_pg = 0;
+            st.sms_i = -1;
+            sms_refresh();
+            go_page("sms");
+            return;
+        }
+    }
+
     // Back button (all sub-pages except menu)
     if (st.page != "menu" && ty >= BACK_Y - 10) {
         go_page("menu");
@@ -2633,6 +2877,40 @@ function handle_touch(tx, ty) {
     }
 
     // Menu button detection
+    if (st.page == "sms") {
+        let list = sms_list();
+        let n = type(list) == "array" ? length(list) : 0;
+        let pages = n > 0 ? int((n + SMS_ROWS - 1) / SMS_ROWS) : 1;
+        let hit = sms_pager_hit(tx, ty, st.sms_pg, pages);
+        if (hit == 2) { go_page("menu"); return; }
+        if (hit != 0) { st.sms_pg += hit; draw_sms_page(); return; }
+        for (let r = 0; r < SMS_ROWS; r++) {
+            let idx = st.sms_pg * SMS_ROWS + r;
+            if (idx >= n) break;
+            let y = 32 + r * 44;
+            if (in_rect(tx, ty, 10, y, 300, 40)) {
+                st.sms_i = idx;
+                st.sms_tp = 0;
+                go_page("sms1");
+                return;
+            }
+        }
+        return;
+    }
+
+    if (st.page == "sms1") {
+        let list = sms_list();
+        let m = (type(list) == "array" && st.sms_i >= 0 && st.sms_i < length(list))
+                ? list[st.sms_i] : null;
+        let lines = m ? sms_wrap(m.text, SMS_COLS) : [];
+        let pages = int((length(lines) + SMS_LINES - 1) / SMS_LINES);
+        if (pages < 1) pages = 1;
+        let hit = sms_pager_hit(tx, ty, st.sms_tp, pages);
+        if (hit == 2) { go_page("sms"); return; }
+        if (hit != 0) { st.sms_tp += hit; draw_sms_one(); return; }
+        return;
+    }
+
     if (st.page == "menu") {
         for (let i = 1; i <= 6; i++) {
             let b = btn_pos(i);
@@ -2641,8 +2919,10 @@ function handle_touch(tx, ty) {
                 let labels = st.mpg == 1
                     ? [ tr("Network"), tr("WiFi"), tr("Modem"),
                         tr("Traffic"), tr("Info"), ">>>" ]
-                    : [ tr("Services"), tr("Weather"), tr("Display"),
-                        tr("Modem Reset"), tr("Reboot"), tr("<<< BACK") ];
+                    : (st.mpg == 2
+                        ? [ tr("SMS"), tr("Services"), tr("Weather"),
+                            tr("Display"), tr("Modem Reset"), ">>>" ]
+                        : [ tr("Reboot"), "", "", "", "", tr("<<< BACK") ]);
                 flash_btn(b.x, b.y, b.w, b.h, labels[i - 1] ?? "");
                 sock_poll(150);
 
@@ -2655,56 +2935,9 @@ function handle_touch(tx, ty) {
                     case 5: go_page("info"); return;
                     case 6: st.mpg = 2; draw_menu(); return;
                     }
-                } else {
+                } else if (st.mpg == 3) {
                     switch (i) {
                     case 1:
-                        go_page("services");
-                        return;
-
-                    case 2:
-                        // Weather: fetch fresh data synchronously, then show the weather page
-                        action_splash(tr("Weather"), tr("Updating forecast..."), C.cyan);
-                        run_script("weather_fetch.sh");
-                        refresh_data();
-                        go_page("weather");
-                        return;
-
-                    case 3:
-                        go_page("display");
-                        return;
-                    case 4:
-                        // Перезапуск модема. Своего скрипта у нас нет, а у
-                        // 5gmodem есть отлаженная лестница: питание слота по
-                        // GPIO (modem_power/modem_reset/4g/5g1/5g2), затем
-                        // деавторизация USB-порта, затем unbind/bind драйвера.
-                        // Дублировать её незачем - зовём её же.
-                        action_splash("LTE", tr("Resetting modem..."), C.yellow);
-                        if (fs.stat("/usr/share/5gmodem/reboot_modem.sh"))
-                            system("/usr/share/5gmodem/reboot_modem.sh power >/dev/null 2>&1 &");
-                        else
-                            run_script("lte_reset.sh");
-                        // Wait for script completion (~14 sec)
-                        for (let step = 0; step < 7; step++) {
-                            system("sleep 2");
-                            let msgs = lang() == "ru"
-                                ? [ "Отключаю...", "Сброс по GPIO...", "Жду...",
-                                    "Поднимаю...", "Жду...", "Проверяю...", "Готово" ]
-                                : [ "Disconnecting...", "GPIO reset...", "Waiting...",
-                                    "Reconnecting...", "Waiting...", "Checking...", "Done" ];
-                            lcd_rect(20, 140, 280, 20, C.bg);
-                            lcd_text(20, 140, msgs[step], C.gray, C.bg, 2);
-                            lcd_flush();
-                        }
-                        refresh_data();
-                        draw_menu();
-                        let u = st.data?.uqmi;
-                        let rsrp = int(+(u?.rsrp ?? 0));
-                        toast(rsrp < 0 ? sprintf("LTE OK  RSRP:%d", rsrp) : "LTE: no signal",
-                              rsrp < 0 ? C.green : C.red,
-                              rsrp < 0 ? "#002000" : "#200000", 2);
-                        draw_menu();
-                        return;
-                    case 5:
                         // Reboot with confirmation dialog
                         lcd_clear("#200000");
                         lcd_rect(30, 60, 260, 120, "#300000");
@@ -2739,9 +2972,66 @@ function handle_touch(tx, ty) {
                         toast(tr("Cancelled (timeout)"), C.gray, "#1082", 1);
                         draw_menu();
                         return;
+                    case 6: st.mpg = 1; draw_menu(); return;
+                    }
+                } else if (st.mpg == 2) {
+                    switch (i) {
+                    case 1:
+                        st.sms_pg = 0;
+                        st.sms_i = -1;
+                        sms_refresh();
+                        go_page("sms");
+                        return;
 
+                    case 2:
+                        go_page("services");
+                        return;
+
+                    case 3:
+                        // Weather: fetch fresh data synchronously, then show the weather page
+                        action_splash(tr("Weather"), tr("Updating forecast..."), C.cyan);
+                        run_script("weather_fetch.sh");
+                        refresh_data();
+                        go_page("weather");
+                        return;
+
+                    case 4:
+                        go_page("display");
+                        return;
+                    case 5:
+                        // Перезапуск модема. Своего скрипта у нас нет, а у
+                        // 5gmodem есть отлаженная лестница: питание слота по
+                        // GPIO (modem_power/modem_reset/4g/5g1/5g2), затем
+                        // деавторизация USB-порта, затем unbind/bind драйвера.
+                        // Дублировать её незачем - зовём её же.
+                        action_splash("LTE", tr("Resetting modem..."), C.yellow);
+                        if (fs.stat("/usr/share/5gmodem/reboot_modem.sh"))
+                            system("/usr/share/5gmodem/reboot_modem.sh power >/dev/null 2>&1 &");
+                        else
+                            run_script("lte_reset.sh");
+                        // Wait for script completion (~14 sec)
+                        for (let step = 0; step < 7; step++) {
+                            system("sleep 2");
+                            let msgs = lang() == "ru"
+                                ? [ "Отключаю...", "Сброс по GPIO...", "Жду...",
+                                    "Поднимаю...", "Жду...", "Проверяю...", "Готово" ]
+                                : [ "Disconnecting...", "GPIO reset...", "Waiting...",
+                                    "Reconnecting...", "Waiting...", "Checking...", "Done" ];
+                            lcd_rect(20, 140, 280, 20, C.bg);
+                            lcd_text(20, 140, msgs[step], C.gray, C.bg, 2);
+                            lcd_flush();
+                        }
+                        refresh_data();
+                        draw_menu();
+                        let u = st.data?.uqmi;
+                        let rsrp = int(+(u?.rsrp ?? 0));
+                        toast(rsrp < 0 ? sprintf("LTE OK  RSRP:%d", rsrp) : "LTE: no signal",
+                              rsrp < 0 ? C.green : C.red,
+                              rsrp < 0 ? "#002000" : "#200000", 2);
+                        draw_menu();
+                        return;
                     case 6:
-                        st.mpg = 1;
+                        st.mpg = 3;
                         draw_menu();
                         return;
                     }

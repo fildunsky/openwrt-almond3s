@@ -250,9 +250,25 @@ static char *json_str(const char *json, const char *key, char *out, int outlen)
     if (!found) { out[0] = 0; return out; }
     while (*p == ' ' || *p == '\t') p++;
     if (*p == '"') {
+        /* Экранирование разбираем по-настоящему: без этого \" внутри значения
+         * обрывал строку на середине, а в тексте оставался хвостовой слеш -
+         * ловилось на SMS с кавычками. */
         p++;
         int i = 0;
-        while (*p && *p != '"' && i < outlen - 1) out[i++] = *p++;
+        while (*p && *p != '"' && i < outlen - 1) {
+            if (*p == '\\' && p[1]) {
+                p++;
+                switch (*p) {
+                case 'n': out[i++] = '\n'; break;
+                case 't': out[i++] = '\t'; break;
+                case 'r': break;
+                default:  out[i++] = *p; break;
+                }
+                p++;
+                continue;
+            }
+            out[i++] = *p++;
+        }
         out[i] = 0;
     } else {
         int i = 0;
@@ -298,7 +314,7 @@ static void handle_cmd(const char *json)
         json_str(json, "text", text, sizeof(text));
         /* unescape \n */
         char *p;
-        while ((p = strstr(text, "\\n")) != NULL) { p[0] = '\n'; memmove(p+1, p+2, strlen(p+2)+1); }
+        /* \n уже развёрнут в json_str */
         fb_text(x, y, text, parse_color(color[0] ? color : "white"),
                 parse_color(bg_color[0] ? bg_color : "black"), size);
     }
