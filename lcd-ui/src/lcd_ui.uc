@@ -284,6 +284,7 @@ let TR_RU = {
     "External IP": "Внешний IP",
     "Exit IP:": "Выход:",
     "Disconnected": "Нет связи",
+    "Not connected": "Не подключен",
     "Unknown": "Неизвестно",
     "via VPN (WireGuard)": "через VPN (WireGuard)",
     "QR unavailable": "QR недоступен",
@@ -1417,8 +1418,10 @@ function draw_dashboard() {
     lcd_rect(cx, y2, cw, 54, C.widget);
     lcd_rect(cx, y2, 4, 54, C.cyan); // Blue accent
     lcd_text(cx + 16, y2 + 10, "WAN IP (ETH)", C.gray, C.widget, 1);
-    let wan_ip = d?.wan_ip ?? tr("Disconnected");
-    lcd_text(cx + 16, y2 + 26, wan_ip, (wan_ip == tr("Disconnected") || wan_ip == "") ? C.dim : C.white, C.widget, 2);
+    // У кабеля своя формулировка: «нет связи» - это про радио, а тут просто
+    // не воткнут провод.
+    let wan_ip = d?.wan_ip ?? tr("Not connected");
+    lcd_text(cx + 16, y2 + 26, wan_ip, (wan_ip == tr("Not connected") || wan_ip == "") ? C.dim : C.white, C.widget, 2);
 
     // --- 3. WIFI ---
     let y3 = y2 + 58;
