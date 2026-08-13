@@ -228,6 +228,12 @@ let TR_RU = {
     "LTE restart": "модема",
     "Resetting modem...": "Перезапуск модема...",
     "Reboot": "Перезапуск",
+    "LED": "Диод",
+    "Blink on SMS": "Мигать при SMS",
+    "above the screen": "над экраном",
+    "while unread remain": "пока есть непрочитанные",
+    "blinking": "мигает",
+    "Blinking: unread SMS": "Мигает: есть непрочитанные SMS",
     "System": "роутера",
     "REBOOT?": "ПЕРЕЗАГРУЗКА?",
     "YES": "ДА",
@@ -655,6 +661,60 @@ function arr_minmax(arr) {
 //  DATA COLLECTION
 // =============================================
 
+// ---- Диод над экраном ----
+//
+// Он не на GPIO, а на PIC: порт E, бит 4. Команды 0x32 (зажечь), 0x31
+// (погасить) и 0x30 (мигание) шлёт touch_poll. Мигание живёт в самом
+// микроконтроллере, поэтому его достаточно включить один раз.
+
+let led_blinking = false;
+
+function led_cfg() {
+    let st_ = ucur ? ucur.get("lcd", "led", "state") : null;
+    let sm = ucur ? ucur.get("lcd", "led", "sms_blink") : null;
+    return {
+        on:  (st_ == null || st_ == "") ? true : (st_ == "1"),
+        sms: (sm == "1"),
+    };
+}
+
+// Секции может не быть: /etc/config/lcd - защищённый файл, и на роутерах,
+// обновлённых с прежней версии пакета, он остаётся старым. Создаём на месте.
+function led_set(key, v) {
+    if (!ucur) return;
+    if (ucur.get("lcd", "led") == null)
+        ucur.set("lcd", "led", "led");
+    ucur.set("lcd", "led", key, sprintf("%s", v));
+    ucur.commit("lcd");
+}
+
+function led_write(mode) {
+    system(sprintf("touch_poll led %s >/dev/null 2>&1", mode));
+}
+
+function led_apply() {
+    let c = led_cfg();
+    led_blinking = false;
+    led_write(c.on ? "on" : "off");
+}
+
+// Мигание перебивает обычное состояние: уведомление важнее того, что диод
+// выключен. Когда непрочитанных не остаётся, возвращаем состояние из настроек.
+function led_sms_sync(n) {
+    let c = led_cfg();
+    if (!c.sms) {
+        if (led_blinking) { led_blinking = false; led_write(c.on ? "on" : "off"); }
+        return;
+    }
+    if (n > 0 && !led_blinking) {
+        led_blinking = true;
+        led_write("blink");
+    } else if (n < 1 && led_blinking) {
+        led_blinking = false;
+        led_write(c.on ? "on" : "off");
+    }
+}
+
 // Прочитанные ключи модема. Имя файла у 5gmodem собирается из usb-пути, где
 // всё, кроме букв и цифр, заменено подчёркиванием: 1-1 -> sms_seen.1_1.
 function sms_seen_set(path) {
@@ -724,6 +784,7 @@ function refresh_data() {
             }
             d.sms_new = length(fresh);
             d.sms_list = fresh;
+            led_sms_sync(d.sms_new);
         } catch (e) { }
     }
 
@@ -1952,14 +2013,20 @@ function draw_menu() {
         draw_btn(2, tr("Services"), tr("check"), C.white, C.gray);
         draw_btn(3, tr("Weather"), tr("Update now"), C.white, C.gray);
         draw_btn(4, tr("Display"), saver_label(saver_cfg()), C.white, C.gray);
-        draw_btn(5, tr("Modem Reset"), tr("LTE restart"), C.white, C.gray);
+        let lc = led_cfg();
+        draw_btn(5, tr("LED"),
+            led_blinking ? tr("blinking") : (lc.on ? tr("on") : tr("off")),
+            C.white, (lc.on || led_blinking) ? C.green : C.gray);
 
         let b = btn_pos(6);
         lcd_rect(b.x, b.y, b.w, b.h, C.hdr);
         lcd_text(b.x + 20, b.y + 20, tr("MORE >>>"), C.white, C.hdr, 2);
 
     } else {
-        draw_btn(1, tr("Reboot"), tr("System"), C.white, C.gray);
+        draw_btn(1, tr("Modem Reset"), tr("LTE restart"), C.white, C.gray);
+        draw_btn(2, tr("Reboot"), tr("System"), C.white, "#F0B0B8", C.back);
+        let rb = btn_pos(2);
+        lcd_rect(rb.x, rb.y, rb.w, 2, "#D32F2F");
 
         // 6: <<< BACK. Ровно одна ячейка: растянутая на две выглядела единой
         // кнопкой, а тач считал половины разными - нажатие слева уходило мимо.
@@ -2111,6 +2178,36 @@ function draw_display_page() {
 }
 
 // Часы ночного режима - отдельной страницей: открывается тапом по «Ночь».
+function led_row(i) {
+    return { x: 20, y: 44 + i * 56, w: 280, h: 44 };
+}
+
+function draw_led_page() {
+    lcd_clear(C.bg);
+    draw_header(tr("LED"));
+
+    let c = led_cfg();
+    let rows = [
+        { label: tr("LED"),          on: c.on,  hint: tr("above the screen") },
+        { label: tr("Blink on SMS"), on: c.sms, hint: tr("while unread remain") },
+    ];
+    for (let i = 0; i < length(rows); i++) {
+        let r = rows[i], b = led_row(i);
+        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+        lcd_rect(b.x, b.y, 4, b.h, r.on ? C.green : C.dim);
+        lcd_text(b.x + 16, b.y + 6, r.label, C.white, C.widget, 2);
+        lcd_text(b.x + 16, b.y + 28, r.hint, C.dim, C.widget, 1);
+        lcd_text(b.x + b.w - 46, b.y + 14, r.on ? tr("on") : tr("off"),
+                 r.on ? C.green : C.gray, C.widget, 2);
+    }
+
+    if (led_blinking)
+        lcd_text(20, 168, tr("Blinking: unread SMS"), C.green, C.bg, 1);
+
+    draw_back();
+    lcd_flush();
+}
+
 function draw_night_page() {
     lcd_clear(C.bg);
     draw_header(tr("Display"));
@@ -3020,6 +3117,7 @@ function draw_current() {
     case "sms":       draw_sms_page(); break;
     case "sms1":      draw_sms_one(); break;
     case "night":     draw_night_page(); break;
+    case "led":       draw_led_page(); break;
     }
 }
 
@@ -3395,6 +3493,38 @@ function handle_touch(tx, ty) {
                 } else if (st.mpg == 3) {
                     switch (i) {
                     case 1:
+                        // Перезапуск модема. Своего скрипта у нас нет, а у
+                        // 5gmodem есть отлаженная лестница: питание слота по
+                        // GPIO (modem_power/modem_reset/4g/5g1/5g2), затем
+                        // деавторизация USB-порта, затем unbind/bind драйвера.
+                        // Дублировать её незачем - зовём её же.
+                        action_splash("LTE", tr("Resetting modem..."), C.yellow);
+                        if (fs.stat("/usr/share/5gmodem/reboot_modem.sh"))
+                            system("/usr/share/5gmodem/reboot_modem.sh power >/dev/null 2>&1 &");
+                        else
+                            run_script("lte_reset.sh");
+                        // Wait for script completion (~14 sec)
+                        for (let step = 0; step < 7; step++) {
+                            system("sleep 2");
+                            let msgs = lang() == "ru"
+                                ? [ "Отключаю...", "Сброс по GPIO...", "Жду...",
+                                    "Поднимаю...", "Жду...", "Проверяю...", "Готово" ]
+                                : [ "Disconnecting...", "GPIO reset...", "Waiting...",
+                                    "Reconnecting...", "Waiting...", "Checking...", "Done" ];
+                            lcd_rect(20, 140, 280, 20, C.bg);
+                            lcd_text(20, 140, msgs[step], C.gray, C.bg, 2);
+                            lcd_flush();
+                        }
+                        refresh_data();
+                        draw_menu();
+                        let u = st.data?.uqmi;
+                        let rsrp = int(+(u?.rsrp ?? 0));
+                        toast(rsrp < 0 ? sprintf("LTE OK  RSRP:%d", rsrp) : "LTE: no signal",
+                              rsrp < 0 ? C.green : C.red,
+                              rsrp < 0 ? "#002000" : "#200000", 2);
+                        draw_menu();
+                        return;
+                    case 2:
                         // Reboot with confirmation dialog
                         lcd_clear("#200000");
                         lcd_rect(30, 60, 260, 120, "#300000");
@@ -3455,38 +3585,7 @@ function handle_touch(tx, ty) {
                     case 4:
                         go_page("display");
                         return;
-                    case 5:
-                        // Перезапуск модема. Своего скрипта у нас нет, а у
-                        // 5gmodem есть отлаженная лестница: питание слота по
-                        // GPIO (modem_power/modem_reset/4g/5g1/5g2), затем
-                        // деавторизация USB-порта, затем unbind/bind драйвера.
-                        // Дублировать её незачем - зовём её же.
-                        action_splash("LTE", tr("Resetting modem..."), C.yellow);
-                        if (fs.stat("/usr/share/5gmodem/reboot_modem.sh"))
-                            system("/usr/share/5gmodem/reboot_modem.sh power >/dev/null 2>&1 &");
-                        else
-                            run_script("lte_reset.sh");
-                        // Wait for script completion (~14 sec)
-                        for (let step = 0; step < 7; step++) {
-                            system("sleep 2");
-                            let msgs = lang() == "ru"
-                                ? [ "Отключаю...", "Сброс по GPIO...", "Жду...",
-                                    "Поднимаю...", "Жду...", "Проверяю...", "Готово" ]
-                                : [ "Disconnecting...", "GPIO reset...", "Waiting...",
-                                    "Reconnecting...", "Waiting...", "Checking...", "Done" ];
-                            lcd_rect(20, 140, 280, 20, C.bg);
-                            lcd_text(20, 140, msgs[step], C.gray, C.bg, 2);
-                            lcd_flush();
-                        }
-                        refresh_data();
-                        draw_menu();
-                        let u = st.data?.uqmi;
-                        let rsrp = int(+(u?.rsrp ?? 0));
-                        toast(rsrp < 0 ? sprintf("LTE OK  RSRP:%d", rsrp) : "LTE: no signal",
-                              rsrp < 0 ? C.green : C.red,
-                              rsrp < 0 ? "#002000" : "#200000", 2);
-                        draw_menu();
-                        return;
+                    case 5: go_page("led"); return;
                     case 6:
                         st.mpg = 3;
                         draw_menu();
@@ -3573,6 +3672,24 @@ function handle_touch(tx, ty) {
                 draw_current();
                 return;
             }
+        }
+        return;
+    }
+
+    if (st.page == "led") {
+        let c = led_cfg();
+        let b0 = led_row(0), b1 = led_row(1);
+        if (in_rect(tx, ty, b0.x, b0.y, b0.w, b0.h)) {
+            led_set("state", c.on ? "0" : "1");
+            led_apply();
+            draw_led_page();
+            return;
+        }
+        if (in_rect(tx, ty, b1.x, b1.y, b1.w, b1.h)) {
+            led_set("sms_blink", c.sms ? "0" : "1");
+            led_sms_sync(int(st.data?.sms_new ?? 0));
+            draw_led_page();
+            return;
         }
         return;
     }
@@ -3844,6 +3961,7 @@ function main() {
     // «горел и горел» - гашение по таймауту молча превращалось в no-op.
     backlight_write(false);
     backlight_write(true);   /* внутри уже уровень из настроек */
+    led_apply();             /* диод в состояние из настроек */
 
     // Stop splash: ioctl(0) via flush
     system("printf '\\0' > /dev/lcd 2>/dev/null");

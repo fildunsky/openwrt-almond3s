@@ -4,6 +4,7 @@
  * Usage:
  *   touch_poll          — foreground touch demo (draw crosshairs)
  *   touch_poll daemon   — background daemon: write /tmp/.lcd_touch
+ *   touch_poll led on   — диод над экраном (on|off|blink)
  *   touch_poll bl 0     — backlight OFF (ioctl cmd=4, arg=0)
  *   touch_poll bl 1     — backlight ON  (ioctl cmd=4, arg=1)
  *   touch_poll bl 2     — show splash   (ioctl cmd=4, arg=2)
@@ -213,6 +214,17 @@ int main(int argc, char **argv)
      * 0 - погашено, 255 - полный накал, между ними драйвер крутит пин. */
     if (argc >= 3 && argv[1][0] == 'd') {
         int ret = ioctl(fd, 16, (unsigned long)atoi(argv[2]));
+        close(fd);
+        return ret < 0 ? 1 : 0;
+    }
+
+    /* touch_poll led on|off|blink — диод над экраном. Он висит на PIC, а не
+     * на GPIO: PORTE бит 4, команды 0x32/0x31/0x30. Полярность обратна той,
+     * что указана в разборе прошивки, - проверено на живом железе. */
+    if (argc >= 3 && strcmp(argv[1], "led") == 0) {
+        int c = strcmp(argv[2], "on") == 0 ? 0x32
+              : strcmp(argv[2], "blink") == 0 ? 0x30 : 0x31;
+        int ret = ioctl(fd, 9, (unsigned long)(10000 + c));
         close(fd);
         return ret < 0 ? 1 : 0;
     }
