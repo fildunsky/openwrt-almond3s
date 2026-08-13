@@ -46,19 +46,118 @@ struct battery_info {
     unsigned char raw1, raw2;  /* buf[1], buf[2] for hex display */
 };
 
+/* Состояние между замерами: скачок напряжения от зарядного, последний
+ * показанный процент и счётчик подряд идущих «нет батареи». */
+static int bat_adc_before_charge = 0;
+static int bat_charge_bump = 0;
+static int bat_last_charging = -1;
+static int bat_disp_percent = -1;
+static int bat_nobat_count = 0;
+static struct battery_info bat_last_good;
+static int bat_have_good = 0;
+
+/* Загрузка процессора считается по приращению /proc/stat между замерами:
+ * мгновенного значения там нет, только счётчики от загрузки. */
+static int cpu_busy_pct(void)
+{
+    static unsigned long long prev_idle, prev_total;
+    unsigned long long v[8] = {0}, idle, total = 0;
+    FILE *fp = fopen("/proc/stat", "r");
+    if (!fp) return -1;
+    if (fscanf(fp, "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
+               &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]) < 4) {
+        fclose(fp);
+        return -1;
+    }
+    fclose(fp);
+    for (int i = 0; i < 8; i++) total += v[i];
+    idle = v[3] + v[4];
+    int pct = -1;
+    if (prev_total && total > prev_total) {
+        unsigned long long dt = total - prev_total;
+        unsigned long long di = idle - prev_idle;
+        pct = (int)((dt - di) * 100 / dt);
+        if (pct < 0) pct = 0;
+        if (pct > 100) pct = 100;
+    }
+    prev_idle = idle;
+    prev_total = total;
+    return pct;
+}
+
+static int cpu_core_count(void)
+{
+    static int n = 0;
+    if (n) return n;
+    FILE *fp = fopen("/proc/cpuinfo", "r");
+    char line[128];
+    if (!fp) return 1;
+    while (fgets(line, sizeof(line), fp))
+        if (strncmp(line, "processor", 9) == 0) n++;
+    fclose(fp);
+    if (n < 1) n = 1;
+    return n;
+}
+
 static void get_battery(struct battery_info *bi) {
     unsigned char raw[17] = {0};
     bi->adc = 0; bi->percent = 0; bi->charging = 0; bi->valid = 0; bi->no_battery = 0; bi->raw1 = 0; bi->raw2 = 0;
     int fd = open("/dev/lcd", O_RDWR);
     if (fd < 0) return;
     int ret = ioctl(fd, 2, raw);
-    if (ret == 0 && raw[3] == 0x02 && raw[4] == 0x04) {
-        bi->adc = (raw[1] << 2) | (raw[2] >> 6);
-        bi->raw1 = raw[1]; bi->raw2 = raw[2];
+    if (ret == 0 && raw[4] == 0x04 && (((raw[3] & 0x0F) << 8) | raw[1]) < 1023) {
+        /* Как в заводском драйвере: АЦП это байт 1 плюс младший полубайт
+         * байта 3, то есть 12 бит. Прежняя формула (raw[1] << 2 | raw[2] >> 6)
+         * подмешивала в число байт статуса и заворачивалась при выходе за
+         * окно 512..767. */
+        bi->adc = ((raw[3] & 0x0F) << 8) | raw[1];
+        bi->raw1 = raw[1]; bi->raw2 = raw[3];
         bi->charging = (raw[5] & 0x01) ? 1 : 0;
-        bi->no_battery = (raw[5] & 0x60) ? 1 : 0;  /* bit5+bit6 = no battery */
+        bi->no_battery = ((raw[5] & 0x40) && !(raw[5] & 0x20)) ? 1 : 0;
         bi->valid = 1;
-        bi->percent = bat_table_lookup(bi->adc) * 100 / 170;
+
+        /* Зарядное поднимает напряжение на клеммах, и процент по нему
+         * мгновенно прыгает вверх. Запоминаем величину скачка в момент
+         * подключения и вычитаем её, пока идёт зарядка. */
+        if (bi->charging && bat_last_charging == 0 && bat_adc_before_charge > 0) {
+            int bump = bi->adc - bat_adc_before_charge;
+            if (bump > 0 && bump < 120) bat_charge_bump = bump;
+        }
+        if (!bi->charging) {
+            bat_adc_before_charge = bi->adc;
+            bat_charge_bump = 0;
+        }
+        bat_last_charging = bi->charging;
+
+        int adc_eff = bi->adc - (bi->charging ? bat_charge_bump : 0);
+        int target = bat_table_lookup(adc_eff) * 100 / 170;
+        if (target > 100) target = 100;
+        if (target < 0) target = 0;
+
+        /* Показания двигаем плавно: скачок с 88 на 100 за один замер
+         * выглядит как ошибка, даже когда напряжение и правда подскочило. */
+        if (bat_disp_percent < 0) bat_disp_percent = target;
+        else if (target > bat_disp_percent) bat_disp_percent += (target - bat_disp_percent > 2) ? 2 : (target - bat_disp_percent);
+        else if (target < bat_disp_percent) bat_disp_percent -= (bat_disp_percent - target > 2) ? 2 : (bat_disp_percent - target);
+        bi->percent = bat_disp_percent;
+    }
+
+    /* «Нет батареи» верим только после пяти подряд, иначе кратковременная
+     * смена статуса при подключении зарядного рисует прочерки. */
+    if (bi->no_battery) {
+        if (++bat_nobat_count < 5) bi->no_battery = 0;
+    } else {
+        bat_nobat_count = 0;
+    }
+
+    /* Сбойную выборку не показываем как пустоту - держим последнюю годную. */
+    if (bi->valid) {
+        bat_last_good = *bi;
+        bat_have_good = 1;
+    } else if (bat_have_good) {
+        int keep_nobat = bi->no_battery;
+        *bi = bat_last_good;
+        bi->no_battery = keep_nobat;
     }
     close(fd);
 }
@@ -79,7 +178,7 @@ struct bat_estimator {
 
 static struct bat_estimator bat_est = {0};
 
-static int bat_cal_cutoff = 400;
+static int bat_cal_cutoff = 612;
 static int bat_cal_factor = 100;    /* *100 fixed-point (100 = 1.0x) */
 static int bat_cal_hist_size = 20;
 static int bat_cal_interval = 30;   /* seconds between samples */
@@ -111,18 +210,19 @@ static void bat_hist_push(struct bat_estimator *e, time_t t, int adc) {
     if (e->count < bat_cal_hist_size) e->count++;
 }
 
-/* Lookup table: ADC → minutes to ADC=400 (smoothed, from discharge test) */
+/* ADC → минуты до нуля. Снято на реальном разряде, пересчитано под
+ * правильную шкалу: прежние значения были вчетверо растянуты. */
 static const struct { int adc; int min; } bat_table[] = {
-    {800, 170}, {775, 161}, {750, 152}, {725, 145}, {700, 130},
-    {675, 116}, {650, 109}, {625, 100}, {600,  88}, {575,  68},
-    {550,  56}, {525,  43}, {500,  37}, {475,  29}, {450,  22},
-    {425,  12}, {400,   0},
+    { 712, 170}, { 706, 161}, { 700, 152}, { 693, 145}, { 687, 130},
+    { 681, 116}, { 674, 109}, { 668, 100}, { 662,  88}, { 656,  68},
+    { 650,  56}, { 643,  43}, { 637,  37}, { 631,  29}, { 624,  22},
+    { 618,  12}, { 612,   0},
 };
 #define BAT_TABLE_SIZE 17
 
 static int bat_table_lookup(int adc) {
-    if (adc >= 800) return 170;
-    if (adc <= 400) return 0;
+    if (adc >= 712) return 170;
+    if (adc <= 612) return 0;
     for (int i = 0; i < BAT_TABLE_SIZE - 1; i++) {
         if (adc >= bat_table[i + 1].adc) {
             int da = bat_table[i].adc - bat_table[i + 1].adc;
@@ -167,22 +267,38 @@ static void bat_estimate(struct bat_estimator *e, int cur_adc) {
         e->drain_rate = 0;
     }
 
+    /* Если история набралась, считаем по измеренной скорости разряда, а не
+     * по таблице: расход зависит от нагрузки (с погашенным экраном роутер
+     * живёт заметно дольше), и статическая кривая тут врёт в разы.
+     * drain_rate - это сотые доли АЦП в минуту. */
+    if (e->count >= 5 && e->drain_rate > 0) {
+        int left = cur_adc - bat_cal_cutoff;
+        if (left <= 0) {
+            e->remain_min = 0;
+        } else {
+            long long m = (long long)left * 100 / e->drain_rate;
+            if (m > 24 * 60) m = 24 * 60;
+            e->remain_min = (int)m;
+        }
+        return;
+    }
+
     e->remain_min = (int)((long long)tab_min * bat_cal_factor / 100);
     if (e->remain_min < 0) e->remain_min = 0;
 }
 
-/* Charge table: ADC → minutes to ADC=800 (full charge) */
+/* ADC → минуты до полного заряда, та же пересчитанная шкала. */
 static const struct { int adc; int min; } charge_table[] = {
-    {400, 124}, {425, 119}, {450, 113}, {475, 104},
-    {500,  94}, {525,  86}, {550,  77}, {575,  69},
-    {600,  61}, {625,  52}, {650,  44}, {675,  37},
-    {700,  29}, {725,  22}, {750,  15}, {775,   7}, {800, 0},
+    { 612, 124}, { 618, 119}, { 624, 113}, { 631, 104},
+    { 637,  94}, { 643,  86}, { 650,  77}, { 656,  69},
+    { 662,  61}, { 668,  52}, { 674,  44}, { 681,  37},
+    { 687,  29}, { 693,  22}, { 700,  15}, { 706,   7}, { 712, 0},
 };
 #define CHARGE_TABLE_SIZE 17
 
 static int charge_table_lookup(int adc) {
-    if (adc <= 400) return 124;
-    if (adc >= 800) return 0;
+    if (adc <= 612) return 124;
+    if (adc >= 712) return 0;
     for (int i = 0; i < CHARGE_TABLE_SIZE - 1; i++) {
         if (adc < charge_table[i + 1].adc) {
             int da = charge_table[i + 1].adc - charge_table[i].adc;
@@ -210,8 +326,8 @@ static void bat_charge_estimate(struct bat_estimator *e, int cur_adc) {
         e->drain_rate = 0;
     }
 
-    if (cur_adc <= 400) { e->remain_min = -1; return; }  /* CC phase, unpredictable */
-    if (cur_adc >= 790) { e->remain_min = 0; return; }   /* almost full */
+    if (cur_adc <= 612) { e->remain_min = -1; return; }  /* CC phase, unpredictable */
+    if (cur_adc >= 709) { e->remain_min = 0; return; }   /* almost full */
 
     e->remain_min = tab_min * bat_cal_factor / 100;
 }
@@ -243,7 +359,7 @@ static void bat_update(struct bat_estimator *e, struct battery_info *bi) {
         e->was_charging = 0;
     }
 
-    if (bi->adc < 100) { e->remain_min = 0; return; }
+    if (bi->adc < 537) { e->remain_min = 0; return; }
 
     time_t now = time(NULL);
     if (e->count > 0) {
@@ -739,7 +855,8 @@ int main(void) {
             "\"battery\":{\"adc\":%d,\"percent\":%d,\"charging\":%s,\"valid\":%s,"
             "\"no_battery\":%s,\"remain_min\":%d,\"drain_rate\":%d.%d,"
             "\"raw_hex\":\"%02x %02x\"},"
-            "\"uptime\":%ld,\"mem_free_mb\":%ld,\"cpu_load\":%.2f}\n",
+            "\"uptime\":%ld,\"mem_free_mb\":%ld,\"mem_total_mb\":%ld,"
+            "\"cpu_load\":%.2f,\"cpu_busy\":%d,\"cpu_cores\":%d}\n",
             (long)time(NULL),
             li.csq,li.ber,li.rsrp,li.rsrq,li.sinr,li.rssi,li.pci,
             li.band,li.mode,li.oper,li.ip,li.modem,li.temp,li.signal_pct,li.nca,
@@ -757,7 +874,9 @@ int main(void) {
             bat.no_battery?"true":"false",
             bat_est.remain_min, bat_est.drain_rate/100, abs(bat_est.drain_rate)%100,
             bat.raw1, bat.raw2,
-            si.uptime, si.freeram/1024/1024, si.loads[0]/65536.0);
+            si.uptime, (si.freeram + si.bufferram)/1024/1024,
+            si.totalram/1024/1024, si.loads[0]/65536.0,
+            cpu_busy_pct(), cpu_core_count());
 
         /* Push to socket clients */
         accept_clients(srv);
