@@ -165,6 +165,8 @@ let st = {
     sms_i:  -1,        // открытое сообщение
     sms_tp: 0,         // страница текста открытого сообщения
     sms_wait: false,   // ждём фоновое чтение из модема
+    saver_sig: "",     // что нарисовано на заставке (чтобы не перерисовывать зря)
+    page_sig:  "",     // то же для обычных страниц
 };
 
 // --- Connections ---
@@ -2866,6 +2868,47 @@ function draw_traffic_page() {
 //  PAGE DRAWING DISPATCH
 // =============================================
 
+// Подпись того, что СЕЙЧАС показано на странице. Если она не изменилась,
+// перерисовывать нечего: кадр уйдёт байт в байт такой же, а это лишняя работа
+// интерфейса, лишние 150 КБ в драйвер и лишний повод мигнуть подсветкой.
+// Незнакомая страница возвращает уникальную подпись - значит рисуем всегда.
+function page_sig() {
+    let d = st.data ?? {}, l = d.lte ?? {}, u = d.uqmi ?? {};
+    let nc = type(d.wifi?.clients) == "array" ? length(d.wifi.clients) : 0;
+    let base = sprintf("%s|%d|%s|%d", st.page, st.mpg, clock_str(),
+                       int(+(d.sms_new ?? 0)));
+    switch (st.page) {
+    case "dashboard":
+        return base + sprintf("|%s|%s|%d", l.ip ?? "", d.wan_ip ?? "", nc);
+    case "menu":
+        return base + sprintf("|%s|%d|%s|%s", modem_status(l), nc,
+                              fmt_uptime(d.uptime), saver_label(saver_cfg()));
+    case "lte":
+    case "cell":
+        return base + sprintf("|%J|%J", l, u);
+    case "info":
+        return base + sprintf("|%s|%s|%d|%J", fmt_uptime(d.uptime),
+                              d.cpu_load_raw ?? "", int(+(d.mem_free_mb ?? 0)),
+                              d.battery);
+    case "wifi":
+        return base + sprintf("|%d|%J", nc, d.wifi?.ssid);
+    case "traffic":
+        return base + sprintf("|%J|%J", hist.rx, hist.tx);
+    case "weather":
+        return base + sprintf("|%J", d.weather);
+    case "services":
+        return base + sprintf("|%J", d.services);
+    case "sms":
+    case "sms1":
+        return base + sprintf("|%d|%d|%d", st.sms_pg, st.sms_i, st.sms_ts);
+    case "display":
+    case "night":
+        return base + sprintf("|%d|%s|%d|%d|%J", saver_cfg(), saver_style(),
+                              bright_cfg(), burnin_cfg() ? 1 : 0, night_cfg());
+    }
+    return base + sprintf("|%d", st.frame);
+}
+
 function draw_current() {
     switch (st.page) {
     case "dashboard": draw_dashboard(); break;
@@ -3089,6 +3132,7 @@ function run_script(name, bg) {
 
 function go_page(p) {
     st.page = p;
+    st.page_sig = "";   /* смена страницы - подпись заведомо другая */
     draw_current();
 }
 
@@ -3697,10 +3741,27 @@ function main() {
         let data_t;
         data_t = uloop_mod.timer(T.data * 1000, function() {
             refresh_data();
-            if (st.screen == "active")
-                draw_current();
-            else if (st.screen == "screensaver" && !st.blank)
-                draw_screensaver();
+            if (st.screen == "active") {
+                // Перерисовываем, только если на странице что-то изменилось.
+                let sig = page_sig();
+                if (sig != st.page_sig) {
+                    st.page_sig = sig;
+                    draw_current();
+                }
+            } else if (st.screen == "screensaver" && !st.blank) {
+                // Заставку перерисовываем, только когда на ней что-то меняется:
+                // раз в две секунды она рисовалась заново без причины, а полный
+                // кадр идёт 75 мс и на приглушённой подсветке эта протяжка
+                // видна как вспышка.
+                let sig = clock_str() + "|" + (st.data?.weather?.temp ?? "") +
+                          "|" + int(+(st.data?.battery?.percent ?? 0)) +
+                          "|" + sig_state().bars +
+                          "|" + int(st.data?.sms_new ?? 0);
+                if (sig != st.saver_sig) {
+                    st.saver_sig = sig;
+                    draw_screensaver();
+                }
+            }
             data_t.set(T.data * 1000);
         });
 

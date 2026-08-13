@@ -42,6 +42,15 @@
 #define GPIOMODE_OFF 0x060
 #define GPIO_DATA_OFF 0x600
 #define GPIO_DIR_OFF  0x620
+/*
+ * У MT7621 рядом с регистром данных лежат его атомарные близнецы: запись бита
+ * в DSET поднимает соответствующую линию, в DCLR - опускает, остальные не
+ * трогает. Для подсветки это единственный безопасный путь: регистр 0x620 - он
+ * же шина дисплея, и полная его перезапись из таймера ШИМ вклинивалась между
+ * тактами передачи пикселей, гоняя на панель мусор (цветные полосы).
+ */
+#define GPIO_DSET_OFF 0x630
+#define GPIO_DCLR_OFF 0x640
 
 #define BIT_D0  (1u<<13)
 #define BIT_D1  (1u<<18)
@@ -123,8 +132,27 @@ static inline void gw_dir(u32 lcd_bits) {
  * записанный регистр на прерывание.
  */
 #define BL_MAX        255
-#define BL_PERIOD_NS  4000000L   /* 4 мс = 250 Гц */
+#define BL_PERIOD_NS  1000000L   /* 1 мс = 1 кГц */
 
+/*
+ * Во время кадра ШИМ крутит сам цикл отрисовки. Прерывание таймера посреди
+ * битбанга сдвигает такты шины (панель ловит мусор), а вот переключить линию
+ * МЕЖДУ двумя пикселями безопасно - шина в этот момент простаивает.
+ *
+ * Пиксель уходит на панель за ~0.8 мкс, поэтому сверка фазы каждые 8 пикселей
+ * даёт шаг около 6 мкс - этого хватает, чтобы на время передачи поднять
+ * частоту до 4 кГц. Смысл: панель обновляется постепенно, и каждый проблеск
+ * подсветки показывает её в новой стадии - на 1 кГц таких снимков за кадр
+ * набирается десяток, и они видны как мерцание. На 4 кГц протяжка смазывается.
+ * Скважность при этом та же, что и в покое, так что яркость не скачет.
+ * Раньше на время кадра подсветка просто замирала, и каждая перерисовка давала
+ * заметный проблеск или просадку - именно это и было видно на заставке.
+ */
+#define BL_SLOT_PIXELS 8        /* как часто сверяем фазу внутри кадра */
+#define BL_FRAME_PERIOD_NS 250000L   /* 250 мкс = 4 кГц на время передачи */
+
+static volatile bool bl_bus_busy;   /* идёт передача кадра на панель */
+static volatile bool snap_ready;    /* снимок кадра уже готов (сделан writer'ом) */
 static struct hrtimer bl_timer;
 static int  bl_level = BL_MAX;   /* текущая яркость */
 static bool bl_timer_on;
@@ -133,12 +161,22 @@ static bool bl_phase_on;         /* сейчас горит */
 static inline void bl_pin(bool on)
 {
     bl_bit = on ? BIT_BL : 0;
-    gw_dir(shadow_dir);
+    gw(on ? GPIO_DSET_OFF : GPIO_DCLR_OFF, BIT_BL);
 }
 
 static enum hrtimer_restart bl_tick(struct hrtimer *t)
 {
     long on_ns  = (long)BL_PERIOD_NS * bl_level / BL_MAX;
+
+    /* Пока идёт кадр - не дёргаемся вообще. Прерывание посреди битбанга
+     * сдвигает такты шины, и панель ловит мусор: по экрану бегут цветные
+     * полосы. Кадр льётся ~75 мс, всё это время держим текущий уровень и
+     * переспрашиваем через миллисекунду. */
+    if (bl_bus_busy) {
+        hrtimer_forward_now(t, ns_to_ktime(1000000L));
+        return HRTIMER_RESTART;
+    }
+
     long off_ns = (long)BL_PERIOD_NS - on_ns;
 
     bl_phase_on = !bl_phase_on;
@@ -335,28 +373,129 @@ static void lcd_init_ili9341(void)
 
 static u16 flush_snap[LCD_W * LCD_H]; /* snapshot buffer to prevent tearing */
 
+/* Что уже стоит на панели: с этим сравниваем новый кадр, чтобы гнать по шине
+ * только изменившиеся строки. Полный кадр - это 76 800 пикселей и ~75 мс, и
+ * именно эта протяжка видна как вспышка на приглушённой подсветке. */
+static u16 *prev_snap;
+static bool prev_valid;
+static int  stat_rows;      /* строк в последнем кадре */
+static int  stat_us;        /* сколько он занял, мкс */
+static int  stat_frames;    /* кадров всего */
+
+/* Одна пачка строк [r0..r1] целиком: окно по вертикали + запись памяти. */
+static void lcd_send_rows(int r0, int r1)
+{
+    int i, n = (r1 - r0 + 1) * LCD_W;
+    int dim = (bl_level > 0 && bl_level < BL_MAX);
+    static int slot_pos;
+    static int since_yield;
+    const u16 *src = flush_snap + r0 * LCD_W;
+
+    /* Таймер ШИМ замирает ровно на время передачи: прерывание посреди битбанга
+     * рвёт такты шины. Всё остальное время кадра (сравнение строк, установка
+     * окна) он обязан работать - иначе подсветка залипает в тёмной фазе на
+     * несколько миллисекунд, и это видно как вспышка даже когда на панель не
+     * ушло ни одной строки. */
+    bl_bus_busy = true;
+
+    lcd_cmd(0x2B);
+    lcd_dat(r0 >> 8); lcd_dat(r0 & 0xFF);
+    lcd_dat(r1 >> 8); lcd_dat(r1 & 0xFF);
+    lcd_write_mem();
+
+    for (i = 0; i < n; i++) {
+        lcd_write_16d(src[i]);
+        if ((++slot_pos & (BL_SLOT_PIXELS - 1)) != 0)
+            continue;
+
+        /* Фазу берём ОТ ЧАСОВ, а не от счётчика пикселей: цикл то и дело
+         * уступает процессор, и счётчик после этого врёт - подсветка застывала
+         * в тёмной фазе на всю паузу, что и оставалось видно как редкий
+         * проблеск при переходах по меню. */
+        if (dim) {
+            /* do_div вместо обычного деления: на 32-битном MIPS деление u64
+             * в ядре не собирается (нет __udivdi3). */
+            u64 now = ktime_get_ns();
+            u32 ph = do_div(now, (u32)BL_FRAME_PERIOD_NS);
+            bool on = ph < (u32)BL_FRAME_PERIOD_NS / BL_MAX * bl_level;
+            if (on != bl_phase_on) {
+                bl_phase_on = on;
+                bl_pin(on);
+            }
+        }
+
+        /* Процессор уступаем ТОЛЬКО в светлой фазе. Пауза планировщика может
+         * затянуться на миллисекунды, и если поймать её тёмными - будет
+         * провал яркости. Раньше я вместо этого зажигал подсветку перед
+         * паузой принудительно, но это давало обратное: лишние вспышки на
+         * каждую паузу. Пропущенная возможность уступить не страшна -
+         * следующая придёт через 60 микросекунд. */
+        if (++since_yield >= 64 && (!dim || bl_phase_on)) {
+            since_yield = 0;
+            cond_resched();
+        }
+    }
+    lcd_cs_deselect();
+    bl_bus_busy = false;
+}
+
 static void lcd_flush_fb(void)
 {
-    int i;
+    int r, r0;
 
-    /* Snapshot framebuffer to avoid tearing during GPIO output */
-    mutex_lock(&fb_lock);
-    memcpy(flush_snap, framebuffer, FB_SIZE);
-    mutex_unlock(&fb_lock);
+    /* Снимок берёт тот, кто объявил кадр готовым - конец записи в /dev/lcd.
+     * Раньше копия снималась ЗДЕСЬ, и если userspace уже успел очистить
+     * фреймбуфер под следующий кадр, на панель уезжал пустой экран: картинка
+     * «пропадала и появлялась снова». Свои внутренние кадры (заставка, сцены)
+     * драйвер рисует прямо в framebuffer, поэтому для них снимок делаем тут. */
+    if (!snap_ready) {
+        mutex_lock(&fb_lock);
+        memcpy(flush_snap, framebuffer, FB_SIZE);
+        mutex_unlock(&fb_lock);
+    }
+    snap_ready = false;
 
     /* Refresh non-LCD DIR bits in case other drivers changed them */
     base_dir = gr(GPIO_DIR_OFF) & ~LCD_PIN_MASK;
 
+    /* Колонки всегда полные, окно двигаем только по строкам. */
     lcd_cmd(0x2A); lcd_dat(0); lcd_dat(0); lcd_dat(1); lcd_dat(0x3F);
-    lcd_cmd(0x2B); lcd_dat(0); lcd_dat(0); lcd_dat(0); lcd_dat(0xEF);
 
     {
-        lcd_write_mem();
-        for (i = 0; i < LCD_W * LCD_H; i++) {
-            lcd_write_16d(flush_snap[i]);
-            if ((i & 0x3FF) == 0) cond_resched(); /* yield every 1024 pixels */
+        ktime_t t0 = ktime_get();
+        stat_rows = 0;
+    if (!prev_valid || !prev_snap) {
+        lcd_send_rows(0, LCD_H - 1);
+        stat_rows = LCD_H;
+    } else {
+        r = 0;
+        while (r < LCD_H) {
+            if (!memcmp(flush_snap + r * LCD_W, prev_snap + r * LCD_W,
+                        LCD_W * sizeof(u16))) {
+                r++;
+                continue;
+            }
+            r0 = r;
+            while (r < LCD_H && memcmp(flush_snap + r * LCD_W,
+                                       prev_snap + r * LCD_W,
+                                       LCD_W * sizeof(u16)))
+                r++;
+            lcd_send_rows(r0, r - 1);
+            stat_rows += r - r0;
         }
-        lcd_cs_deselect();
+    }
+        stat_us = (int)ktime_to_us(ktime_sub(ktime_get(), t0));
+        stat_frames++;
+    }
+    /* Фазу подсветки в конце кадра НЕ трогаем. Раньше здесь стояло
+     * принудительное «зажечь», чтобы панель не осталась тёмной, - и это давало
+     * лишний импульс света на каждую перерисовку, тот самый мерцающий проблеск.
+     * Ничего страшного не произойдёт: таймер ШИМ всё это время крутится вхолостую
+     * и подхватит фазу в ближайшую миллисекунду. */
+
+    if (prev_snap) {
+        memcpy(prev_snap, flush_snap, FB_SIZE);
+        prev_valid = true;
     }
 }
 
@@ -1093,8 +1232,17 @@ static ssize_t lcd_fb_write(struct file *f, const char __user *buf,
 
     *p = pos + cnt;
 
-    /* Полный кадр записан — разрешить flush */
+    /* Полный кадр записан - снимаем копию ПРЯМО СЕЙЧАС и только потом просим
+     * вывод. Так на панель уезжает именно этот кадр целиком: что userspace
+     * нарисует дальше (а начинает он с заливки фоном), попадёт уже в
+     * следующий. Раньше копия снималась в момент вывода, и панель ловила
+     * наполовину очищенный экран - картинка мигала, будто пропадает. */
     if (pos + cnt >= FB_SIZE) {
+        if (mutex_lock_interruptible(&fb_lock))
+            return -ERESTARTSYS;
+        memcpy(flush_snap, framebuffer, FB_SIZE);
+        mutex_unlock(&fb_lock);
+        snap_ready = 1;
         fb_writing = 0;
         fb_dirty = 1;
     }
@@ -1647,6 +1795,14 @@ static long lcd_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
         bl_set_level((int)arg);
         return 0;
     }
+    if (cmd == 18) {
+        /* Диагностика вывода: строк в последнем кадре, его длительность и
+         * счётчик кадров - чтобы видеть, сколько шины съедает перерисовка. */
+        int d[3] = { stat_rows, stat_us, stat_frames };
+        if (copy_to_user((void __user *)arg, d, sizeof(d)))
+            return -EFAULT;
+        return 0;
+    }
     if (cmd == 17) {
         int lvl = bl_level;
         if (copy_to_user((void __user *)arg, &lvl, sizeof(lvl)))
@@ -1794,6 +1950,11 @@ static int __init lcd_drv_init(void)
 
     framebuffer = vzalloc(fb_npages * PAGE_SIZE);
     if (!framebuffer) { kfree(fb_pages); iounmap(gpio_base); return -ENOMEM; }
+
+    /* Копия того, что уже на панели. Не вышло - не беда: без неё просто
+     * гоняем кадр целиком, как раньше. */
+    prev_snap = vzalloc(FB_SIZE);
+    prev_valid = false;
 
     for (i = 0; i < fb_npages; i++)
         fb_pages[i] = vmalloc_to_page(framebuffer + i * PAGE_SIZE);
@@ -2042,6 +2203,7 @@ static int __init lcd_drv_init(void)
 static void __exit lcd_drv_exit(void)
 {
     if (bl_timer_on) hrtimer_cancel(&bl_timer);
+    if (prev_snap) { vfree(prev_snap); prev_snap = NULL; }
     if (touch_thread) kthread_stop(touch_thread);
     if (render_thread) kthread_stop(render_thread);
     if (touch_i2c_adap) i2c_put_adapter(touch_i2c_adap);

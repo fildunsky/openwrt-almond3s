@@ -147,6 +147,11 @@ The 5x7 font carries ASCII, Cyrillic and the punctuation that actually turns up
 in operator SMS and on the pages: `° « » № ₽ → ← ↑ ↓ ↖ ↗ ↘ ↙ • ✓ … – — “ ” ‘ ’`.
 Anything else falls back to a blank rather than a garbage glyph.
 
+The driver pushes only the rows that actually changed, and the UI redraws a page
+only when something on it changed — an idle screen sends no frames at all. A full
+repaint costs 75 ms of progressive update, which is visible as flicker once the
+backlight is dimmed.
+
 ## Debugging the layout
 
 `lcdshot` dumps the framebuffer as a PPM, so you can see exactly what the panel
