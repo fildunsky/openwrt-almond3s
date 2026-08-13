@@ -219,11 +219,18 @@ int main(int argc, char **argv)
 
     /* touch_poll level — текущая яркость (ioctl 17). */
     if (argc >= 2 && argv[1][0] == 'l') {
-        int lvl = -1;
-        if (ioctl(fd, 17, &lvl) == 0)
-            printf("%d\n", lvl);
+        int lvl[2] = { -1, -1 };
+        if (ioctl(fd, 17, lvl) == 0)
+            printf("подсветка %d, картинка %d\n", lvl[0], lvl[1]);
         close(fd);
         return 0;
+    }
+
+    /* touch_poll gray <0..255> — цифровое затемнение картинки (ioctl 19). */
+    if (argc >= 3 && argv[1][0] == 'g') {
+        int ret = ioctl(fd, 19, (unsigned long)atoi(argv[2]));
+        close(fd);
+        return ret < 0 ? 1 : 0;
     }
 
     /* touch_poll stat — сколько строк ушло на панель в последнем кадре. */

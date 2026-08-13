@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=lcd-ui
-PKG_RELEASE:=32
+PKG_RELEASE:=47
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -62,6 +62,9 @@ grep -q svcping /etc/crontabs/root 2>/dev/null || \
 	echo "*/10 * * * * /etc/lcd/scripts/svcping.sh" >> /etc/crontabs/root
 /etc/init.d/cron reload >/dev/null 2>&1
 /etc/lcd/scripts/weather_fetch.sh >/dev/null 2>&1 &
+# Перезапускаем службу: без этого в памяти остаётся старый lcd_ui, файлы уже
+# новые, а на экране прежнее поведение - выглядит как «обновление не приехало».
+[ -x /etc/init.d/lcd_ui ] && /etc/init.d/lcd_ui restart >/dev/null 2>&1
 exit 0
 endef
 
