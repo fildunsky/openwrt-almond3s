@@ -11,7 +11,7 @@ The repository is an OpenWrt feed with two packages:
 | Package | What it is |
 |---|---|
 | `kmod-lcd-almond3s` | kernel driver: RGB565 framebuffer at `/dev/lcd`, touch, battery gauge over the PIC16LF1509 |
-| `lcd-ui` | userspace: renderer, touch daemon, data collector and the ucode UI |
+| `lcd-ui-almond3s` | userspace: renderer, touch daemon, data collector and the ucode UI |
 
 ## Hardware
 
@@ -43,13 +43,13 @@ The repository is an OpenWrt feed with two packages:
 ```sh
 scp prebuilt/25.12.5/*.apk root@192.168.1.1:/tmp/
 ssh root@192.168.1.1
-apk add --allow-untrusted /tmp/kmod-lcd-almond3s-*.apk /tmp/lcd-ui-*.apk
+apk add --allow-untrusted /tmp/kmod-lcd-almond3s-*.apk /tmp/lcd-ui-almond3s-*.apk
 reboot
 ```
 
 **A kernel module is tied to the exact kernel build it was compiled against**
 (vermagic). The prebuilt `kmod` will refuse to load on any other OpenWrt
-version — for those, build it from source as described below. `lcd-ui` itself
+version — for those, build it from source as described below. `lcd-ui-almond3s` itself
 is not tied to the kernel and installs on any 25.12.x.
 
 ### Build from source
@@ -63,9 +63,9 @@ echo "src-git almond3s https://github.com/fildunsky/openwrt-almond3s.git" >> fee
 Then in `make menuconfig`:
 
 * `Kernel modules` → `Video Support` → `kmod-lcd-almond3s`
-* `Utilities` → `lcd-ui`
+* `Utilities` → `lcd-ui-almond3s`
 
-and `make package/feeds/almond3s/lcd-almond3s/compile package/feeds/almond3s/lcd-ui/compile`,
+and `make package/feeds/almond3s/lcd-almond3s/compile package/feeds/almond3s/lcd-ui-almond3s/compile`,
 or just build the whole image.
 
 While hacking on the code, point the feed at a local checkout instead of
@@ -77,19 +77,19 @@ src-link almond3s /home/user/openwrt-almond3s
 
 ## Configuration
 
-Everything lives in `/etc/config/lcd` and most of it is also reachable from the
+Everything lives in `/etc/config/almond3s` and most of it is also reachable from the
 screen itself, under `Menu → More → Display`:
 
 ```sh
-uci set lcd.display.lang='ru'          # ru | en
-uci set lcd.display.saver='60'          # seconds until the screensaver, 0 disables it
-uci set lcd.display.saver_style='clock' # clock | full (weather) | line | off
-uci set lcd.display.night='1'           # night mode for the screensaver
-uci set lcd.display.night_from='22'      # from this hour
-uci set lcd.display.night_to='6'         # until this hour
-uci set lcd.weather.city='Voronezh'
-uci commit lcd
-/etc/init.d/lcd_ui restart
+uci set almond3s.display.lang='ru'          # ru | en
+uci set almond3s.display.saver='60'          # seconds until the screensaver, 0 disables it
+uci set almond3s.display.saver_style='clock' # clock | full (weather) | line | off
+uci set almond3s.display.night='1'           # night mode for the screensaver
+uci set almond3s.display.night_from='22'      # from this hour
+uci set almond3s.display.night_to='6'         # until this hour
+uci set almond3s.weather.city='Voronezh'
+uci commit almond3s
+/etc/init.d/almond3s-lcd restart
 ```
 
 `saver_style=off` blanks the panel instead of drawing a screensaver — the
@@ -98,17 +98,17 @@ dark screen brings it back. The same switch is available by hand, and can be
 bound to any button that produces events:
 
 ```sh
-/etc/lcd/scripts/screen.sh off|on|toggle
+/etc/almond3s/scripts/screen.sh off|on|toggle
 
 # /etc/rc.button/tamper
-[ "$ACTION" = released ] && [ "$SEEN" -lt 2 ] && /etc/lcd/scripts/screen.sh toggle
+[ "$ACTION" = released ] && [ "$SEEN" -lt 2 ] && /etc/almond3s/scripts/screen.sh toggle
 ```
 
 Blanking drives the backlight LED from the device tree (GPIO 31, exported as
 `/sys/class/leds/:power`) rather than the driver's own ioctl. Both flip the same
 pin, but going through the LED keeps the kernel's idea of `brightness` in sync —
 otherwise the next LED trigger reload would silently light the panel back up.
-The driver ioctl (`touch_poll b 0|1`) stays as a fallback when the DTS has no
+The driver ioctl (`almond3s-lcd b 0|1`) stays as a fallback when the DTS has no
 such LED. The `Blank now` button on the Display page does the same thing on
 demand.
 
@@ -119,8 +119,8 @@ kernel event at all. Only `reset` (GPIO 32, `linux,code = KEY_RESTART`) and
 comes from the key code, not from the DTS label: the tamper button runs
 `/etc/rc.button/BTN_0`.
 
-Weather is fetched by `/etc/lcd/scripts/weather_fetch.sh` from wttr.in and the
-service pings by `/etc/lcd/scripts/svcping.sh`; both are put on cron by the
+Weather is fetched by `/etc/almond3s/scripts/weather_fetch.sh` from wttr.in and the
+service pings by `/etc/almond3s/scripts/svcping.sh`; both are put on cron by the
 package on install.
 
 ## What is on the screen
@@ -150,9 +150,9 @@ package on install.
   flip (done in the panel's MADCTL register, touch is mirrored with it)
 * **LED** — the white LED above the screen: on/off, and blinking while unread
   SMS remain. It hangs off the PIC, not a GPIO (port E bit 4), so it is driven
-  by `touch_poll led on|off|blink`
+  by `almond3s-lcd led on|off|blink`
 * **Sound** — the piezo buzzer, also on the PIC (port C bit 0). The stock
-  tones were recovered from the factory firmware: `touch_poll bell` (the door
+  tones were recovered from the factory firmware: `almond3s-lcd bell` (the door
   chime, 1975/1675 Hz), `ambulance`, `police`, plus `tone <hz> <ms> ...` for
   up to 64 notes and `volume 1..3`
 * Header shows an envelope when `luci-app-5gmodem` reports unread SMS
@@ -168,11 +168,11 @@ backlight is dimmed.
 
 ## Debugging the layout
 
-`lcdshot` dumps the framebuffer as a PPM, so you can see exactly what the panel
+`almond3s-lcdshot` dumps the framebuffer as a PPM, so you can see exactly what the panel
 shows without a camera:
 
 ```sh
-ssh root@192.168.1.1 lcdshot > shot.ppm
+ssh root@192.168.1.1 almond3s-lcdshot > shot.ppm
 ```
 
 ## Known limitations
@@ -181,11 +181,11 @@ ssh root@192.168.1.1 lcdshot > shot.ppm
   redraws the whole screen. Dirty-row updates are on the to-do list.
 * Brightness is done by **scaling the picture**: the driver dims pixels on the
   way to the panel while the backlight stays lit. Steps on the Display page are
-  10/20/35/50/70/85 /100 %, by hand `touch_poll gray 0..255`; `touch_poll level`
+  10/20/35/50/70/85 /100 %, by hand `almond3s-lcd gray 0..255`; `almond3s-lcd level`
   prints both levels. The screensaver dims further during night-mode hours.
 
   The driver also carries a software PWM for the backlight itself
-  (`touch_poll dim 0..255`, GPIO 31 via hrtimer). It gives real darkness and is
+  (`almond3s-lcd dim 0..255`, GPIO 31 via hrtimer). It gives real darkness and is
   used to switch the panel off, but it is unusable for smooth dimming: the panel
   updates progressively, so a blinking backlight shows it mid-update — visible as
   flicker on every repaint. The stock firmware had no brightness control at all —

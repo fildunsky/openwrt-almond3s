@@ -11,7 +11,7 @@ SX8650 и приложение, которое показывает на нём 
 | Пакет | Что это |
 |---|---|
 | `kmod-lcd-almond3s` | драйвер ядра: фреймбуфер RGB565 в `/dev/lcd`, тач, батарея через PIC16LF1509 |
-| `lcd-ui` | юзерспейс: рендерер, демон тача, сборщик данных и сам интерфейс на ucode |
+| `lcd-ui-almond3s` | юзерспейс: рендерер, демон тача, сборщик данных и сам интерфейс на ucode |
 
 ## Железо
 
@@ -43,13 +43,13 @@ SX8650 и приложение, которое показывает на нём 
 ```sh
 scp prebuilt/25.12.5/*.apk root@192.168.1.1:/tmp/
 ssh root@192.168.1.1
-apk add --allow-untrusted /tmp/kmod-lcd-almond3s-*.apk /tmp/lcd-ui-*.apk
+apk add --allow-untrusted /tmp/kmod-lcd-almond3s-*.apk /tmp/lcd-ui-almond3s-*.apk
 reboot
 ```
 
 **Модуль ядра привязан к конкретной сборке ядра** (vermagic). На другой версии
 OpenWrt готовый `kmod` просто не загрузится — там нужно собрать его из
-исходников, как описано ниже. Сам `lcd-ui` к ядру не привязан и ставится на
+исходников, как описано ниже. Сам `lcd-ui-almond3s` к ядру не привязан и ставится на
 любую 25.12.x.
 
 ### Сборкой из исходников
@@ -63,9 +63,9 @@ echo "src-git almond3s https://github.com/fildunsky/openwrt-almond3s.git" >> fee
 Дальше в `make menuconfig`:
 
 * `Kernel modules` → `Video Support` → `kmod-lcd-almond3s`
-* `Utilities` → `lcd-ui`
+* `Utilities` → `lcd-ui-almond3s`
 
-и `make package/feeds/almond3s/lcd-almond3s/compile package/feeds/almond3s/lcd-ui/compile`
+и `make package/feeds/almond3s/lcd-almond3s/compile package/feeds/almond3s/lcd-ui-almond3s/compile`
 либо обычная сборка образа целиком.
 
 Когда правишь код, удобнее направить фид на локальную копию, а не на GitHub, -
@@ -77,19 +77,19 @@ src-link almond3s /home/user/openwrt-almond3s
 
 ## Настройка
 
-Всё лежит в `/etc/config/lcd`, и почти всё то же самое доступно с самого экрана,
+Всё лежит в `/etc/config/almond3s`, и почти всё то же самое доступно с самого экрана,
 через `Меню → Ещё → Экран`:
 
 ```sh
-uci set lcd.display.lang='ru'          # ru | en
-uci set lcd.display.saver='60'          # секунды до заставки, 0 - выключить
-uci set lcd.display.saver_style='clock' # clock (часы) | full (погода) | line | off (гасить экран)
-uci set lcd.display.night='1'           # ночной режим заставки
-uci set lcd.display.night_from='22'      # с какого часа
-uci set lcd.display.night_to='6'         # до какого часа
-uci set lcd.weather.city='Voronezh'
-uci commit lcd
-/etc/init.d/lcd_ui restart
+uci set almond3s.display.lang='ru'          # ru | en
+uci set almond3s.display.saver='60'          # секунды до заставки, 0 - выключить
+uci set almond3s.display.saver_style='clock' # clock (часы) | full (погода) | line | off (гасить экран)
+uci set almond3s.display.night='1'           # ночной режим заставки
+uci set almond3s.display.night_from='22'      # с какого часа
+uci set almond3s.display.night_to='6'         # до какого часа
+uci set almond3s.weather.city='Voronezh'
+uci commit almond3s
+/etc/init.d/almond3s-lcd restart
 ```
 
 `saver_style=off` вместо заставки гасит панель: подсветка снимается ioctl'ом
@@ -97,16 +97,16 @@ uci commit lcd
 То же самое доступно руками и вешается на любую кнопку, у которой есть события:
 
 ```sh
-/etc/lcd/scripts/screen.sh off|on|toggle
+/etc/almond3s/scripts/screen.sh off|on|toggle
 
 # /etc/rc.button/tamper
-[ "$ACTION" = released ] && [ "$SEEN" -lt 2 ] && /etc/lcd/scripts/screen.sh toggle
+[ "$ACTION" = released ] && [ "$SEEN" -lt 2 ] && /etc/almond3s/scripts/screen.sh toggle
 ```
 
 Гасим не своим ioctl'ом драйвера, а светодиодом подсветки из DTS (GPIO 31,
 `/sys/class/leds/:power`). Пин один и тот же, но через светодиод ядро остаётся
 при верном значении `brightness` - иначе ближайшая перезагрузка триггеров
-светодиода зажгла бы панель сама. ioctl (`touch_poll b 0|1`) остался запасным
+светодиода зажгла бы панель сама. ioctl (`almond3s-lcd b 0|1`) остался запасным
 путём на случай, если светодиода в DTS нет. Кнопка «Погасить» на странице
 «Экран» делает то же самое по требованию.
 
@@ -116,8 +116,8 @@ uci commit lcd
 (GPIO 28, `BTN_0`). Имя скрипта в `/etc/rc.button/` при этом берётся из кода
 клавиши, а не из метки в DTS: тампер запускает `/etc/rc.button/BTN_0`.
 
-Погоду забирает `/etc/lcd/scripts/weather_fetch.sh` с wttr.in, пинги сервисов —
-`/etc/lcd/scripts/svcping.sh`; оба ставятся в cron при установке пакета.
+Погоду забирает `/etc/almond3s/scripts/weather_fetch.sh` с wttr.in, пинги сервисов —
+`/etc/almond3s/scripts/svcping.sh`; оба ставятся в cron при установке пакета.
 
 ## Что на экране
 
@@ -146,9 +146,9 @@ uci commit lcd
   (делается регистром MADCTL самой панели, тач зеркалится вместе с ней)
 * **Диод** — белый светодиод над экраном: включить, выключить и мигание, пока
   есть непрочитанные SMS. Он висит не на GPIO, а на PIC (порт E, бит 4), и
-  управляется командой `touch_poll led on|off|blink`
+  управляется командой `almond3s-lcd led on|off|blink`
 * **Звук** — пищалка, тоже на PIC (порт C, бит 0). Заводские тоны вынуты из
-  стоковой прошивки: `touch_poll bell` (дверной звонок, 1975/1675 Гц),
+  стоковой прошивки: `almond3s-lcd bell` (дверной звонок, 1975/1675 Гц),
   `ambulance`, `police`, плюс `tone <Гц> <мс> ...` до 64 нот и
   `volume 1..3`
 * В шапке появляется конвертик, когда в `luci-app-5gmodem` есть непрочитанные SMS
@@ -164,11 +164,11 @@ uci commit lcd
 
 ## Отладка вёрстки
 
-`lcdshot` выгружает фреймбуфер в PPM — видно ровно то, что на панели, без
+`almond3s-lcdshot` выгружает фреймбуфер в PPM — видно ровно то, что на панели, без
 фотографирования экрана:
 
 ```sh
-ssh root@192.168.1.1 lcdshot > shot.ppm
+ssh root@192.168.1.1 almond3s-lcdshot > shot.ppm
 ```
 
 ## Чего пока нет
@@ -177,10 +177,10 @@ ssh root@192.168.1.1 lcdshot > shot.ppm
   весь экран. Обновление только изменившихся строк — в планах.
 * Яркость меняется **цифровым затемнением**: драйвер масштабирует пиксели при
   отправке на панель, а подсветка горит ровно. Шаги на странице «Экран» -
-  10/20/35/50/70/85/100 %, руками - `touch_poll gray 0..255`; оба уровня
-  показывает `touch_poll level`. Ночью заставка приглушается дополнительно.
+  10/20/35/50/70/85/100 %, руками - `almond3s-lcd gray 0..255`; оба уровня
+  показывает `almond3s-lcd level`. Ночью заставка приглушается дополнительно.
 
-  В драйвере есть и программный ШИМ подсветки (`touch_poll dim 0..255`,
+  В драйвере есть и программный ШИМ подсветки (`almond3s-lcd dim 0..255`,
   GPIO 31 через hrtimer), он даёт настоящую темноту и используется для полного
   гашения экрана. Для плавной регулировки он не годится: панель обновляется
   постепенно, и моргающая подсветка показывает её в разных стадиях - это видно
