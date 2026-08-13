@@ -126,6 +126,10 @@ package on install.
 ## What is on the screen
 
 * **Network** — WWAN and WAN addresses, Wi-Fi clients
+* **Network** — the uplink list from `netpri.sh`: modem, Wi-Fi STA, wired, with
+  their addresses and metrics. Tapping a card makes that uplink primary; the
+  switch itself is done entirely by 5gmodem, metric base included (100, or 10
+  with mwan3 compatibility)
 * **Wi-Fi** — SSIDs, clients, a QR code to join the network
 * **Modem** — operator, phone number, signal ladder, carrier aggregation,
   temperature, and a second page with cell details (TAC, CID, bandwidth,
@@ -137,6 +141,8 @@ package on install.
   with paging when it does not fit. Reachable from the menu or by tapping the
   envelope in the header. The unread mark subtracts `5gmodem`'s live `seen`
   state, so the envelope clears the moment a message is read elsewhere
+  Opening a message marks it read through the same `seen-add` the web Inbox
+  uses, so the envelope clears everywhere at once
 * **Services** — reachability of YouTube, Telegram, GitHub and others; tapping a
   card rechecks that one service immediately
 * **Weather** — current conditions with a city picker
@@ -165,14 +171,17 @@ ssh root@192.168.1.1 lcdshot > shot.ppm
 
 * A full frame flush takes ~75 ms — the bus is bit-banged and the driver
   redraws the whole screen. Dirty-row updates are on the to-do list.
-* Backlight brightness is done with software PWM inside the driver: the MT7621
-  has no hardware PWM on that pin, so a kernel timer toggles GPIO 31 at 250 Hz.
-  The level is set on the Display page (25/50/75/100 %) or by hand:
-  `touch_poll dim 0..255`, current level via `touch_poll level`. The stock
-  firmware had no brightness control at all — its "BackLight Settings" screen
-  only picks the hours the backlight stays on. During night-mode hours the
-  screensaver is additionally dimmed to a third of the level; the active screen
-  keeps full brightness.
+* Brightness is done by **scaling the picture**: the driver dims pixels on the
+  way to the panel while the backlight stays lit. Steps on the Display page are
+  10/20/35/50/70/85 /100 %, by hand `touch_poll gray 0..255`; `touch_poll level`
+  prints both levels. The screensaver dims further during night-mode hours.
+
+  The driver also carries a software PWM for the backlight itself
+  (`touch_poll dim 0..255`, GPIO 31 via hrtimer). It gives real darkness and is
+  used to switch the panel off, but it is unusable for smooth dimming: the panel
+  updates progressively, so a blinking backlight shows it mid-update — visible as
+  flicker on every repaint. The stock firmware had no brightness control at all —
+  its "BackLight Settings" screen only picks the hours the backlight stays on.
 * Zigbee (EM357) and the siren are not supported.
 * The driver talks to the GPIO block directly instead of going through pinctrl,
   which is why it is a feed package and not something submitted upstream yet.
