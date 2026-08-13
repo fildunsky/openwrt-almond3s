@@ -229,6 +229,20 @@ let TR_RU = {
     "Resetting modem...": "Перезапуск модема...",
     "Reboot": "Перезапуск",
     "LED": "Диод",
+    "Sound": "Звук",
+    "build %s.%s.%s": "сборка %s.%s.%s",
+    "build %s": "сборка %s",
+    "free RAM %d/%dM": "Свободно ОЗУ %d/%dМБ",
+    "free RAM %dM": "Свободно ОЗУ %dМБ",
+    ", %d threads": ", %d потока",
+    "to full ~%dh %02dm": "до полного ~%dч %02dм",
+    "charging": "идёт зарядка",
+    "left ~%dh %02dm, %.1f/min": "осталось ~%dч %02dм, расход %.1f/мин",
+    "drain %.1f/min": "расход %.1f/мин",
+    "measuring drain rate": "меряю скорость разряда",
+    "raw %s, cutoff %d": "байты %s, отсечка %d",
+    "buzzer test": "проверка бипера",
+    "Factory tones and volume from stock firmware": "Тоны и громкость из заводской прошивки",
     "Blink on SMS": "Мигать при SMS",
     "above the screen": "над экраном",
     "while unread remain": "пока есть непрочитанные",
@@ -1066,6 +1080,47 @@ function bright_set(pct) {
     if (!ucur) return;
     ucur.set("lcd", "display", "brightness", sprintf("%d", pct));
     ucur.commit("lcd");
+}
+
+// Разворот экрана на 180: регистр панели MADCTL в драйвере, тач зеркалится
+// там же. Здесь только хранение и применение.
+function rot_cfg() {
+    let v = ucur ? ucur.get("lcd", "display", "rotate") : null;
+    return (v == "1");
+}
+
+function rot_set(on) {
+    if (!ucur) return;
+    ucur.set("lcd", "display", "rotate", on ? "1" : "0");
+    ucur.commit("lcd");
+}
+
+function rot_apply() {
+    system(sprintf("touch_poll rotate %d >/dev/null 2>&1", rot_cfg() ? 1 : 0));
+}
+
+function rot_btn() {
+    return { x: 10, y: 28, w: 44, h: 22 };
+}
+
+// Круговые стрелки рисуем кольцом с двумя разрывами и стрелками на концах:
+// свой глиф в шрифт заводить ради одной кнопки незачем.
+function draw_rot_icon(ox, oy, col) {
+    // Кольцо с двумя разрывами: сверху справа и снизу слева.
+    for (let dy = -7; dy <= 7; dy++)
+        for (let dx = -7; dx <= 7; dx++) {
+            let d = dx * dx + dy * dy;
+            if (d > 45 || d < 24) continue;
+            if (dx > 1 && dy < -1) continue;
+            if (dx < -1 && dy > 1) continue;
+            lcd_rect(ox + 7 + dx, oy + 7 + dy, 1, 1, col);
+        }
+    // Стрелки: сплошные треугольники в семь пикселей основанием, иначе на
+    // такой мелочи они читаются как заусенцы.
+    for (let k = 0; k < 4; k++) {
+        lcd_rect(ox + 8 + k, oy + 0 + k, 7 - 2 * k, 1, col);       // верх, остриём вниз
+        lcd_rect(ox + k, oy + 14 - k, 7 - 2 * k, 1, col);          // низ, остриём вверх
+    }
 }
 
 function night_cfg() {
@@ -2023,9 +2078,10 @@ function draw_menu() {
         lcd_text(b.x + 20, b.y + 20, tr("MORE >>>"), C.white, C.hdr, 2);
 
     } else {
-        draw_btn(1, tr("Modem Reset"), tr("LTE restart"), C.white, C.gray);
-        draw_btn(2, tr("Reboot"), tr("System"), C.white, "#F0B0B8", C.back);
-        let rb = btn_pos(2);
+        draw_btn(1, tr("Sound"), tr("buzzer test"), C.white, C.gray);
+        draw_btn(2, tr("Modem Reset"), tr("LTE restart"), C.white, C.gray);
+        draw_btn(3, tr("Reboot"), tr("System"), C.white, "#F0B0B8", C.back);
+        let rb = btn_pos(3);
         lcd_rect(rb.x, rb.y, rb.w, 2, "#D32F2F");
 
         // 6: <<< BACK. Ровно одна ячейка: растянутая на две выглядела единой
@@ -2118,6 +2174,10 @@ function draw_display_page() {
     draw_header(tr("Display"));
 
     // Язык - одной кнопкой сверху справа: флажок и код.
+    let rb = rot_btn();
+    lcd_rect(rb.x, rb.y, rb.w, rb.h, C.widget);
+    draw_rot_icon(rb.x + 15, rb.y + 4, rot_cfg() ? C.green : C.gray);
+
     let ru = (lang() == "ru");
     let lb = lang_btn();
     lcd_rect(lb.x, lb.y, lb.w, lb.h, C.widget);
@@ -2180,6 +2240,63 @@ function draw_display_page() {
 // Часы ночного режима - отдельной страницей: открывается тапом по «Ночь».
 function led_row(i) {
     return { x: 20, y: 44 + i * 56, w: 280, h: 44 };
+}
+
+// Звуки бипера. Каждый - список пар «частота длительность», их играет
+// touch_poll: загрузка таблицы в PIC занимает около секунды, поэтому зовём
+// его фоном, иначе интерфейс замирал бы на каждое нажатие.
+let SOUNDS = [
+    { label: "звонок",  name: "bell",  args: "" },
+    { label: "скорая",  name: "ambulance", args: "" },
+    { label: "полиция", name: "police", args: "" },
+    { label: "мелодия", name: "melody", args: "" },
+    { label: "марш",    name: "tone",
+      args: "440 500 440 500 440 500 349 375 523 125 440 500 349 375 523 125 440 650" },
+    { label: "сирена",  name: "siren", args: "" },
+    { label: "гр 1",    name: "vol", args: "1" },
+    { label: "гр 2",    name: "vol", args: "2" },
+    { label: "гр 3",    name: "vol", args: "3" },
+    { label: "звонок-",  name: "tone", args: "988 130 988 267 838 130 838 535" },
+    { label: "звонок--", name: "tone", args: "494 130 494 267 419 130 419 535" },
+    { label: "стоп",    name: "tone", args: "0 1" },
+];
+
+// Выбранный уровень громкости запоминается и подставляется следующему звуку:
+// сама команда 0x34 не переживает сброса шины в начале последовательности.
+let snd_vol = 1;
+
+function snd_btn(i) {
+    return { x: 6 + (i % 3) * 104, y: 30 + int(i / 3) * 44, w: 100, h: 40 };
+}
+
+function snd_play(i) {
+    let e = SOUNDS[i];
+    if (e.name == "vol") {
+        snd_vol = int(e.args);
+        return;
+    }
+    let v = snd_vol > 0 ? sprintf(" -v %d", snd_vol) : "";
+    let a = e.args != "" ? " " + e.args : "";
+    system(sprintf("touch_poll %s%s%s >/dev/null 2>&1 &", e.name, v, a));
+}
+
+function draw_sound_page() {
+    lcd_clear(C.bg);
+    draw_header(tr("Sound"));
+    for (let i = 0; i < length(SOUNDS); i++) {
+        let b = snd_btn(i), last = (i == length(SOUNDS) - 1);
+        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+        let vol_sel = (SOUNDS[i].name == "vol" && int(SOUNDS[i].args) == snd_vol);
+        lcd_rect(b.x, b.y, 4, b.h,
+                 last ? C.red
+                      : (SOUNDS[i].name == "vol" ? (vol_sel ? C.green : C.yellow)
+                                                 : (i < 6 ? C.cyan : C.gray)));
+        let t = SOUNDS[i].label;
+        lcd_text(b.x + int((b.w - tlen(t) * 12) / 2), b.y + 12, t, C.white, C.widget, 2);
+    }
+    lcd_text(10, 214, tr("Factory tones and volume from stock firmware"), C.dim, C.bg, 1);
+    draw_back();
+    lcd_flush();
 }
 
 function draw_led_page() {
@@ -2597,10 +2714,23 @@ function draw_info_page() {
     lcd_rect(cx, y1, 4, 52, C.cyan);
     lcd_text(cx + 10, y1 + 6, tr("SYSTEM"), C.gray, C.widget, 1);
     let hw = uconn ? (uconn.call("system", "board", {})?.model ?? "") : "";
-    lcd_text(cx + 10, y1 + 20, sprintf(tr("Model %s"), hw != "" ? hw : "?"), C.white, C.widget, 1);
+    lcd_text(cx + 10, y1 + 20, hw != "" ? hw : "?", C.white, C.widget, 1);
     lcd_text(cx + 10, y1 + 32, sprintf(tr("Uptime %s"), fmt_uptime(d?.uptime)), C.white, C.widget, 1);
-    lcd_text(cx + 150, y1 + 32, sprintf(tr("Mem %dM"), int(+(d?.mem_free_mb ?? 0))), C.green, C.widget, 1);
-    lcd_text(cx + 10, y1 + 44, sprintf(tr("CPU %s"), load), C.accent, C.widget, 1);
+
+    // Свободную память прижимаем к правому краю карточки: строка длинная,
+    // а слева уже стоит время работы.
+    let mfree = int(+(d?.mem_free_mb ?? 0));
+    let mtot  = int(+(d?.mem_total_mb ?? 0));
+    let mstr = mtot > 0 ? sprintf(tr("free RAM %d/%dM"), mfree, mtot)
+                        : sprintf(tr("free RAM %dM"), mfree);
+    lcd_text(cx + cw - 10 - tlen(mstr) * 6, y1 + 32, mstr, C.green, C.widget, 1);
+
+    let busy = int(+(d?.cpu_busy ?? -1));
+    let cores = int(+(d?.cpu_cores ?? 0));
+    let cstr = sprintf(tr("CPU %s"), load);
+    if (busy >= 0) cstr += sprintf(", %d%%", busy);
+    if (cores > 0) cstr += sprintf(tr(", %d threads"), cores);
+    lcd_text(cx + 10, y1 + 44, cstr, C.accent, C.widget, 1);
 
     // Card 2: Power
     let y2 = y1 + 58;
@@ -2615,9 +2745,26 @@ function draw_info_page() {
         let bat_color = bat?.valid ? (bpct > 20 ? C.green : C.yellow) : C.red;
         lcd_text(cx + 10, y2 + 20, sprintf("%s %d%%", bat_state, bpct), bat_color, C.widget, 1);
         lcd_text(cx + 120, y2 + 20, sprintf(tr("ADC %d"), badc), C.white, C.widget, 1);
-        lcd_text(cx + 10, y2 + 32, sprintf(tr("Raw %s"), braw), C.dim, C.widget, 1);
+
+        // Строка разряда: расход измеряется на месте, поэтому показываем и
+        // его, и остаток - по ним видно, врёт ли оценка.
+        let rmin = int(+(bat?.remain_min ?? -1));
+        let drain = +(bat?.drain_rate ?? 0);
+        let line = "";
+        if (bat?.charging)
+            line = rmin > 0 ? sprintf(tr("to full ~%dh %02dm"), int(rmin / 60), rmin % 60)
+                            : tr("charging");
+        else if (rmin > 0 && drain > 0)
+            line = sprintf(tr("left ~%dh %02dm, %.1f/min"), int(rmin / 60), rmin % 60, drain);
+        else if (drain > 0)
+            line = sprintf(tr("drain %.1f/min"), drain);
+        else
+            line = tr("measuring drain rate");
+        lcd_text(cx + 10, y2 + 32, line, C.white, C.widget, 1);
     }
-    lcd_text(cx + 10, y2 + 44, bat?.valid ? tr("Status OK") : tr("Status invalid"), bat?.valid ? C.green : C.red, C.widget, 1);
+    lcd_text(cx + 10, y2 + 44,
+             sprintf(tr("raw %s, cutoff %d"), braw, 612),
+             C.dim, C.widget, 1);
 
     // Card 3: Software
     let y3 = y2 + 58;
@@ -2625,8 +2772,15 @@ function draw_info_page() {
     lcd_rect(cx, y3, 4, 52, "#D2A8FF");
     lcd_text(cx + 10, y3 + 6, tr("SOFTWARE"), C.gray, C.widget, 1);
     lcd_text(cx + 10, y3 + 20, sprintf("OpenWrt %s", board?.release?.version ?? "?"), C.white, C.widget, 1);
-    lcd_text(cx + 10, y3 + 32, sprintf(tr("Kernel %s"), board?.kernel ?? "?"), C.dim, C.widget, 1);
-    lcd_text(cx + 10, y3 + 44, sprintf("almond3s-lcd %s", drv_ver), C.accent, C.widget, 1);
+    let kstr = sprintf(tr("Kernel %s"), board?.kernel ?? "?");
+    lcd_text(cx + cw - 10 - tlen(kstr) * 6, y3 + 20, kstr, C.dim, C.widget, 1);
+
+    // Драйвер отдаёт дату сборки как 2026-08-13 - показываем по-русски.
+    let dv = drv_ver;
+    let dm = match(dv, /^([0-9]{4})-([0-9]{2})-([0-9]{2})$/);
+    dv = dm ? sprintf(tr("build %s.%s.%s"), dm[3], dm[2], dm[1]) : sprintf(tr("build %s"), dv);
+    lcd_text(cx + 10, y3 + 32, "almond3s-lcd", C.accent, C.widget, 1);
+    lcd_text(cx + 10, y3 + 44, dv, C.accent, C.widget, 1);
     lcd_text(cx + cw - 10 - tlen(TG_LINK) * 6, y3 + 44, TG_LINK, C.dim, C.widget, 1);
 
     draw_back();
@@ -3118,6 +3272,7 @@ function draw_current() {
     case "sms1":      draw_sms_one(); break;
     case "night":     draw_night_page(); break;
     case "led":       draw_led_page(); break;
+    case "sound":     draw_sound_page(); break;
     }
 }
 
@@ -3476,8 +3631,9 @@ function handle_touch(tx, ty) {
                         tr("Traffic"), tr("Info"), tr("MORE >>>") ]
                     : (st.mpg == 2
                         ? [ tr("SMS"), tr("Services"), tr("Weather"),
-                            tr("Display"), tr("Modem Reset"), tr("MORE >>>") ]
-                        : [ tr("Reboot"), "", "", "", "", tr("<<< BACK") ]);
+                            tr("Display"), tr("LED"), tr("MORE >>>") ]
+                        : [ tr("Sound"), tr("Modem Reset"), tr("Reboot"),
+                            "", "", tr("<<< BACK") ]);
                 flash_btn(b.x, b.y, b.w, b.h, labels[i - 1] ?? "", i == 6);
                 sock_poll(150);
 
@@ -3492,7 +3648,7 @@ function handle_touch(tx, ty) {
                     }
                 } else if (st.mpg == 3) {
                     switch (i) {
-                    case 1:
+                    case 2:
                         // Перезапуск модема. Своего скрипта у нас нет, а у
                         // 5gmodem есть отлаженная лестница: питание слота по
                         // GPIO (modem_power/modem_reset/4g/5g1/5g2), затем
@@ -3524,7 +3680,7 @@ function handle_touch(tx, ty) {
                               rsrp < 0 ? "#002000" : "#200000", 2);
                         draw_menu();
                         return;
-                    case 2:
+                    case 3:
                         // Reboot with confirmation dialog
                         lcd_clear("#200000");
                         lcd_rect(30, 60, 260, 120, "#300000");
@@ -3559,6 +3715,7 @@ function handle_touch(tx, ty) {
                         toast(tr("Cancelled (timeout)"), C.gray, "#1082", 1);
                         draw_menu();
                         return;
+                    case 1: go_page("sound"); return;
                     case 6: st.mpg = 1; draw_menu(); return;
                     }
                 } else if (st.mpg == 2) {
@@ -3676,6 +3833,18 @@ function handle_touch(tx, ty) {
         return;
     }
 
+    if (st.page == "sound") {
+        for (let i = 0; i < length(SOUNDS); i++) {
+            let b = snd_btn(i);
+            if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
+            flash_btn(b.x, b.y, b.w, b.h, SOUNDS[i].label, false);
+            snd_play(i);
+            draw_sound_page();
+            return;
+        }
+        return;
+    }
+
     if (st.page == "led") {
         let c = led_cfg();
         let b0 = led_row(0), b1 = led_row(1);
@@ -3721,6 +3890,13 @@ function handle_touch(tx, ty) {
     }
 
     if (st.page == "display") {
+        let rb = rot_btn();
+        if (in_rect(tx, ty, rb.x, rb.y, rb.w, rb.h)) {
+            rot_set(!rot_cfg());
+            rot_apply();
+            draw_display_page();
+            return;
+        }
         let lb = lang_btn();
         if (in_rect(tx, ty, lb.x, lb.y, lb.w, lb.h)) {
             lang_set(lang() == "ru" ? "en" : "ru");
@@ -3962,6 +4138,7 @@ function main() {
     backlight_write(false);
     backlight_write(true);   /* внутри уже уровень из настроек */
     led_apply();             /* диод в состояние из настроек */
+    rot_apply();             /* ориентация экрана из настроек */
 
     // Stop splash: ioctl(0) via flush
     system("printf '\\0' > /dev/lcd 2>/dev/null");

@@ -5,6 +5,9 @@
  *   touch_poll          — foreground touch demo (draw crosshairs)
  *   touch_poll daemon   — background daemon: write /tmp/.lcd_touch
  *   touch_poll led on   — диод над экраном (on|off|blink)
+ *   touch_poll tone 800 40 600 40 — бипер: пары «частота длительность»
+ *   touch_poll rotate 1  — экран вверх ногами
+ *   touch_poll volume 2 — громкость бипера 1..3
  *   touch_poll bl 0     — backlight OFF (ioctl cmd=4, arg=0)
  *   touch_poll bl 1     — backlight ON  (ioctl cmd=4, arg=1)
  *   touch_poll bl 2     — show splash   (ioctl cmd=4, arg=2)
@@ -214,6 +217,166 @@ int main(int argc, char **argv)
      * 0 - погашено, 255 - полный накал, между ними драйвер крутит пин. */
     if (argc >= 3 && argv[1][0] == 'd') {
         int ret = ioctl(fd, 16, (unsigned long)atoi(argv[2]));
+        close(fd);
+        return ret < 0 ? 1 : 0;
+    }
+
+    /* touch_poll rotate 0|1 — разворот экрана на 180 (ioctl 22). */
+    if (argc >= 3 && strcmp(argv[1], "rotate") == 0) {
+        int ret = ioctl(fd, 22, (unsigned long)(atoi(argv[2]) ? 1 : 0));
+        close(fd);
+        return ret < 0 ? 1 : 0;
+    }
+
+    /* touch_poll replay [уровень] — только старт по уже загруженной таблице,
+     * без сброса шины. Нужен, чтобы отделить «громкость глушит» от
+     * «команда съедает следующую». */
+    if (argc >= 2 && strcmp(argv[1], "replay") == 0) {
+        struct { int len; unsigned char data[152]; } p;
+        /* Сначала глушим предыдущее: без этого воспроизведения
+         * накладываются друг на друга и звук растёт с каждым повтором. */
+        p.len = 3;
+        p.data[0] = 0x2F; p.data[1] = 0x00; p.data[2] = 0x02;
+        ioctl(fd, 21, &p);
+        usleep(400000);
+        if (argc > 2) {
+            int lvl = atoi(argv[2]);
+            p.len = 3;
+            p.data[0] = 0x34; p.data[1] = 0x00; p.data[2] = (unsigned char)lvl;
+            ioctl(fd, 21, &p);
+            usleep(300000);
+        }
+        p.len = 3;
+        p.data[0] = 0x2F; p.data[1] = 0x00; p.data[2] = 0x01;
+        int ret = ioctl(fd, 21, &p);
+        close(fd);
+        return ret < 0 ? 1 : 0;
+    }
+
+    /* touch_poll volume 1|2|3 — громкость бипера. Заводской драйвер шлёт
+     * {0x34, 0x00, уровень}: три режима раскачки пищалки. */
+    if (argc >= 3 && strcmp(argv[1], "volume") == 0) {
+        struct { int len; unsigned char data[152]; } p;
+        int lvl = atoi(argv[2]);
+        if (lvl < 1 || lvl > 3) lvl = 3;
+        p.len = 3;
+        p.data[0] = 0x34; p.data[1] = 0x00; p.data[2] = (unsigned char)lvl;
+        int ret = ioctl(fd, 21, &p);
+        close(fd);
+        return ret < 0 ? 1 : 0;
+    }
+
+    /* touch_poll tone <Гц> <мс> | melody | siren — бипер на PIC.
+     * Порядок взят из заводского драйвера: сброс шины, стоп, пауза, число
+     * нот, таблица частот, таблица длительностей, старт. Байты в таблицах
+     * идут старшим вперёд. */
+    if (argc >= 2 && (strcmp(argv[1], "tone") == 0 ||
+                      strcmp(argv[1], "melody") == 0 ||
+                      strcmp(argv[1], "march") == 0 ||
+                      strcmp(argv[1], "bell") == 0 ||
+                      strcmp(argv[1], "ambulance") == 0 ||
+                      strcmp(argv[1], "police") == 0 ||
+                      strcmp(argv[1], "siren") == 0)) {
+        static const int mel_f[] = { 1174, 1397, 1397, 1397, 0, 1244, 1568, 1568, 1568, 1200 };
+        static const int mel_d[] = {  600,  150,  150,  150, 600,  600,  150,  150,  150,  150 };
+        /* Имперский марш: пары «нота, пауза». Таблица в памяти PIC - 64
+         * значения, так что помещается целиком. */
+        /* Заводские тоны сирены: вынуты из libAlmondHA.so, метод
+         * Device::setAlmondSirenTone. Звонок - тон 3. */
+        static const int bell_f[] = { 1975, 1975, 1675, 1675, 0 };
+        static const int bell_d[] = {  130,  267,  130,  535, 350 };
+        static const int amb_f[] = { 2500, 2500, 2500, 2500, 0 };
+        static const int amb_d[] = {  130,  130,  130,  130, 350 };
+        static const int pol_f[] = { 1000, 2000, 1000, 2000, 1000, 2000 };
+        static const int pol_d[] = {  130,  130,  130,  130,  130,  130 };
+        static const int mar_f[] = {
+            440,0, 440,0, 440,0, 349,0, 523,0, 440,0, 349,0, 523,0, 440,0,
+            659,0, 659,0, 659,0, 698,0, 523,0, 415,0, 349,0, 523,0, 440,0 };
+        static const int mar_d[] = {
+            500,60, 500,60, 500,60, 375,30, 125,30, 500,60, 375,30, 125,30, 650,120,
+            500,60, 500,60, 500,60, 375,30, 125,30, 500,30, 375,30, 125,30, 650,120 };
+        int f[64], d[64], n = 1;
+        int vol = 0, base = 2;
+        if (argc > 3 && strcmp(argv[2], "-v") == 0) { vol = atoi(argv[3]); base = 4; }
+
+        if (strcmp(argv[1], "bell") == 0) {
+            n = 5;
+            for (int i = 0; i < n; i++) { f[i] = bell_f[i]; d[i] = bell_d[i]; }
+        } else if (strcmp(argv[1], "ambulance") == 0) {
+            n = 5;
+            for (int i = 0; i < n; i++) { f[i] = amb_f[i]; d[i] = amb_d[i]; }
+        } else if (strcmp(argv[1], "police") == 0) {
+            n = 6;
+            for (int i = 0; i < n; i++) { f[i] = pol_f[i]; d[i] = pol_d[i]; }
+        } else if (strcmp(argv[1], "march") == 0) {
+            n = (int)(sizeof(mar_f) / sizeof(mar_f[0]));
+            for (int i = 0; i < n; i++) { f[i] = mar_f[i]; d[i] = mar_d[i]; }
+        } else if (argv[1][0] == 'm') {
+            n = 10;
+            for (int i = 0; i < n; i++) { f[i] = mel_f[i]; d[i] = mel_d[i]; }
+        } else if (argv[1][0] == 's') {
+            n = 10;
+            for (int i = 0; i < n; i++) { f[i] = 3000; d[i] = 250; }
+        } else {
+            n = 0;
+            for (int i = base; i + 1 < argc && n < 64; i += 2) {
+                f[n] = atoi(argv[i]);
+                d[n] = atoi(argv[i + 1]);
+                n++;
+            }
+            if (n == 0) { f[0] = 1174; d[0] = 150; n = 1; }
+                }
+
+        /* Драйвер шлёт пакет из своего потока по 15 мс на байт (так делает
+         * заводской), и на время отправки занят: очередь на один пакет.
+         * Поэтому ждём освобождения, а не «на глаз». */
+        struct { int len; unsigned char data[152]; } p;
+
+        int send_pkt(const unsigned char *b, int len) {
+            memcpy(p.data, b, len);
+            p.len = len;
+            for (int try = 0; try < 200; try++) {
+                if (ioctl(fd, 21, &p) == 0) {
+                    usleep((len * 16 + 60) * 1000);
+                    return 0;
+                }
+                usleep(50000);
+            }
+            return -1;
+        }
+
+        unsigned char ssp[] = { 0x39 };
+        unsigned char stop[] = { 0x2F, 0x00, 0x02 };
+        unsigned char size[] = { 0x33, 0x00, (unsigned char)n };
+        unsigned char play[] = { 0x2F, 0x00, 0x01 };
+        unsigned char tbl[152];
+
+        send_pkt(ssp, 1);
+        send_pkt(stop, 3);
+        usleep(400000);
+        send_pkt(size, 3);
+
+        for (int t = 0; t < 2; t++) {
+            const int *src = t ? d : f;
+            tbl[0] = t ? 0x2E : 0x2D;
+            for (int i = 0; i < n; i++) {
+                tbl[1 + i * 2] = (src[i] >> 8) & 0xFF;
+                tbl[2 + i * 2] = src[i] & 0xFF;
+            }
+            if (send_pkt(tbl, 1 + n * 2) < 0) {
+                close(fd);
+                return 1;
+            }
+        }
+
+        /* Уровень громкости шлём последним, перед самым стартом: команда
+         * 0x39 в начале последовательности сбрасывает состояние выходов. */
+        if (vol >= 1 && vol <= 3) {
+            unsigned char vp[] = { 0x34, 0x00, (unsigned char)vol };
+            send_pkt(vp, 3);
+        }
+
+        int ret = send_pkt(play, 3);
         close(fd);
         return ret < 0 ? 1 : 0;
     }
