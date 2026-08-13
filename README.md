@@ -146,10 +146,15 @@ package on install.
 * **Services** — reachability of YouTube, Telegram, GitHub and others; tapping a
   card rechecks that one service immediately
 * **Weather** — current conditions with a city picker
-* **Display** — screensaver style and timeout, language
+* **Display** — screensaver style and timeout, language, and a 180° screen
+  flip (done in the panel's MADCTL register, touch is mirrored with it)
 * **LED** — the white LED above the screen: on/off, and blinking while unread
   SMS remain. It hangs off the PIC, not a GPIO (port E bit 4), so it is driven
   by `touch_poll led on|off|blink`
+* **Sound** — the piezo buzzer, also on the PIC (port C bit 0). The stock
+  tones were recovered from the factory firmware: `touch_poll bell` (the door
+  chime, 1975/1675 Hz), `ambulance`, `police`, plus `tone <hz> <ms> ...` for
+  up to 64 notes and `volume 1..3`
 * Header shows an envelope when `luci-app-5gmodem` reports unread SMS
 
 The 5x7 font carries ASCII, Cyrillic and the punctuation that actually turns up
