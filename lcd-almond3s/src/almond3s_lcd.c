@@ -36,6 +36,11 @@
 #endif
 #define LCD_W        320
 #define LCD_H        240
+
+#define TOUCH_SCALE_X 341
+#define TOUCH_OFF_X   12
+#define TOUCH_SCALE_Y 265
+#define TOUCH_OFF_Y   14
 #define FB_SIZE      (LCD_W * LCD_H * 2)  /* RGB565 */
 
 #define PALMBUS_BASE 0x1E000000
@@ -1327,6 +1332,7 @@ static ssize_t lcd_fb_write(struct file *f, const char __user *buf,
 
 static int touch_x, touch_y;
 static int touch_pressed;
+static int touch_ok_cnt, touch_drop_cnt, touch_bad_ch;
 static struct task_struct *touch_thread;
 static struct i2c_adapter *touch_i2c_adap;
 
@@ -1435,7 +1441,7 @@ static int sx8650_read_xy(int *rx, int *ry)
         int ch = (h >> 4) & 7;
         int val = ((h & 0x0F) << 8) | l;
         if (ch == 0) raw_x = val;
-        if (ch == 1) raw_y = val;
+        else touch_bad_ch++;
     }
 
     /* --- Read Y: SELECT(Y)=0x81 --- */
@@ -1462,15 +1468,19 @@ static int sx8650_read_xy(int *rx, int *ry)
     if (h != 0xFF) {
         int ch = (h >> 4) & 7;
         int val = ((h & 0x0F) << 8) | l;
-        if (ch == 0) raw_x = val;
         if (ch == 1) raw_y = val;
+        else touch_bad_ch++;
     }
 
-    if (raw_x > 0 || raw_y > 0) {
-        *rx = (raw_y > 0) ? (4096 - raw_y) * 320 / 4096 : 160;
-        *ry = (raw_x > 0) ? raw_x * 240 / 4096 : 120;
+    if (raw_x > 0 && raw_y > 0) {
+        int px = (4096 - raw_y) * TOUCH_SCALE_X / 4096 - TOUCH_OFF_X;
+        int py = raw_x * TOUCH_SCALE_Y / 4096 - TOUCH_OFF_Y;
+        *rx = px < 0 ? 0 : (px > LCD_W - 1 ? LCD_W - 1 : px);
+        *ry = py < 0 ? 0 : (py > LCD_H - 1 ? LCD_H - 1 : py);
+        touch_ok_cnt++;
         return 1;
     }
+    touch_drop_cnt++;
     return 0;
 }
 
@@ -1649,7 +1659,7 @@ static int touch_fn(void *data)
             was_pressed = 1;
         } else {
             no_touch_count++;
-            if (no_touch_count > 10 && was_pressed) {
+            if (no_touch_count > 4 && was_pressed) {
                 touch_pressed = 0;
                 was_pressed = 0;
                 pr_info("touch UP\n");
@@ -1658,7 +1668,7 @@ static int touch_fn(void *data)
 
         /* Battery read every ~10 sec (200 * 50ms) */
         battery_counter++;
-        if (battery_counter >= 200) {
+        if (battery_counter >= 333) {
             battery_counter = 0;
             pic_read_battery_palmbus();
         }
@@ -1667,6 +1677,7 @@ static int touch_fn(void *data)
         if (pic_beep_request) {
             u32 s_ctl1 = gr(SM0_CTL1);
             int bw;
+            int pic_mode = pic_beep_request;
             pic_beep_request = 0;
 
             /* Helper macro: SM0 init + 3-byte write (like battery write) */
@@ -1687,7 +1698,7 @@ static int touch_fn(void *data)
                 mdelay(15); \
             } while(0)
 
-            if (pic_beep_request == 2) {
+            if (pic_mode == 2) {
                 /* Raw PIC cmd: ms field = cmd_byte | (data << 8)
                  * If data present (ms > 0xFF): send 3-byte {cmd, 0x00, data>>8}
                  * Else: send 1-byte {cmd} */
@@ -1774,7 +1785,7 @@ beep_done:
             #undef PW3
         }
 
-        msleep(50);
+        msleep(30);
     }
     return 0;
 }
@@ -1855,6 +1866,12 @@ static long lcd_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
         /* Диагностика вывода: строк в последнем кадре, его длительность и
          * счётчик кадров - чтобы видеть, сколько шины съедает перерисовка. */
         int d[3] = { stat_rows, stat_us, stat_frames };
+        if (copy_to_user((void __user *)arg, d, sizeof(d)))
+            return -EFAULT;
+        return 0;
+    }
+    if (cmd == 20) {
+        int d[3] = { touch_ok_cnt, touch_drop_cnt, touch_bad_ch };
         if (copy_to_user((void __user *)arg, d, sizeof(d)))
             return -EFAULT;
         return 0;
