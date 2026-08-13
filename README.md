@@ -147,6 +147,9 @@ package on install.
   card rechecks that one service immediately
 * **Weather** — current conditions with a city picker
 * **Display** — screensaver style and timeout, language
+* **LED** — the white LED above the screen: on/off, and blinking while unread
+  SMS remain. It hangs off the PIC, not a GPIO (port E bit 4), so it is driven
+  by `touch_poll led on|off|blink`
 * Header shows an envelope when `luci-app-5gmodem` reports unread SMS
 
 The 5x7 font carries ASCII, Cyrillic and the punctuation that actually turns up
@@ -182,7 +185,9 @@ ssh root@192.168.1.1 lcdshot > shot.ppm
   updates progressively, so a blinking backlight shows it mid-update — visible as
   flicker on every repaint. The stock firmware had no brightness control at all —
   its "BackLight Settings" screen only picks the hours the backlight stays on.
-* Zigbee (EM357) and the siren are not supported.
+* Zigbee (EM357) is reachable but unsupported here: the chip answers EZSP v4
+  (EmberZNet 5.1.0) on `/dev/ttyS2` at 57600, which modern coordinators refuse.
+  The siren is not supported either.
 * The driver talks to the GPIO block directly instead of going through pinctrl,
   which is why it is a feed package and not something submitted upstream yet.
 
