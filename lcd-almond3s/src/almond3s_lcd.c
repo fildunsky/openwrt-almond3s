@@ -22,6 +22,7 @@
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/i2c.h>
+#include <linux/leds.h>
 #include <linux/kmsg_dump.h>
 #include <linux/hrtimer.h>
 #include <linux/mutex.h>
@@ -135,7 +136,12 @@ static inline void gw_dir(u32 lcd_bits) {
  * записанный регистр на прерывание.
  */
 #define BL_MAX        255
-#define BL_PERIOD_NS  1000000L   /* 1 мс = 1 кГц */
+#define BL_PERIOD_NS  4000000L   /* 4 мс = 250 Гц. Проверено глазами на
+                                  * живом драйвере: на 1 кГц окно света при
+                                  * 10% яркости - 100 мкс, и его рвёт любая
+                                  * передача кадра; на 250 Гц окно вчетверо
+                                  * длиннее и мигание уходит. */
+static long bl_period_ns = BL_PERIOD_NS;  /* можно менять на ходу: ioctl 24 */
 
 /*
  * Во время кадра ШИМ крутит сам цикл отрисовки. Прерывание таймера посреди
@@ -151,10 +157,21 @@ static inline void gw_dir(u32 lcd_bits) {
  * Раньше на время кадра подсветка просто замирала, и каждая перерисовка давала
  * заметный проблеск или просадку - именно это и было видно на заставке.
  */
-#define BL_SLOT_PIXELS 8        /* как часто сверяем фазу внутри кадра */
-#define BL_FRAME_PERIOD_NS 250000L   /* 250 мкс = 4 кГц на время передачи */
+#define BL_SLOT_PIXELS 2        /* сверка фазы каждые ~15 мкс передачи:
+                                 * при коротком окне света сетка в 60 мкс
+                                 * давала дрожание яркости на каждой
+                                 * перерисовке */
+/* Раньше на время передачи подсветка крутилась на 4 кГц, а в покое - на
+ * частоте bl_period_ns. На малой яркости короткий импульс теряется в
+ * дрожании таймера, и перерисовка была видна как моргок. Теперь обе фазы
+ * идут на одной частоте. */
 
 static volatile bool bl_bus_busy;   /* идёт передача кадра на панель */
+/* Замер провалов: самый долгий тёмный промежуток. При 250 Гц и яркости 10%
+ * он обязан быть 3.6 мс; всё, что заметно больше, глаз и видит как мерцание. */
+static u64 bl_off_since;
+static u32 bl_max_off_us;
+static u32 bl_long_off;
 static volatile bool snap_ready;    /* снимок кадра уже готов (сделан writer'ом) */
 static volatile bool flush_busy;    /* снимок прямо сейчас уезжает на панель */
 static struct hrtimer bl_timer;
@@ -164,28 +181,53 @@ static bool bl_phase_on;         /* сейчас горит */
 
 static inline void bl_pin(bool on)
 {
+    if (!on) {
+        bl_off_since = ktime_get_ns();
+    } else if (bl_off_since) {
+        u64 d = ktime_get_ns() - bl_off_since;
+        u32 us;
+        do_div(d, 1000);       /* на 32-битном MIPS деления u64 нет */
+        us = (u32)d;
+        if (us > bl_max_off_us) bl_max_off_us = us;
+        if (us > 6000) bl_long_off++;
+        bl_off_since = 0;
+    }
     bl_bit = on ? BIT_BL : 0;
     gw(on ? GPIO_DSET_OFF : GPIO_DCLR_OFF, BIT_BL);
 }
 
 static enum hrtimer_restart bl_tick(struct hrtimer *t)
 {
-    long on_ns  = (long)BL_PERIOD_NS * bl_level / BL_MAX;
+    u64 now;
+    u32 ph, on_ns, next;
+    bool on;
 
-    /* Пока идёт кадр - не дёргаемся вообще. Прерывание посреди битбанга
-     * сдвигает такты шины, и панель ловит мусор: по экрану бегут цветные
-     * полосы. Кадр льётся ~75 мс, всё это время держим текущий уровень и
-     * переспрашиваем через миллисекунду. */
+    /* Пока идёт передача кадра - не дёргаемся: прерывание посреди битбанга
+     * рвёт такты шины. Там подсветку крутит сам вывод, по тем же часам. */
     if (bl_bus_busy) {
         hrtimer_forward_now(t, ns_to_ktime(1000000L));
         return HRTIMER_RESTART;
     }
 
-    long off_ns = (long)BL_PERIOD_NS - on_ns;
+    /* Фазу считаем ОТ ЧАСОВ, а не от прошлого срабатывания. Таймер на
+     * загруженном процессоре опаздывает, и при отсчёте от себя опоздание
+     * добавлялось к текущей фазе: попав на тёмную, она растягивалась, и
+     * обновление данных на экране было видно как провал яркости. При счёте
+     * от часов опоздание исправляется само на следующем же срабатывании. */
+    now = ktime_get_ns();
+    ph = do_div(now, (u32)bl_period_ns);
+    on_ns = (u32)(bl_period_ns / BL_MAX) * bl_level;
+    on = ph < on_ns;
 
-    bl_phase_on = !bl_phase_on;
-    bl_pin(bl_phase_on);
-    hrtimer_forward_now(t, ns_to_ktime(bl_phase_on ? on_ns : off_ns));
+    if (on != bl_phase_on) {
+        bl_phase_on = on;
+        bl_pin(on);
+    }
+
+    /* Просыпаемся ровно к следующей границе фазы. */
+    next = on ? (on_ns - ph) : ((u32)bl_period_ns - ph);
+    if (next < 20000) next = 20000;   /* не чаще 50 кГц, иначе задавим систему */
+    hrtimer_forward_now(t, ns_to_ktime((u64)next));
     return HRTIMER_RESTART;
 }
 
@@ -449,8 +491,8 @@ static void lcd_send_rows(int r0, int r1)
             /* do_div вместо обычного деления: на 32-битном MIPS деление u64
              * в ядре не собирается (нет __udivdi3). */
             u64 now = ktime_get_ns();
-            u32 ph = do_div(now, (u32)BL_FRAME_PERIOD_NS);
-            bool on = ph < (u32)BL_FRAME_PERIOD_NS / BL_MAX * bl_level;
+            u32 ph = do_div(now, (u32)bl_period_ns);
+            bool on = ph < (u32)bl_period_ns / BL_MAX * bl_level;
             if (on != bl_phase_on) {
                 bl_phase_on = on;
                 bl_pin(on);
@@ -1193,14 +1235,14 @@ static int render_fn(void *data)
              * full-screen dmesg phase. */
             render_scene(current_scene, frame++);
             lcd_flush_fb();
-            msleep(100);
+            msleep_interruptible(100);
             if (kthread_should_stop()) break;
         } else if (fb_dirty && !fb_writing) {
             console_phase = 2; /* userspace took over */
             lcd_flush_fb();
             fb_dirty = 0;
         } else {
-            msleep(50);
+            msleep_interruptible(50);
         }
     }
     return 0;
@@ -1228,10 +1270,16 @@ static ssize_t lcd_fb_write(struct file *f, const char __user *buf,
      * непрерываемое ожидание: снять его не мог даже SIGKILL, задача навсегда
      * оставалась в состоянии D и держала ссылку на модуль - rmmod после этого
      * не проходил. */
-    if (mutex_lock_interruptible(&fb_lock))
+    if (mutex_lock_interruptible(&fb_lock)) {
+        /* Прерванная запись не должна оставлять флаг взведённым: поток
+         * отрисовки ждёт его снятия и без этого больше не выводит НИЧЕГО -
+         * экран замирает до перезагрузки модуля. */
+        fb_writing = 0;
         return -ERESTARTSYS;
+    }
     if (copy_from_user(framebuffer + pos, buf, cnt)) {
         mutex_unlock(&fb_lock);
+        fb_writing = 0;
         return -EFAULT;
     }
     mutex_unlock(&fb_lock);
@@ -1313,6 +1361,7 @@ static struct i2c_adapter *touch_i2c_adap;
 static u8 pic_battery_raw[PIC_BATTERY_LEN];
 static int pic_battery_valid;
 static int pic_beep_request;  /* set from ioctl, executed in touch thread */
+static int pic_led_cmd;       /* однобайтовая команда диода в очереди */
 static u8  pic_raw_buf[160];
 static int pic_raw_len;       /* >0 - в очереди посылка в PIC */
 static int pic_beep_ms = 150;
@@ -1414,6 +1463,16 @@ static int sx8650_read_xy(int *rx, int *ry)
         int val = ((h & 0x0F) << 8) | l;
         if (ch == 0) raw_x = val;
         else touch_bad_ch++;
+    }
+
+    /* Пальца нет - второй канал не читаем. Экран почти всё время свободен,
+     * а каждое чтение это около 800 мкс активного ожидания на шине; так
+     * опрос в простое обходится вдвое дешевле, и задержки это не добавляет:
+     * выборка всё равно была бы отброшена. */
+    if (raw_x <= 0) {
+        gw(SM0_CTL1, saved_ctl1); udelay(10);
+        touch_drop_cnt++;
+        return 0;
     }
 
     /* --- Read Y: SELECT(Y)=0x81 --- */
@@ -1555,7 +1614,7 @@ static void pic_read_battery_palmbus(void)
     gw(SM0_DATAOUT, 0x39);
     gw(SM0_STATUS, 0);
     { int w; for (w = 0; w < 500; w++) { if (gr(0x918) & 0x01) break; udelay(10); } }
-    mdelay(10);  /* stock: 10ms delay after 0x39 */
+    msleep(10);  /* stock: 10ms delay after 0x39 */
 
     /* WRITE cmd 0x36 (ADC read) */
     gw(SM0_CTL1, 0x90644042); udelay(10);
@@ -1566,9 +1625,9 @@ static void pic_read_battery_palmbus(void)
     gw(SM0_STATUS, 0);
     { int w; for (w = 0; w < 500; w++) { if (gr(0x918) & 0x01) break; udelay(10); } }
 
-    pr_info("PIC[v14] W: PS=%02x CTL0=%08x\n", gr(0x918), gr(SM0_CTL1));
+    pr_debug("PIC[v14] W: PS=%02x CTL0=%08x\n", gr(0x918), gr(SM0_CTL1));
 
-    udelay(5000);
+    usleep_range(5000, 6000);
 
     /* === READ 6 bytes — re-init SM0 for read like touch does === */
     gw(SM0_CTL1, 0x90644042); udelay(10);
@@ -1595,7 +1654,7 @@ static void pic_read_battery_palmbus(void)
     gw(SM0_CTL1, saved_ctl1); udelay(10);
 
     /* Log */
-    pr_info("PIC bat: %02x %02x %02x %02x %02x %02x\n",
+    pr_debug("PIC bat: %02x %02x %02x %02x %02x %02x\n",
             resp[0], resp[1], resp[2], resp[3], resp[4], resp[5]);
 
     /* Parse: stock format byte0=ADC_lo, byte1=ADC_hi, byte2=status */
@@ -1612,7 +1671,7 @@ static void pic_read_battery_palmbus(void)
             pic_battery_raw[4] = resp[4];
             pic_battery_raw[5] = resp[5];
             pic_battery_valid = 1;
-            pr_info("PIC ADC=%d status=%02x\n", adc, resp[2]);
+            pr_debug("PIC ADC=%d status=%02x\n", adc, resp[2]);
         }
     }
 }
@@ -1631,14 +1690,14 @@ static int touch_fn(void *data)
             touch_pressed = 1;
             no_touch_count = 0;
             if (!was_pressed)
-                pr_info("touch DOWN x=%d y=%d (raw data logged)\n", x, y);
+                pr_debug("touch DOWN x=%d y=%d (raw data logged)\n", x, y);
             was_pressed = 1;
         } else {
             no_touch_count++;
             if (no_touch_count > 4 && was_pressed) {
                 touch_pressed = 0;
                 was_pressed = 0;
-                pr_info("touch UP\n");
+                pr_debug("touch UP\n");
             }
         }
 
@@ -1647,6 +1706,26 @@ static int touch_fn(void *data)
         if (battery_counter >= 333) {
             battery_counter = 0;
             pic_read_battery_palmbus();
+        }
+
+        /* Диод: команда ставится в очередь классом светодиодов ядра и
+         * уходит отсюда - шина у нас одна на всех. */
+        if (pic_led_cmd) {
+            u32 s_ctl1 = gr(SM0_CTL1);
+            int w, cmd_b = pic_led_cmd;
+            pic_led_cmd = 0;
+
+            gw(SM0_CTL1, 0x90644042); udelay(10);
+            gw(SM0_CFG, 0xFA);
+            gw(SM0_DATA, PIC_ADDR);
+            gw(SM0_START, 1);
+            gw(SM0_DATAOUT, cmd_b);
+            gw(SM0_STATUS, 0);
+            for (w = 0; w < 500; w++) {
+                if (gr(0x918) & 0x01) break;
+                udelay(10);
+            }
+            gw(SM0_CTL1, s_ctl1); udelay(10);
         }
 
         /* Посылка произвольной длины: мелодия грузится одним пакетом
@@ -1663,13 +1742,15 @@ static int touch_fn(void *data)
             gw(SM0_DATAOUT, PIC_ADDR);
             gw(SM0_STATUS, 0);
             for (i = 0; i < pic_raw_len; i++) {
-                for (w = 0; w < 100000; w++)
+                for (w = 0; w < 20000; w++) {
                     if (gr(0x918) & 0x02) break;
-                mdelay(15);
+                    cpu_relax();
+                }
+                usleep_range(15000, 16000);
                 gw(SM0_DATAOUT, pic_raw_buf[i]);
             }
             gw(SM0_CTL1, s_ctl1); udelay(10);
-            pr_info("PIC пакет %d байт, первый 0x%02x\n", pic_raw_len, pic_raw_buf[0]);
+            pr_debug("PIC пакет %d байт, первый 0x%02x\n", pic_raw_len, pic_raw_buf[0]);
             pic_raw_len = 0;
         }
 
@@ -1729,7 +1810,7 @@ static int touch_fn(void *data)
                     mdelay(15);
                     gw(SM0_DATAOUT, raw_data);
                     mdelay(15);
-                    pr_info("PIC cmd {%02x,00,%02x} 3-byte\n", raw_cmd, raw_data);
+                    pr_debug("PIC cmd {%02x,00,%02x} 3-byte\n", raw_cmd, raw_data);
                 } else {
                     /* 1-byte write */
                     gw(SM0_CTL1, 0x90644042); udelay(10);
@@ -1739,7 +1820,7 @@ static int touch_fn(void *data)
                     gw(SM0_DATAOUT, raw_cmd);
                     gw(SM0_STATUS, 0);
                     for(bw=0;bw<500;bw++){if(gr(0x918)&0x01)break;udelay(10);}
-                    pr_info("PIC cmd 0x%02x 1-byte\n", raw_cmd);
+                    pr_debug("PIC cmd 0x%02x 1-byte\n", raw_cmd);
                 }
 
                 gw(SM0_CTL1, s_ctl1); udelay(10);
@@ -1785,7 +1866,7 @@ beep_done:
             #undef PW3
         }
 
-        msleep(30);
+        msleep_interruptible(30);
     }
     return 0;
 }
@@ -1860,6 +1941,38 @@ static long lcd_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
         int d[3] = { stat_rows, stat_us, stat_frames };
         if (copy_to_user((void __user *)arg, d, sizeof(d)))
             return -EFAULT;
+        return 0;
+    }
+    if (cmd == 25) {
+        int d[2] = { (int)bl_max_off_us, (int)bl_long_off };
+        if (copy_to_user((void __user *)arg, d, sizeof(d)))
+            return -EFAULT;
+        bl_max_off_us = 0;
+        bl_long_off = 0;
+        return 0;
+    }
+    if (cmd == 24) {
+        /* Период ШИМ подсветки в микросекундах. У источника тока подсветки
+         * своя область устойчивости, и на низкой яркости мерцание зависит
+         * от частоты - подбирается только опытом. */
+        long us = (long)arg;
+        if (us < 50) us = 50;
+        if (us > 20000) us = 20000;
+        bl_period_ns = us * 1000L;
+        pr_info("ШИМ подсветки: период %ld мкс (%ld Гц)\n", us, 1000000L / us);
+        return 0;
+    }
+    if (cmd == 23) {
+        /* Сырая команда панели: arg = 0xCCDDNN, где CC - команда,
+         * DD - байт данных, NN - сколько байт данных (0 или 1).
+         * Нужно, чтобы проверить аппаратную яркость ILI9341 (0x51/0x53). */
+        u8 c = (arg >> 16) & 0xFF, d = (arg >> 8) & 0xFF, n = arg & 0xFF;
+        if (mutex_lock_interruptible(&fb_lock))
+            return -ERESTARTSYS;
+        lcd_cmd(c);
+        if (n) lcd_dat(d);
+        mutex_unlock(&fb_lock);
+        pr_debug("панель: команда 0x%02x данные 0x%02x (%u байт)\n", c, d, n);
         return 0;
     }
     if (cmd == 22) {
@@ -2002,11 +2115,21 @@ static int lcd_mmap(struct file *f, struct vm_area_struct *vma)
     return 0;
 }
 
+/* Процесс мог умереть посреди кадра - тогда флаг записи остался бы
+ * взведённым, и вывод на панель встал бы навсегда. Снимаем его при
+ * закрытии устройства. */
+static int lcd_release(struct inode *inode, struct file *f)
+{
+    fb_writing = 0;
+    return 0;
+}
+
 static const struct file_operations lcd_fops = {
     .owner          = THIS_MODULE,
     .write          = lcd_fb_write,
     .llseek         = default_llseek,
     .unlocked_ioctl = lcd_ioctl,
+    .release        = lcd_release,
     .mmap           = lcd_mmap,
 };
 
@@ -2018,6 +2141,40 @@ static struct miscdevice lcd_dev = {
 };
 
 /* === Module init/exit === */
+
+/* Диод над экраном висит на PIC, а не на GPIO, поэтому в дереве устройств
+ * его не описать. Зато классу светодиодов ядра всё равно, чем мы моргаем:
+ * достаточно уметь зажечь и погасить. Так он появляется в /sys/class/leds,
+ * получает все штатные триггеры и настраивается через uci, как любой другой.
+ * Полярность обратна той, что указана в разборе прошивки PIC: 0x32 зажигает. */
+static void almond_led_set(struct led_classdev *cdev, enum led_brightness b)
+{
+    pic_led_cmd = b ? 0x32 : 0x31;
+}
+
+/* Мигание умеет сам PIC, поэтому берём его на себя: ядру не нужно будить
+ * систему таймером ради лампочки. Свой интервал чип не принимает, так что
+ * сообщаем ядру фактический - около двух вспышек в секунду. */
+static int almond_led_blink(struct led_classdev *cdev,
+                            unsigned long *delay_on, unsigned long *delay_off)
+{
+    if (*delay_on == 0 && *delay_off == 0) {
+        *delay_on = 250;
+        *delay_off = 250;
+    } else if (*delay_on != 250 || *delay_off != 250) {
+        return -EINVAL;   /* мигаем не так - пусть ядро делает это само */
+    }
+    pic_led_cmd = 0x30;
+    return 0;
+}
+
+static struct led_classdev almond_led = {
+    .name             = "white:status",
+    .max_brightness   = 1,
+    .brightness_set   = almond_led_set,
+    .blink_set        = almond_led_blink,
+    .default_trigger  = "none",
+};
 
 static int __init lcd_drv_init(void)
 {
@@ -2049,6 +2206,9 @@ static int __init lcd_drv_init(void)
     bl_timer.function = bl_tick;
 
     /* Register device */
+    if (led_classdev_register(NULL, &almond_led))
+        pr_warn("almond3s-lcd: диод не зарегистрирован\n");
+
     ret = misc_register(&lcd_dev);
     if (ret) { kfree(framebuffer); kfree(fb_pages); iounmap(gpio_base); return ret; }
 
@@ -2250,6 +2410,7 @@ static void __exit lcd_drv_exit(void)
     if (touch_thread) kthread_stop(touch_thread);
     if (render_thread) kthread_stop(render_thread);
     if (touch_i2c_adap) i2c_put_adapter(touch_i2c_adap);
+    led_classdev_unregister(&almond_led);
     misc_deregister(&lcd_dev);
     vfree(framebuffer);
     kfree(fb_pages);
