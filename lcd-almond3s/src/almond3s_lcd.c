@@ -26,8 +26,6 @@
 #include <linux/hrtimer.h>
 #include <linux/mutex.h>
 
-#include "splash_4pda.h"
-#include "pic_calib.h"
 
 #define DEVICE_NAME  "lcd"
 /* Версия драйвера - дата сборки, её подставляет пакетный Makefile. */
@@ -411,6 +409,8 @@ static inline u16 dig_pixel(u16 p)
 
 static u16 *prev_snap;
 static bool prev_valid;
+static int lcd_rot;         /* 1 = экран перевёрнут на 180 */
+static int lcd_rot_pending;
 static int  stat_rows;      /* строк в последнем кадре */
 static int  stat_us;        /* сколько он занял, мкс */
 static int  stat_frames;    /* кадров всего */
@@ -720,20 +720,6 @@ static void scene_rotozoom(int t)
     }
 }
 
-/* === Logo overlay (4PDA from splash RLE, transparent black) === */
-static void overlay_logo(void)
-{
-    u16 *fb = (u16 *)framebuffer;
-    int i, j = 0;
-    for (i = 0; i < SPLASH_RLE_LEN && j < LCD_W * LCD_H; i++) {
-        int k;
-        for (k = 0; k < splash_cnt[i] && j < LCD_W * LCD_H; k++, j++) {
-            if (splash_clr[i] != 0x0000)  /* non-black = logo pixel */
-                fb[j] = splash_clr[i];
-        }
-    }
-}
-
 /* === Scene 6: Dashboard Plasma — functional router visualization === */
 /*
  * Each client has individual params:
@@ -851,28 +837,6 @@ static void scene_dashboard(int t)
 }
 
 /* Logo overlay with alpha blending (95% background, 5% logo) */
-static void overlay_logo_alpha(void)
-{
-    u16 *fb = (u16 *)framebuffer;
-    int i, j = 0;
-    for (i = 0; i < SPLASH_RLE_LEN && j < LCD_W * LCD_H; i++) {
-        int k;
-        for (k = 0; k < splash_cnt[i] && j < LCD_W * LCD_H; k++, j++) {
-            u16 logo = splash_clr[i];
-            if (logo != 0x0000) {
-                u16 bg = fb[j];
-                /* 95%/5% blend in RGB565 */
-                int br = (bg >> 11) & 0x1F, bg2 = (bg >> 5) & 0x3F, bb = bg & 0x1F;
-                int lr = (logo >> 11) & 0x1F, lg = (logo >> 5) & 0x3F, lb = logo & 0x1F;
-                int r = (br * 19 + lr) / 20;
-                int g = (bg2 * 19 + lg) / 20;
-                int b = (bb * 19 + lb) / 20;
-                fb[j] = (r << 11) | (g << 5) | b;
-            }
-        }
-    }
-}
-
 /* === Scene 7: Matrix rain forming a rabbit — "Wake up, Neo..." ===
  *
  * Green characters fall down each column. In the accumulation phase
@@ -1120,10 +1084,6 @@ static void render_scene(int scene, int t)
     case 6: scene_matrix(t); break;
     default: scene_plasma(t); break;
     }
-    if (scene == 5)
-        overlay_logo_alpha();
-    else if (scene != 6)        /* matrix — no 4PDA logo, it ruins the vibe */
-        overlay_logo();
 }
 
 /* === Boot console: dmesg on LCD === */
@@ -1217,6 +1177,16 @@ static int render_fn(void *data)
     console_phase = 0; /* splash */
 
     while (!kthread_should_stop()) {
+        /* Разворот делаем регистром панели (MADCTL), а не переворотом
+         * пикселей: даром и не мешает построчной отправке. Команду шлём
+         * из этого же потока - шина у него одна. */
+        if (lcd_rot_pending) {
+            lcd_rot_pending = 0;
+            lcd_cmd(0x36);
+            lcd_dat(lcd_rot ? 0x68 : 0xA8);
+            prev_valid = false;
+            fb_dirty = 1;
+        }
         if (splash_active) {
             /* Splash runs until userspace writes to /dev/lcd. Live kmsg tail
              * is overlaid inside the matrix scene itself, so no separate
@@ -1343,6 +1313,8 @@ static struct i2c_adapter *touch_i2c_adap;
 static u8 pic_battery_raw[PIC_BATTERY_LEN];
 static int pic_battery_valid;
 static int pic_beep_request;  /* set from ioctl, executed in touch thread */
+static u8  pic_raw_buf[160];
+static int pic_raw_len;       /* >0 - в очереди посылка в PIC */
 static int pic_beep_ms = 150;
 
 /* Palmbus I2C raw helpers */
@@ -1477,6 +1449,10 @@ static int sx8650_read_xy(int *rx, int *ry)
         int py = raw_x * TOUCH_SCALE_Y / 4096 - TOUCH_OFF_Y;
         *rx = px < 0 ? 0 : (px > LCD_W - 1 ? LCD_W - 1 : px);
         *ry = py < 0 ? 0 : (py > LCD_H - 1 ? LCD_H - 1 : py);
+        if (lcd_rot) {
+            *rx = LCD_W - 1 - *rx;
+            *ry = LCD_H - 1 - *ry;
+        }
         touch_ok_cnt++;
         return 1;
     }
@@ -1624,10 +1600,11 @@ static void pic_read_battery_palmbus(void)
 
     /* Parse: stock format byte0=ADC_lo, byte1=ADC_hi, byte2=status */
     {
-        int adc = ((resp[1] & 0x03) << 8) | resp[0];
-        int adc_alt = (resp[1] << 8) | resp[0];
-        /* Validate: resp[3]==0x02 (vref) && resp[4]==0x04 (status marker) */
-        if (resp[3] == 0x02 && resp[4] == 0x04) {
+        /* Разбор как в заводском драйвере: 12 бит из байта 1 и младшего
+         * полубайта байта 3. Прежняя проверка resp[3]==0x02 отбрасывала
+         * все выборки вне окна 512..767, и показания замирали. */
+        int adc = ((resp[3] & 0x0F) << 8) | resp[1];
+        if (resp[4] == 0x04 && adc < 1023) {
             pic_battery_raw[0] = resp[0];
             pic_battery_raw[1] = resp[1];
             pic_battery_raw[2] = resp[2];
@@ -1635,8 +1612,7 @@ static void pic_read_battery_palmbus(void)
             pic_battery_raw[4] = resp[4];
             pic_battery_raw[5] = resp[5];
             pic_battery_valid = 1;
-            pr_info("PIC ADC=%d (alt=%d) status=%02x\n",
-                    adc, adc_alt, resp[2]);
+            pr_info("PIC ADC=%d status=%02x\n", adc, resp[2]);
         }
     }
 }
@@ -1671,6 +1647,30 @@ static int touch_fn(void *data)
         if (battery_counter >= 333) {
             battery_counter = 0;
             pic_read_battery_palmbus();
+        }
+
+        /* Посылка произвольной длины: мелодия грузится одним пакетом
+         * {0x2D, hi, lo, hi, lo, ...} - так это делает заводской драйвер,
+         * старшим байтом вперёд. */
+        if (pic_raw_len > 0) {
+            u32 s_ctl1 = gr(SM0_CTL1);
+            int i, w;
+
+            gw(SM0_CTL1, 0x90644042); udelay(10);
+            gw(SM0_CFG, 0xFA);
+            gw(SM0_DATA, PIC_ADDR);
+            gw(SM0_START, pic_raw_len);
+            gw(SM0_DATAOUT, PIC_ADDR);
+            gw(SM0_STATUS, 0);
+            for (i = 0; i < pic_raw_len; i++) {
+                for (w = 0; w < 100000; w++)
+                    if (gr(0x918) & 0x02) break;
+                mdelay(15);
+                gw(SM0_DATAOUT, pic_raw_buf[i]);
+            }
+            gw(SM0_CTL1, s_ctl1); udelay(10);
+            pr_info("PIC пакет %d байт, первый 0x%02x\n", pic_raw_len, pic_raw_buf[0]);
+            pic_raw_len = 0;
         }
 
         /* PIC command from ioctl (beep or raw cmd) */
@@ -1829,14 +1829,6 @@ static long lcd_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
     if (cmd == 4) {
         /* Backlight control: arg=0 off, arg=1 on, arg=2 show splash */
         if (arg == 2) {
-            /* Redraw splash screen (4PDA logo) */
-            u16 *fb16 = (u16 *)framebuffer;
-            int i, j = 0;
-            for (i = 0; i < SPLASH_RLE_LEN && j < LCD_W * LCD_H; i++) {
-                int k;
-                for (k = 0; k < splash_cnt[i] && j < LCD_W * LCD_H; k++)
-                    fb16[j++] = splash_clr[i];
-            }
             fb_dirty = 1;
             return 0;
         }
@@ -1868,6 +1860,23 @@ static long lcd_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
         int d[3] = { stat_rows, stat_us, stat_frames };
         if (copy_to_user((void __user *)arg, d, sizeof(d)))
             return -EFAULT;
+        return 0;
+    }
+    if (cmd == 22) {
+        lcd_rot = arg ? 1 : 0;
+        lcd_rot_pending = 1;
+        return 0;
+    }
+    if (cmd == 21) {
+        struct { int len; u8 data[152]; } r;
+        if (copy_from_user(&r, (void __user *)arg, sizeof(r)))
+            return -EFAULT;
+        if (r.len < 1 || r.len > (int)sizeof(r.data))
+            return -EINVAL;
+        if (pic_raw_len > 0)
+            return -EBUSY;
+        memcpy(pic_raw_buf, r.data, r.len);
+        pic_raw_len = r.len;
         return 0;
     }
     if (cmd == 20) {
@@ -2067,7 +2076,6 @@ static int __init lcd_drv_init(void)
     {
         int ci;
         u32 saved_ctl1 = gr(SM0_CTL1);
-        u32 saved_cfg = gr(SM0_CFG);
 
         pr_info("PIC init 0x39 + 0x41 + calibration...\n");
 
@@ -2108,69 +2116,29 @@ static int __init lcd_drv_init(void)
 
         pr_info("PIC init done, buzzer off sent\n");
 
-        /* Byte-swap helper: stock firmware swaps each int16 before sending.
-         * Our pic_calib.h has big-endian {0x00,0x04} = value 4.
-         * Stock sends as {0x04,0x00} (swapped). */
+        /* Ничего больше в чип не грузим. Здесь раньше отправлялись 400
+         * байт «калибровки батареи» командами 0x03 и 0x2E - но 0x2E это
+         * таблица длительностей нот, а данные были линейной пилой, о чём
+         * прямо говорил заголовок pic_calib.h. Каждая загрузка модуля
+         * заливала в PIC мусорную мелодию, и он её проигрывал. Вместо
+         * этого просто останавливаем воспроизведение. */
         {
-            u8 calib_buf[401];
-
-            /* Step 0: Wake command {0x33, 0x00, 0x01} before calibration */
+            int p;
             gw(SM0_CTL1, 0x90644042); udelay(10);
             gw(SM0_CFG, 0xFA);
             gw(SM0_DATA, PIC_ADDR);
             gw(SM0_START, 3);
-            gw(SM0_DATAOUT, 0x33);
+            gw(SM0_DATAOUT, PIC_ADDR);
             gw(SM0_STATUS, 0);
-            { int p; for (p = 0; p < 500; p++) { if (gr(0x918) & 0x02) break; udelay(10); } }
-            udelay(1000);
-            gw(SM0_DATAOUT, 0x00);
-            { int p; for (p = 0; p < 500; p++) { if (gr(0x918) & 0x02) break; udelay(10); } }
-            udelay(1000);
-            gw(SM0_DATAOUT, 0x01);
-            { int p; for (p = 0; p < 500; p++) { if (gr(0x918) & 0x01) break; udelay(10); } }
-            mdelay(5);
-
-            /* Step 1: Table 1 — byte-swap int16 pairs, keep cmd byte */
-            calib_buf[0] = pic_calib1[0]; /* cmd = 0x03, no swap */
-            for (ci = 1; ci < 401; ci += 2) {
-                calib_buf[ci]     = pic_calib1[ci + 1]; /* swap: low byte first */
-                calib_buf[ci + 1] = pic_calib1[ci];     /* then high byte */
-            }
-            gw(SM0_DATA, PIC_ADDR);
-            gw(SM0_START, 401);
-            gw(SM0_DATAOUT, calib_buf[0]);
-            gw(SM0_STATUS, 0);
-            for (ci = 1; ci < 401; ci++) {
-                { int p; for (p = 0; p < 500; p++) { if (gr(0x918) & 0x02) break; udelay(10); } }
-                udelay(1000);
-                gw(SM0_DATAOUT, calib_buf[ci]);
-            }
-            { int p; for (p = 0; p < 500; p++) { if (gr(0x918) & 0x01) break; udelay(10); } }
-            mdelay(5);
-
-            /* Step 2: Table 2 — byte-swap */
-            calib_buf[0] = pic_calib2[0]; /* cmd = 0x2E */
-            for (ci = 1; ci < 401; ci += 2) {
-                calib_buf[ci]     = pic_calib2[ci + 1];
-                calib_buf[ci + 1] = pic_calib2[ci];
-            }
-            gw(SM0_DATA, PIC_ADDR);
-            gw(SM0_START, 401);
-            gw(SM0_DATAOUT, calib_buf[0]);
-            gw(SM0_STATUS, 0);
-            for (ci = 1; ci < 401; ci++) {
-                { int p; for (p = 0; p < 500; p++) { if (gr(0x918) & 0x02) break; udelay(10); } }
-                udelay(1000);
-                gw(SM0_DATAOUT, calib_buf[ci]);
-            }
-            { int p; for (p = 0; p < 500; p++) { if (gr(0x918) & 0x01) break; udelay(10); } }
+            for (p = 0; p < 100000; p++) if (gr(0x918) & 0x02) break;
+            mdelay(15); gw(SM0_DATAOUT, 0x2F);
+            for (p = 0; p < 100000; p++) if (gr(0x918) & 0x02) break;
+            mdelay(15); gw(SM0_DATAOUT, 0x00);
+            for (p = 0; p < 100000; p++) if (gr(0x918) & 0x02) break;
+            mdelay(15); gw(SM0_DATAOUT, 0x02);
+            mdelay(15);
+            pr_info("PIC init done, воспроизведение остановлено\n");
         }
-
-        /* Restore ALL SM0 registers for Linux I2C driver */
-        gw(SM0_CTL1, saved_ctl1); udelay(10);
-        gw(SM0_CFG, saved_cfg); udelay(10);
-
-        pr_info("PIC calibration sent (stock protocol)\n");
 
         /* Wait for PIC to process calibration */
         mdelay(2000);
