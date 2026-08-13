@@ -153,6 +153,7 @@ static inline void gw_dir(u32 lcd_bits) {
 
 static volatile bool bl_bus_busy;   /* идёт передача кадра на панель */
 static volatile bool snap_ready;    /* снимок кадра уже готов (сделан writer'ом) */
+static volatile bool flush_busy;    /* снимок прямо сейчас уезжает на панель */
 static struct hrtimer bl_timer;
 static int  bl_level = BL_MAX;   /* текущая яркость */
 static bool bl_timer_on;
@@ -376,6 +377,33 @@ static u16 flush_snap[LCD_W * LCD_H]; /* snapshot buffer to prevent tearing */
 /* Что уже стоит на панели: с этим сравниваем новый кадр, чтобы гнать по шине
  * только изменившиеся строки. Полный кадр - это 76 800 пикселей и ~75 мс, и
  * именно эта протяжка видна как вспышка на приглушённой подсветке. */
+/*
+ * ЦИФРОВОЕ ЗАТЕМНЕНИЕ - второй способ убавить яркость. Здесь мы не трогаем
+ * подсветку вообще (она горит ровно, мерцать нечему), а масштабируем сами
+ * пиксели при отправке на панель. Плата известна: подсветка просвечивает
+ * панель насквозь, поэтому чёрный фон светлее не становится - тускнеет
+ * изображение, а не свет.
+ *
+ * Считаем через таблицы: RGB565 это 5-6-5 бит, значит достаточно двух
+ * таблиц - на 32 и на 64 значения, и пиксель пересобирается парой сдвигов.
+ */
+static int  dig_level = BL_MAX;      /* 255 - без затемнения */
+static u8   dig5[32], dig6[64];
+
+static void dig_build(void)
+{
+    int i;
+    for (i = 0; i < 32; i++) dig5[i] = i * dig_level / BL_MAX;
+    for (i = 0; i < 64; i++) dig6[i] = i * dig_level / BL_MAX;
+}
+
+static inline u16 dig_pixel(u16 p)
+{
+    return ((u16)dig5[(p >> 11) & 0x1F] << 11) |
+           ((u16)dig6[(p >> 5)  & 0x3F] << 5)  |
+            (u16)dig5[p & 0x1F];
+}
+
 static u16 *prev_snap;
 static bool prev_valid;
 static int  stat_rows;      /* строк в последнем кадре */
@@ -404,7 +432,7 @@ static void lcd_send_rows(int r0, int r1)
     lcd_write_mem();
 
     for (i = 0; i < n; i++) {
-        lcd_write_16d(src[i]);
+        lcd_write_16d(dig_level == BL_MAX ? src[i] : dig_pixel(src[i]));
         if ((++slot_pos & (BL_SLOT_PIXELS - 1)) != 0)
             continue;
 
@@ -458,6 +486,8 @@ static void lcd_flush_fb(void)
     /* Refresh non-LCD DIR bits in case other drivers changed them */
     base_dir = gr(GPIO_DIR_OFF) & ~LCD_PIN_MASK;
 
+    flush_busy = true;
+
     /* Колонки всегда полные, окно двигаем только по строкам. */
     lcd_cmd(0x2A); lcd_dat(0); lcd_dat(0); lcd_dat(1); lcd_dat(0x3F);
 
@@ -497,6 +527,7 @@ static void lcd_flush_fb(void)
         memcpy(prev_snap, flush_snap, FB_SIZE);
         prev_valid = true;
     }
+    flush_busy = false;
 }
 
 /* === Demoscene animated splash (plasma + palette cycling) === */
@@ -1238,6 +1269,18 @@ static ssize_t lcd_fb_write(struct file *f, const char __user *buf,
      * следующий. Раньше копия снималась в момент вывода, и панель ловила
      * наполовину очищенный экран - картинка мигала, будто пропадает. */
     if (pos + cnt >= FB_SIZE) {
+        int wait = 0;
+
+        /* ДОЖИДАЕМСЯ, ПОКА ПРЕДЫДУЩИЙ КАДР УЕДЕТ. Снимок один на всех: если
+         * переписать его во время вывода, поток отрисовки досылает на панель уже
+         * НОВЫЕ пиксели, а помечает отправленным ВЕСЬ новый кадр. Строки, которые
+         * он успел сравнить и пропустить как «не изменившиеся», на панели
+         * остаются от старого кадра - и больше никогда не перерисовываются:
+         * заставка накрывала экран лишь частично, а под ней жила прошлая
+         * страница. */
+        while (flush_busy && wait++ < 200)
+            msleep_interruptible(2);
+
         if (mutex_lock_interruptible(&fb_lock))
             return -ERESTARTSYS;
         memcpy(flush_snap, framebuffer, FB_SIZE);
@@ -1795,6 +1838,19 @@ static long lcd_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
         bl_set_level((int)arg);
         return 0;
     }
+    if (cmd == 19) {
+        /* Цифровое затемнение 0..255. Меняем - весь экран надо переслать:
+         * сравнение строк работает по исходному кадру, а на панели теперь
+         * другие цвета. */
+        int lvl = (int)arg;
+        if (lvl < 0) lvl = 0;
+        if (lvl > BL_MAX) lvl = BL_MAX;
+        dig_level = lvl;
+        dig_build();
+        prev_valid = false;
+        fb_dirty = 1;
+        return 0;
+    }
     if (cmd == 18) {
         /* Диагностика вывода: строк в последнем кадре, его длительность и
          * счётчик кадров - чтобы видеть, сколько шины съедает перерисовка. */
@@ -1804,8 +1860,9 @@ static long lcd_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
         return 0;
     }
     if (cmd == 17) {
-        int lvl = bl_level;
-        if (copy_to_user((void __user *)arg, &lvl, sizeof(lvl)))
+        /* Оба уровня разом: подсветка (ШИМ) и цифровое затемнение картинки. */
+        int lvl[2] = { bl_level, dig_level };
+        if (copy_to_user((void __user *)arg, lvl, sizeof(lvl)))
             return -EFAULT;
         return 0;
     }
@@ -1961,6 +2018,7 @@ static int __init lcd_drv_init(void)
 
     /* Таймер ШИМ подсветки: заводим до первого использования, стартует он
      * только когда яркость между краями. */
+    dig_build();
     hrtimer_init(&bl_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
     bl_timer.function = bl_tick;
 
