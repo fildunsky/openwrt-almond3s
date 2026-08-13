@@ -1,15 +1,15 @@
 /*
- * data_collector V260401 by Sublimity
+ * collector — сборщик данных для экрана Almond 3S
  *
  * Background daemon: collects LTE/WiFi/VPN/Battery/System stats.
  * Pushes JSON to connected clients via unix socket /tmp/lcd_data.sock every 2s.
  * Also writes /tmp/lcd_data.json for compatibility.
  *
- * Build: zig cc -target mipsel-linux-musleabi -Os -static -o data_collector data_collector.c
+ * Компиляция вручную: zig cc -target mipsel-linux-musleabi -Os -static -o collector collector.c
  */
 
 #define VERSION "V260401"
-#define MODNAME "data_collector"
+#define MODNAME "almond3s-collector"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,7 +38,8 @@ static int client_count = 0;
 
 static void sig_handler(int sig) { (void)sig; running = 0; }
 
-static int bat_table_lookup(int adc);  /* forward decl, defined below */
+static int bat_table_lookup(int adc);      /* forward decl, defined below */
+static int charge_table_lookup(int adc);   /* то же для таблицы заряда */
 
 /* ======== PIC Battery ======== */
 struct battery_info {
@@ -53,6 +54,7 @@ static int bat_charge_bump = 0;
 static int bat_last_charging = -1;
 static int bat_disp_percent = -1;
 static int bat_nobat_count = 0;
+static int bat_adc_filt = 0;   /* сглаженный АЦП, восьмикратно */
 static struct battery_info bat_last_good;
 static int bat_have_good = 0;
 
@@ -127,19 +129,42 @@ static void get_battery(struct battery_info *bi) {
             bat_adc_before_charge = bi->adc;
             bat_charge_bump = 0;
         }
-        bat_last_charging = bi->charging;
+        /* Сглаживаем сам АЦП: шкала такая, что одна единица это около
+         * процента, а показания дрожат на единицу-две - отсюда скачки
+         * «26 -> 25 -> 27» на ровном месте. */
+        if (bat_adc_filt <= 0) bat_adc_filt = bi->adc * 8;
+        bat_adc_filt = bat_adc_filt - bat_adc_filt / 8 + bi->adc;
+        int adc_sm = bat_adc_filt / 8;
 
-        int adc_eff = bi->adc - (bi->charging ? bat_charge_bump : 0);
-        int target = bat_table_lookup(adc_eff) * 100 / 170;
+        int adc_eff = adc_sm - (bi->charging ? bat_charge_bump : 0);
+
+        /* При зарядке считаем по таблице заряда: она снята на живой зарядке,
+         * а таблица разряда там врёт - напряжение на клеммах поднято током. */
+        int target;
+        if (bi->charging) {
+            int to_full = charge_table_lookup(adc_eff);
+            target = 100 - to_full * 100 / 124;
+        } else {
+            target = bat_table_lookup(adc_eff) * 100 / 262;
+        }
         if (target > 100) target = 100;
         if (target < 0) target = 0;
 
         /* Показания двигаем плавно: скачок с 88 на 100 за один замер
          * выглядит как ошибка, даже когда напряжение и правда подскочило. */
+        /* Внутри одного цикла процент ходит только в одну сторону: при
+         * зарядке не падает, при разряде не растёт. Дрожание шкалы иначе
+         * выглядит как метания. */
+        if (bat_last_charging != bi->charging) bat_disp_percent = -1;
+        if (bat_disp_percent >= 0) {
+            if (bi->charging && target < bat_disp_percent) target = bat_disp_percent;
+            if (!bi->charging && target > bat_disp_percent) target = bat_disp_percent;
+        }
         if (bat_disp_percent < 0) bat_disp_percent = target;
         else if (target > bat_disp_percent) bat_disp_percent += (target - bat_disp_percent > 2) ? 2 : (target - bat_disp_percent);
         else if (target < bat_disp_percent) bat_disp_percent -= (bat_disp_percent - target > 2) ? 2 : (bat_disp_percent - target);
         bi->percent = bat_disp_percent;
+        bat_last_charging = bi->charging;
     }
 
     /* «Нет батареи» верим только после пяти подряд, иначе кратковременная
@@ -158,13 +183,17 @@ static void get_battery(struct battery_info *bi) {
         int keep_nobat = bi->no_battery;
         *bi = bat_last_good;
         bi->no_battery = keep_nobat;
+    } else {
+        /* Первые секунды после запуска: PIC ещё не опрошен, показывать нечего.
+         * Ноль процентов тут выглядел бы как разряженная батарея. */
+        bi->percent = -1;
     }
     close(fd);
 }
 
 /* ======== Battery Time Estimation ======== */
 #define BAT_HIST_MAX 30
-#define BAT_CAL_PATH "/etc/lcd/bat_cal"
+#define BAT_CAL_PATH "/etc/almond3s/bat_cal"
 
 struct bat_sample { time_t t; int adc; };
 
@@ -178,7 +207,7 @@ struct bat_estimator {
 
 static struct bat_estimator bat_est = {0};
 
-static int bat_cal_cutoff = 612;
+static int bat_cal_cutoff = 512;   /* измерено: на этом значении роутер выключается */
 static int bat_cal_factor = 100;    /* *100 fixed-point (100 = 1.0x) */
 static int bat_cal_hist_size = 20;
 static int bat_cal_interval = 30;   /* seconds between samples */
@@ -210,19 +239,22 @@ static void bat_hist_push(struct bat_estimator *e, time_t t, int adc) {
     if (e->count < bat_cal_hist_size) e->count++;
 }
 
-/* ADC → минуты до нуля. Снято на реальном разряде, пересчитано под
- * правильную шкалу: прежние значения были вчетверо растянуты. */
+/* ADC → минуты до выключения. Снято на полном разряде этого роутера
+ * 13.08.2026: от 713 до 512 он прожил 263 минуты. Отсечка 512 - это
+ * измеренное значение, при нём срабатывает защита элемента (~3.0 В).
+ * Прежняя таблица считала нулём 612, то есть четверть времени работы
+ * числилась разряженной батареей. */
 static const struct { int adc; int min; } bat_table[] = {
-    { 712, 170}, { 706, 161}, { 700, 152}, { 693, 145}, { 687, 130},
-    { 681, 116}, { 674, 109}, { 668, 100}, { 662,  88}, { 656,  68},
-    { 650,  56}, { 643,  43}, { 637,  37}, { 631,  29}, { 624,  22},
-    { 618,  12}, { 612,   0},
+    { 714,  262}, { 700,  242}, { 697,  229}, { 688,  210}, { 679,  196},
+    { 667,  179}, { 659,  162}, { 650,  147}, { 638,  130}, { 628,  113},
+    { 621,   98}, { 612,   79}, { 608,   65}, { 598,   47}, { 586,   31},
+    { 573,   16}, { 512,    0},
 };
 #define BAT_TABLE_SIZE 17
 
 static int bat_table_lookup(int adc) {
-    if (adc >= 712) return 170;
-    if (adc <= 612) return 0;
+    if (adc >= 714) return 262;
+    if (adc <= 512) return 0;
     for (int i = 0; i < BAT_TABLE_SIZE - 1; i++) {
         if (adc >= bat_table[i + 1].adc) {
             int da = bat_table[i].adc - bat_table[i + 1].adc;
@@ -287,18 +319,20 @@ static void bat_estimate(struct bat_estimator *e, int cur_adc) {
     if (e->remain_min < 0) e->remain_min = 0;
 }
 
-/* ADC → минуты до полного заряда, та же пересчитанная шкала. */
+/* ADC → минуты до полного заряда. Ось растянута на реальный диапазон
+ * 512..714; форма прежняя - полного цикла зарядки мы пока не измеряли,
+ * это следующий опыт. */
 static const struct { int adc; int min; } charge_table[] = {
-    { 612, 124}, { 618, 119}, { 624, 113}, { 631, 104},
-    { 637,  94}, { 643,  86}, { 650,  77}, { 656,  69},
-    { 662,  61}, { 668,  52}, { 674,  44}, { 681,  37},
-    { 687,  29}, { 693,  22}, { 700,  15}, { 706,   7}, { 712, 0},
+    { 512, 124}, { 525, 119}, { 538, 113}, { 550, 104}, { 563,  94},
+    { 576,  86}, { 588,  77}, { 601,  69}, { 614,  61}, { 626,  52},
+    { 639,  44}, { 651,  37}, { 664,  29}, { 677,  22}, { 689,  15},
+    { 702,   7}, { 714,   0},
 };
 #define CHARGE_TABLE_SIZE 17
 
 static int charge_table_lookup(int adc) {
-    if (adc <= 612) return 124;
-    if (adc >= 712) return 0;
+    if (adc <= 512) return 124;
+    if (adc >= 714) return 0;
     for (int i = 0; i < CHARGE_TABLE_SIZE - 1; i++) {
         if (adc < charge_table[i + 1].adc) {
             int da = charge_table[i + 1].adc - charge_table[i].adc;
@@ -326,8 +360,8 @@ static void bat_charge_estimate(struct bat_estimator *e, int cur_adc) {
         e->drain_rate = 0;
     }
 
-    if (cur_adc <= 612) { e->remain_min = -1; return; }  /* CC phase, unpredictable */
-    if (cur_adc >= 709) { e->remain_min = 0; return; }   /* almost full */
+    if (cur_adc <= 512) { e->remain_min = -1; return; }  /* CC phase, unpredictable */
+    if (cur_adc >= 712) { e->remain_min = 0; return; }   /* almost full */
 
     e->remain_min = tab_min * bat_cal_factor / 100;
 }
@@ -359,7 +393,7 @@ static void bat_update(struct bat_estimator *e, struct battery_info *bi) {
         e->was_charging = 0;
     }
 
-    if (bi->adc < 537) { e->remain_min = 0; return; }
+    if (bi->adc < 515) { e->remain_min = 0; return; }
 
     time_t now = time(NULL);
     if (e->count > 0) {
@@ -787,10 +821,10 @@ int main(void) {
 
     /* PID file: kill old instance */
     {
-        FILE *pf = fopen("/tmp/data_collector.pid", "r");
+        FILE *pf = fopen("/tmp/almond3s_collector.pid", "r");
         if (pf) { int old=0; fscanf(pf,"%d",&old); fclose(pf);
             if (old>0 && kill(old,0)==0) { kill(old,9); usleep(500000); } }
-        pf = fopen("/tmp/data_collector.pid", "w");
+        pf = fopen("/tmp/almond3s_collector.pid", "w");
         if (pf) { fprintf(pf,"%d\n",getpid()); fclose(pf); }
     }
 
@@ -853,7 +887,7 @@ int main(void) {
             "\"wifi\":{\"clients\":%s},"
             "\"ping\":{\"google_ms\":%d},"
             "\"battery\":{\"adc\":%d,\"percent\":%d,\"charging\":%s,\"valid\":%s,"
-            "\"no_battery\":%s,\"remain_min\":%d,\"drain_rate\":%d.%d,"
+            "\"no_battery\":%s,\"remain_min\":%d,\"drain_rate\":%d.%d,\"cutoff\":%d,"
             "\"raw_hex\":\"%02x %02x\"},"
             "\"uptime\":%ld,\"mem_free_mb\":%ld,\"mem_total_mb\":%ld,"
             "\"cpu_load\":%.2f,\"cpu_busy\":%d,\"cpu_cores\":%d}\n",
@@ -873,6 +907,7 @@ int main(void) {
             bat.adc,bat.percent,bat.charging?"true":"false",bat.valid?"true":"false",
             bat.no_battery?"true":"false",
             bat_est.remain_min, bat_est.drain_rate/100, abs(bat_est.drain_rate)%100,
+            bat_cal_cutoff,
             bat.raw1, bat.raw2,
             si.uptime, (si.freeram + si.bufferram)/1024/1024,
             si.totalram/1024/1024, si.loads[0]/65536.0,
@@ -891,7 +926,7 @@ int main(void) {
 
     close(srv);
     unlink(SOCK_PATH);
-    unlink("/tmp/data_collector.pid");
+    unlink("/tmp/almond3s_collector.pid");
     fprintf(stderr, MODNAME " " VERSION " — STOP\n");
     return 0;
 }

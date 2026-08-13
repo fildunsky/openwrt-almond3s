@@ -8,7 +8,7 @@
 #
 # Вешается на любую кнопку, у которой есть события:
 #   /etc/rc.button/tamper
-#   [ "$ACTION" = released ] && [ "$SEEN" -lt 2 ] && /etc/lcd/scripts/screen.sh toggle
+#   [ "$ACTION" = released ] && [ "$SEEN" -lt 2 ] && /etc/almond3s/scripts/screen.sh toggle
 
 REQ=/tmp/lcd_screen_req
 
@@ -34,7 +34,7 @@ direct() {
 
 case "$1" in
 	on|off|toggle)
-		if pgrep -f lcd_ui.uc >/dev/null 2>&1; then
+		if pgrep -f almond3s/ui.uc >/dev/null 2>&1; then
 			printf '%s' "$1" > "$REQ"
 		else
 			direct "$1"

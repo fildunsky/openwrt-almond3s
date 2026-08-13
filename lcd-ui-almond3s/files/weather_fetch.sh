@@ -2,18 +2,18 @@
 # weather_fetch.sh — caches current weather for lcd_ui dashboard
 #
 # Install:
-#   scp weather_fetch.sh root@192.168.11.1:/etc/lcd/scripts/weather_fetch.sh
-#   ssh root@192.168.11.1 chmod +x /etc/lcd/scripts/weather_fetch.sh
+#   scp weather_fetch.sh root@192.168.11.1:/etc/almond3s/scripts/weather_fetch.sh
+#   ssh root@192.168.11.1 chmod +x /etc/almond3s/scripts/weather_fetch.sh
 #
 # Schedule (every 15 min) — add to /etc/crontabs/root:
-#   */15 * * * * /etc/lcd/scripts/weather_fetch.sh
+#   */15 * * * * /etc/almond3s/scripts/weather_fetch.sh
 # then: /etc/init.d/cron restart
 #
 # Run once manually after install so the dashboard has data immediately:
-#   /etc/lcd/scripts/weather_fetch.sh
+#   /etc/almond3s/scripts/weather_fetch.sh
 
 # Город берётся из UCI, чтобы менять его не правкой скрипта:
-#   uci set lcd.weather.city='Saint Petersburg'; uci commit lcd
+#   uci set almond3s.weather.city='Saint Petersburg'; uci commit lcd
 # Значение из конфига перекрывается переменной окружения CITY (для проверок).
 CITY="${CITY:-$(uci -q get lcd.weather.city)}"
 [ -n "$CITY" ] || CITY="Moscow"
@@ -28,7 +28,7 @@ TMP="/tmp/lcd_weather.txt.tmp"
 # как есть: curl отвечает 3 (кривой URL), wget - ошибкой разбора, и виджет
 # молча оставался со старым городом. Заменяем пробелы на +.
 CITY_URL=$(printf '%s' "$CITY" | tr ' ' '+')
-# lang=ru: в lcd_render добавлена кириллическая страница шрифта, поэтому
+# lang=ru: в рендерер добавлена кириллическая страница шрифта, поэтому
 # описание погоды можно брать по-русски («Небольшой дождь» вместо
 # «Light rain shower»).
 # Язык описания берём тот же, что у интерфейса на экране.

@@ -1,12 +1,12 @@
 include $(TOPDIR)/rules.mk
 
-PKG_NAME:=lcd-ui
-PKG_RELEASE:=73
+PKG_NAME:=lcd-ui-almond3s
+PKG_RELEASE:=100
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
 
-define Package/lcd-ui
+define Package/lcd-ui-almond3s
   SECTION:=utils
   CATEGORY:=Utilities
   TITLE:=LCD dashboard for Securifi Almond 3S
@@ -14,58 +14,74 @@ define Package/lcd-ui
 	+ucode-mod-socket +ucode-mod-ubus +ucode-mod-uci +ucode-mod-uloop +qrencode
 endef
 
-define Package/lcd-ui/description
- Userspace stack for the Almond 3S display: lcd_render draws into /dev/lcd on
- behalf of clients on a unix socket, touch_poll latches SX8650 events,
- data_collector gathers LTE/WiFi/VPN/battery stats and lcd_ui.uc drives the UI.
+define Package/lcd-ui-almond3s/description
+ Userspace stack for the Almond 3S display: the renderer draws into /dev/lcd on
+ behalf of clients on a unix socket, almond3s-lcd latches SX8650 events and
+ controls backlight/LED/buzzer, the collector gathers LTE/WiFi/VPN/battery
+ stats and ui.uc drives the interface.
  lcdshot dumps the framebuffer as a PPM image for debugging the layout.
 endef
 
 define Build/Compile
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
-		-o $(PKG_BUILD_DIR)/lcd_render $(PKG_BUILD_DIR)/lcd_render.c
+		-o $(PKG_BUILD_DIR)/render $(PKG_BUILD_DIR)/render.c
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
-		-o $(PKG_BUILD_DIR)/touch_poll $(PKG_BUILD_DIR)/touch_poll.c
+		-o $(PKG_BUILD_DIR)/almond3s-lcd $(PKG_BUILD_DIR)/almond3s-lcd.c
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
-		-o $(PKG_BUILD_DIR)/data_collector $(PKG_BUILD_DIR)/data_collector.c
+		-o $(PKG_BUILD_DIR)/collector $(PKG_BUILD_DIR)/collector.c
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
 		-o $(PKG_BUILD_DIR)/lcdshot $(PKG_BUILD_DIR)/lcdshot.c
 endef
 
-define Package/lcd-ui/install
+define Package/lcd-ui-almond3s/install
+	# В /usr/bin только то, чем пользуется человек: управляющая утилита и
+	# снимок экрана. Остальное - служебное, ему в общем каталоге не место.
 	$(INSTALL_DIR) $(1)/usr/bin
-	$(INSTALL_BIN) $(PKG_BUILD_DIR)/lcd_render $(1)/usr/bin/
-	$(INSTALL_BIN) $(PKG_BUILD_DIR)/touch_poll $(1)/usr/bin/
-	$(INSTALL_BIN) $(PKG_BUILD_DIR)/data_collector $(1)/usr/bin/
-	$(INSTALL_BIN) $(PKG_BUILD_DIR)/lcdshot $(1)/usr/bin/
-	$(INSTALL_BIN) $(PKG_BUILD_DIR)/lcd_ui.uc $(1)/usr/bin/
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/almond3s-lcd $(1)/usr/bin/
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/lcdshot $(1)/usr/bin/almond3s-lcdshot
+	$(INSTALL_DIR) $(1)/usr/libexec/almond3s
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/render $(1)/usr/libexec/almond3s/render
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/collector $(1)/usr/libexec/almond3s/collector
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/ui.uc $(1)/usr/libexec/almond3s/ui.uc
 	$(INSTALL_DIR) $(1)/etc/init.d
-	$(INSTALL_BIN) ./files/lcd_ui.init $(1)/etc/init.d/lcd_ui
-	$(INSTALL_DIR) $(1)/etc/lcd/scripts
-	$(INSTALL_BIN) ./files/weather_fetch.sh $(1)/etc/lcd/scripts/weather_fetch.sh
-	$(INSTALL_BIN) ./files/svcping.sh $(1)/etc/lcd/scripts/svcping.sh
-	$(INSTALL_BIN) ./files/screen.sh $(1)/etc/lcd/scripts/screen.sh
+	$(INSTALL_BIN) ./files/almond3s-lcd.init $(1)/etc/init.d/almond3s-lcd
+	$(INSTALL_DIR) $(1)/etc/almond3s/scripts
+	$(INSTALL_BIN) ./files/weather_fetch.sh $(1)/etc/almond3s/scripts/weather_fetch.sh
+	$(INSTALL_BIN) ./files/svcping.sh $(1)/etc/almond3s/scripts/svcping.sh
+	$(INSTALL_BIN) ./files/screen.sh $(1)/etc/almond3s/scripts/screen.sh
 	$(INSTALL_DIR) $(1)/etc/config
-	$(INSTALL_CONF) ./files/lcd.config $(1)/etc/config/lcd
+	$(INSTALL_CONF) ./files/almond3s.config $(1)/etc/config/almond3s
 endef
 
-define Package/lcd-ui/conffiles
-/etc/config/lcd
+define Package/lcd-ui-almond3s/conffiles
+/etc/config/almond3s
 endef
 
-define Package/lcd-ui/postinst
+define Package/lcd-ui-almond3s/postinst
 #!/bin/sh
 [ -n "$$IPKG_INSTROOT" ] && exit 0
+
+# Переносим настройки со старых имён: пакет раньше звался lcd-ui и держал
+# конфиг в /etc/config/lcd, а данные - в /etc/lcd. Без переноса пользователь
+# молча теряет яркость, поворот, город и калибровку батареи.
+[ -f /etc/config/lcd ] && [ ! -f /etc/config/almond3s ] && \
+	mv /etc/config/lcd /etc/config/almond3s
+for _f in bat_cal bat_log.txt; do
+	[ -f "/etc/lcd/$$_f" ] && [ ! -f "/etc/almond3s/$$_f" ] && \
+		mv "/etc/lcd/$$_f" "/etc/almond3s/$$_f"
+done
+sed -i 's|/etc/lcd/scripts/|/etc/almond3s/scripts/|g' /etc/crontabs/root 2>/dev/null
+rm -rf /etc/lcd/scripts 2>/dev/null
 grep -q weather_fetch /etc/crontabs/root 2>/dev/null || \
-	echo "*/15 * * * * /etc/lcd/scripts/weather_fetch.sh" >> /etc/crontabs/root
+	echo "*/15 * * * * /etc/almond3s/scripts/weather_fetch.sh" >> /etc/crontabs/root
 grep -q svcping /etc/crontabs/root 2>/dev/null || \
-	echo "*/10 * * * * /etc/lcd/scripts/svcping.sh" >> /etc/crontabs/root
+	echo "*/10 * * * * /etc/almond3s/scripts/svcping.sh" >> /etc/crontabs/root
 /etc/init.d/cron reload >/dev/null 2>&1
-/etc/lcd/scripts/weather_fetch.sh >/dev/null 2>&1 &
-# Перезапускаем службу: без этого в памяти остаётся старый lcd_ui, файлы уже
+/etc/almond3s/scripts/weather_fetch.sh >/dev/null 2>&1 &
+# Перезапускаем службу: без этого в памяти остаётся старая, файлы уже
 # новые, а на экране прежнее поведение - выглядит как «обновление не приехало».
-[ -x /etc/init.d/lcd_ui ] && /etc/init.d/lcd_ui restart >/dev/null 2>&1
+[ -x /etc/init.d/almond3s-lcd ] && /etc/init.d/almond3s-lcd restart >/dev/null 2>&1
 exit 0
 endef
 
-$(eval $(call BuildPackage,lcd-ui))
+$(eval $(call BuildPackage,lcd-ui-almond3s))

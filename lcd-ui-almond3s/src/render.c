@@ -1,9 +1,9 @@
 /*
- * lcd_render — Userspace LCD рендерер для Almond 3S
+ * render — рендерер экрана Almond 3S (ставится как /usr/libexec/almond3s/render)
  * mmap /dev/lcd → framebuffer 320x240 RGB565
  * Принимает JSON команды через unix socket /tmp/lcd.sock
  *
- * Компиляция: zig cc -target mipsel-linux-musleabi -O2 -static -o lcd_render lcd_render.c
+ * Компиляция вручную: zig cc -target mipsel-linux-musleabi -O2 -static -o render render.c
  */
 
 #include <stdio.h>
@@ -379,7 +379,7 @@ int main(int argc, char *argv[])
     lcd_fd = open("/dev/lcd", O_RDWR);
     if (lcd_fd < 0) { perror("/dev/lcd"); return 1; }
 
-    printf("lcd_render: framebuffer %dx%d (%d bytes), write mode\n", LCD_W, LCD_H, FB_SIZE);
+    printf("almond3s render: framebuffer %dx%d (%d bytes), write mode\n", LCD_W, LCD_H, FB_SIZE);
 
     /* One-shot mode: if args, process and exit (no splash) */
     if (argc > 1) {
@@ -403,7 +403,7 @@ int main(int argc, char *argv[])
     listen(sock_fd, 5);
     chmod(SOCK_PATH, 0666);
 
-    printf("lcd_render: listening on %s\n", SOCK_PATH);
+    printf("almond3s render: listening on %s\n", SOCK_PATH);
 
     while (1) {
         client_fd = accept(sock_fd, NULL, NULL);

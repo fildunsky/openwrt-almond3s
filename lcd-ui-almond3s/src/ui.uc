@@ -3,12 +3,12 @@
 // lcd_ui.uc V260401 by Sublimity
 //
 // Архитектура: uloop (event loop) + ubus (system data) + uci (config)
-// Данные: /tmp/lcd_data.json (от data_collector)
-// Рендер: JSON через persistent unix socket → lcd_server / lcd_render
+// Данные: /tmp/lcd_data.json (от сборщика)
+// Рендер: JSON через постоянный unix-сокет → рендерер
 // Тач: ioctl /dev/lcd (kernel lcd_drv touch thread)
 //
-// Build: scp lcd_ui.uc root@192.168.11.1:/usr/bin/lcd_ui.uc
-// Run:   ucode /usr/bin/lcd_ui.uc &
+// Ставится пакетом в /usr/libexec/almond3s/ui.uc, запускается службой
+// /etc/init.d/almond3s-lcd. Вручную: ucode /usr/libexec/almond3s/ui.uc
 //
 
 'use strict';
@@ -29,9 +29,9 @@ let LCD_W = 320, LCD_H = 240;
 let SOCK_PATH = "/tmp/lcd.sock";
 let DATA_PATH = "/tmp/lcd_data.json";
 let TOUCH_PATH = "/tmp/.lcd_touch";
-let SCRIPTS = "/etc/lcd/scripts";  // shell scripts directory
+let SCRIPTS = "/etc/almond3s/scripts";  // каталог вспомогательных скриптов
 
-// Colors (lcd_render accepts: #RRGGBB, #XXXX raw RGB565, named)
+// Цвета (рендерер принимает #RRGGBB, #XXXX в RGB565 и имена)
 let C = {
     bg:      "#0D1117", // GitHub Dark Canvas
     hdr:     "#161B22", // GitHub Dark Overlay
@@ -133,6 +133,28 @@ let T = {
 };
 
 // Layout
+// Фаза анимации зарядки. Объявлена здесь, до всех рисующих функций: в ucode
+// функция не видит того, что объявлено ниже неё.
+let anim_phase = 0;
+
+// Плавное «докатывание» полосок метрик. Для каждой держим показанную длину и
+// подтягиваем её к настоящей: за тик проходим треть остатка, но не меньше
+// пикселя, иначе последние доли не доедут никогда.
+let bar_disp = {};
+let bar_moving = false;
+
+function bar_ease(key, target) {
+    let cur = bar_disp[key];
+    if (cur == null) { bar_disp[key] = target; return target; }
+    if (cur == target) return target;
+    let d = target - cur;
+    let step = int(d / 3);
+    if (step == 0) step = d > 0 ? 1 : -1;
+    bar_disp[key] = cur + step;
+    bar_moving = true;
+    return bar_disp[key];
+}
+
 let HDR_H   = 22;
 let TG_LINK = "t.me/openwrt_fun";
 
@@ -151,7 +173,7 @@ let st = {
     page:   "dashboard",
     mpg:    1,         // menu page (1 or 2)
     screen: "active",
-    data:   {},        // sensor data from data_collector
+    data:   {},        // данные от сборщика
     ltch:   time(),    // last touch time
     ldraw:  0,         // last draw time
     frame:  0,
@@ -173,7 +195,7 @@ let st = {
 let uconn = null;
 if (ubus_mod) {
     uconn = ubus_mod.connect();
-    if (!uconn) warn("lcd_ui: ubus connect failed\n");
+    if (!uconn) warn("almond3s-lcd: ubus connect failed\n");
 }
 
 let ucur = null;
@@ -190,15 +212,15 @@ let LANG = null;
 
 function lang() {
     if (LANG == null)
-        LANG = (ucur ? (ucur.get("lcd", "display", "lang") ?? "ru") : "ru");
+        LANG = (ucur ? (ucur.get("almond3s", "display", "lang") ?? "ru") : "ru");
     return LANG;
 }
 
 function lang_set(v) {
     LANG = v;
     if (ucur) {
-        ucur.set("lcd", "display", "lang", v);
-        ucur.commit("lcd");
+        ucur.set("almond3s", "display", "lang", v);
+        ucur.commit("almond3s");
     }
 }
 
@@ -315,7 +337,7 @@ let TR_RU = {
     "Reading inbox...": "Читаю ящик...",
     "No messages": "Сообщений нет",
     "BACK": "НАЗАД",
-    "Blank now": "Погасить",
+    "Blank": "Погасить",
     "MORE >>>": "ЕЩЁ >>>",
     "<<< BACK": "<<< НАЗАД",
     "< BACK": "< НАЗАД",
@@ -430,17 +452,36 @@ function draw_sigbars(x, y, bars, col, empty) {
 // Носик у батарейки слева: значок стоит правее процентов, и так он «смотрит»
 // на них, а не в край экрана.
 function draw_batt_icon(x, y, w, h, bg, pct, nobat, mono, chg, empty) {
-    let frame = mono ?? (chg ? C.green : C.gray);
+    // Рамка всегда серая: про зарядку теперь говорит анимация «доливания»,
+    // а зелёный контур на неё же намекал второй раз.
+    let frame = mono ?? C.gray;
     lcd_rect(x, y, w, h, frame);
     lcd_rect(x + 1, y + 1, w - 2, h - 2, bg);
     lcd_rect(x - 2, y + 5, 2, h - 10, frame);
     if (nobat) return;
     let sections = pct > 75 ? 4 : (pct > 50 ? 3 : (pct > 25 ? 2 : (pct > 0 ? 1 : 0)));
+    // При зарядке батарейка «доливается»: от своего уровня до полной и заново.
+    // Когда все деления уже заполнены, доливать нечего - тогда последнее
+    // деление мигает, показывая, что заряд ещё идёт.
+    let blink_last = false;
+    if (chg) {
+        let span = 4 - sections + 1;
+        if (span > 1)
+            sections += anim_phase % span;
+        else
+            blink_last = (anim_phase % 2) == 1;
+    }
     let sc = mono ?? (sections == 1 ? C.red : (sections == 2 ? C.yellow : C.green));
     let pitch = int((w - 4) / 4);
     let ec = empty ?? C.dim;
-    for (let i = 0; i < 4; i++)
-        lcd_rect(x + 3 + i * pitch, y + 2, pitch - 2, h - 4, i < sections ? sc : ec);
+    // Носик у нас слева (значок развёрнут на 180), поэтому заполненные
+    // ячейки жмутся к правому краю, а пустеет батарейка слева направо.
+    for (let i = 0; i < 4; i++) {
+        let on = i >= 4 - sections;
+        // Мигает деление у носика: носик слева, значит «верхнее» - это i=0.
+        if (blink_last && i == 0) on = false;
+        lcd_rect(x + 3 + i * pitch, y + 2, pitch - 2, h - 4, on ? sc : ec);
+    }
 }
 
 
@@ -678,14 +719,15 @@ function arr_minmax(arr) {
 // ---- Диод над экраном ----
 //
 // Он не на GPIO, а на PIC: порт E, бит 4. Команды 0x32 (зажечь), 0x31
-// (погасить) и 0x30 (мигание) шлёт touch_poll. Мигание живёт в самом
+// (погасить) и 0x30 (мигание) шлёт almond3s-lcd. Мигание живёт в самом
 // микроконтроллере, поэтому его достаточно включить один раз.
 
 let led_blinking = false;
 
+
 function led_cfg() {
-    let st_ = ucur ? ucur.get("lcd", "led", "state") : null;
-    let sm = ucur ? ucur.get("lcd", "led", "sms_blink") : null;
+    let st_ = ucur ? ucur.get("almond3s", "led", "state") : null;
+    let sm = ucur ? ucur.get("almond3s", "led", "sms_blink") : null;
     return {
         on:  (st_ == null || st_ == "") ? true : (st_ == "1"),
         sms: (sm == "1"),
@@ -696,14 +738,14 @@ function led_cfg() {
 // обновлённых с прежней версии пакета, он остаётся старым. Создаём на месте.
 function led_set(key, v) {
     if (!ucur) return;
-    if (ucur.get("lcd", "led") == null)
-        ucur.set("lcd", "led", "led");
-    ucur.set("lcd", "led", key, sprintf("%s", v));
-    ucur.commit("lcd");
+    if (ucur.get("almond3s", "led") == null)
+        ucur.set("almond3s", "led", "led");
+    ucur.set("almond3s", "led", key, sprintf("%s", v));
+    ucur.commit("almond3s");
 }
 
 function led_write(mode) {
-    system(sprintf("touch_poll led %s >/dev/null 2>&1", mode));
+    system(sprintf("almond3s-lcd led %s >/dev/null 2>&1", mode));
 }
 
 function led_apply() {
@@ -742,7 +784,7 @@ function sms_seen_set(path) {
 }
 
 function refresh_data() {
-    // Primary: data_collector JSON
+    // Основной источник: JSON от сборщика
     let raw = fs.readfile(DATA_PATH);
     let d = raw ? json(raw) : {};
 
@@ -840,7 +882,7 @@ function refresh_data() {
                 };
             }
         } catch (e) {
-            warn(sprintf("lcd_ui: weather parse failed: %s\n", e));
+            warn(sprintf("almond3s-lcd: weather parse failed: %s\n", e));
         }
     }
 
@@ -861,7 +903,7 @@ let touch_was_pressed = false;
 let touch_read_ok = null;
 
 function read_touch() {
-    // Method 1: read touch file if touch_poll is running (legacy)
+    // Method 1: read touch file если запущен демон almond3s-lcd (старый путь)
     let raw = fs.readfile(TOUCH_PATH);
     if (raw) {
         fs.unlink(TOUCH_PATH);
@@ -870,9 +912,9 @@ function read_touch() {
     }
     // Poll /dev/lcd via the C touch helper
     if (touch_read_ok == null)
-        touch_read_ok = (fs.stat("/tmp/touch_read") != null);
+        touch_read_ok = (fs.stat("/tmp/almond3s_touch_read") != null);
     if (!touch_read_ok) return null;
-    let p = fs.popen("/tmp/touch_read 2>/dev/null", "r");
+    let p = fs.popen("/tmp/almond3s_touch_read 2>/dev/null", "r");
     if (p) {
         let line = p.read("line");
         p.close();
@@ -1034,7 +1076,7 @@ function date_str(short) {
 let SAVER_STEPS = [ 30, 60, 120, 300, 600, 1200, 1800, 0 ];   // 0 = никогда
 
 function saver_cfg() {
-    let v = ucur ? ucur.get("lcd", "display", "saver") : null;
+    let v = ucur ? ucur.get("almond3s", "display", "saver") : null;
     v = (v == null || v == "") ? 300 : int(+v);
     if (v < 0) v = 300;
     return v;
@@ -1042,8 +1084,8 @@ function saver_cfg() {
 
 function saver_set(v) {
     if (!ucur) return;
-    ucur.set("lcd", "display", "saver", sprintf("%d", v));
-    ucur.commit("lcd");
+    ucur.set("almond3s", "display", "saver", sprintf("%d", v));
+    ucur.commit("almond3s");
 }
 
 // Сдвиг против выгорания. Раз в 30 секунд на два пикселя было заметно, а
@@ -1055,7 +1097,7 @@ function saver_set(v) {
 let SAVER_STYLES = [ "full", "clock", "line", "off" ];
 
 function saver_style() {
-    let v = ucur ? ucur.get("lcd", "display", "saver_style") : null;
+    let v = ucur ? ucur.get("almond3s", "display", "saver_style") : null;
     for (let x in SAVER_STYLES) if (x == v) return v;
     return "full";
 }
@@ -1065,38 +1107,38 @@ function saver_style() {
 // настройка - можно выключить или сдвинуть часы.
 // Яркость в процентах. Пин один, и владеть им должен драйвер: там живёт ШИМ,
 // поэтому и включение, и гашение, и уровень идут одним путём - ioctl'ом через
-// touch_poll, а не записью в класс светодиодов.
+// almond3s-lcd, а не записью в класс светодиодов.
 // Шкала неравномерная нарочно: внизу шаги мельче, потому что там разница
 // заметнее глазу, а к максимуму - крупнее.
-let BRIGHT_STEPS = [ 10, 20, 35, 50, 70, 85, 100 ];
+let BRIGHT_STEPS = [ 10, 20, 30, 50, 70, 85, 100 ];
 
 function bright_cfg() {
-    let v = ucur ? ucur.get("lcd", "display", "brightness") : null;
+    let v = ucur ? ucur.get("almond3s", "display", "brightness") : null;
     v = (v == null || v == "") ? 100 : int(+v);
     return clampi(v, 5, 100);
 }
 
 function bright_set(pct) {
     if (!ucur) return;
-    ucur.set("lcd", "display", "brightness", sprintf("%d", pct));
-    ucur.commit("lcd");
+    ucur.set("almond3s", "display", "brightness", sprintf("%d", pct));
+    ucur.commit("almond3s");
 }
 
 // Разворот экрана на 180: регистр панели MADCTL в драйвере, тач зеркалится
 // там же. Здесь только хранение и применение.
 function rot_cfg() {
-    let v = ucur ? ucur.get("lcd", "display", "rotate") : null;
+    let v = ucur ? ucur.get("almond3s", "display", "rotate") : null;
     return (v == "1");
 }
 
 function rot_set(on) {
     if (!ucur) return;
-    ucur.set("lcd", "display", "rotate", on ? "1" : "0");
-    ucur.commit("lcd");
+    ucur.set("almond3s", "display", "rotate", on ? "1" : "0");
+    ucur.commit("almond3s");
 }
 
 function rot_apply() {
-    system(sprintf("touch_poll rotate %d >/dev/null 2>&1", rot_cfg() ? 1 : 0));
+    system(sprintf("almond3s-lcd rotate %d >/dev/null 2>&1", rot_cfg() ? 1 : 0));
 }
 
 function rot_btn() {
@@ -1124,9 +1166,9 @@ function draw_rot_icon(ox, oy, col) {
 }
 
 function night_cfg() {
-    let on = ucur ? ucur.get("lcd", "display", "night") : null;
-    let f  = ucur ? ucur.get("lcd", "display", "night_from") : null;
-    let t  = ucur ? ucur.get("lcd", "display", "night_to") : null;
+    let on = ucur ? ucur.get("almond3s", "display", "night") : null;
+    let f  = ucur ? ucur.get("almond3s", "display", "night_from") : null;
+    let t  = ucur ? ucur.get("almond3s", "display", "night_to") : null;
     return {
         on:   (on == null || on == "") ? true : (on == "1"),
         from: clampi(int(+(f ?? 22)), 0, 23),
@@ -1136,8 +1178,8 @@ function night_cfg() {
 
 function night_set(key, v) {
     if (!ucur) return;
-    ucur.set("lcd", "display", key, sprintf("%s", v));
-    ucur.commit("lcd");
+    ucur.set("almond3s", "display", key, sprintf("%s", v));
+    ucur.commit("almond3s");
 }
 
 // Интервал может переходить через полночь, поэтому две ветки: 22->6 это
@@ -1153,8 +1195,8 @@ function night_now() {
 
 function saver_style_set(v) {
     if (!ucur) return;
-    ucur.set("lcd", "display", "saver_style", v);
-    ucur.commit("lcd");
+    ucur.set("almond3s", "display", "saver_style", v);
+    ucur.commit("almond3s");
 }
 
 function style_btn(i) {
@@ -1162,14 +1204,14 @@ function style_btn(i) {
 }
 
 function burnin_cfg() {
-    let v = ucur ? ucur.get("lcd", "display", "burnin") : null;
+    let v = ucur ? ucur.get("almond3s", "display", "burnin") : null;
     return (v == null || v == "") ? true : (v == "1");
 }
 
 function burnin_set(on) {
     if (!ucur) return;
-    ucur.set("lcd", "display", "burnin", on ? "1" : "0");
-    ucur.commit("lcd");
+    ucur.set("almond3s", "display", "burnin", on ? "1" : "0");
+    ucur.commit("almond3s");
     if (!on) { st.ox = 0; st.oy = 0; }
 }
 
@@ -1355,7 +1397,7 @@ function draw_status_row(y, o) {
     let bat_x = LCD_W - 4 - b_w;
 
     if (o?.pct) {
-        let bstr = bat?.no_battery ? "--" : sprintf("%d", bpct);
+        let bstr = (bat?.no_battery || bpct < 0) ? "" : sprintf("%d", bpct);
         lcd_text(bat_x - 6 - tlen(bstr) * 12, y + 1, bstr,
                  o?.time_color ?? C.white, bg, 2);
     }
@@ -2079,7 +2121,11 @@ function draw_menu() {
 
     } else {
         draw_btn(1, tr("Sound"), tr("buzzer test"), C.white, C.gray);
-        draw_btn(2, tr("Modem Reset"), tr("LTE restart"), C.white, C.gray);
+        // Сброс модема - оранжевая, в тон трём палочкам сигнала: действие
+        // не разрушительное, но и не рядовое.
+        draw_btn(2, tr("Modem Reset"), tr("LTE restart"), C.white, "#E8C27A", "#6B4A0F");
+        let mb = btn_pos(2);
+        lcd_rect(mb.x, mb.y, mb.w, 2, C.yellow);
         draw_btn(3, tr("Reboot"), tr("System"), C.white, "#F0B0B8", C.back);
         let rb = btn_pos(3);
         lcd_rect(rb.x, rb.y, rb.w, 2, "#D32F2F");
@@ -2209,7 +2255,7 @@ function draw_display_page() {
 
     // Переключатели: состояние показывает цвет полоски слева.
     let togs = [
-        [ tr("Blank now"), C.cyan ],
+        [ tr("Blank"), C.cyan ],
         [ tr("Shift"),     burnin_cfg()  ? C.green : C.dim ],
         [ tr("Night"),     night_cfg().on ? C.green : C.dim ],
     ];
@@ -2243,7 +2289,7 @@ function led_row(i) {
 }
 
 // Звуки бипера. Каждый - список пар «частота длительность», их играет
-// touch_poll: загрузка таблицы в PIC занимает около секунды, поэтому зовём
+// almond3s-lcd: загрузка таблицы в PIC занимает около секунды, поэтому зовём
 // его фоном, иначе интерфейс замирал бы на каждое нажатие.
 let SOUNDS = [
     { label: "звонок",  name: "bell",  args: "" },
@@ -2277,7 +2323,7 @@ function snd_play(i) {
     }
     let v = snd_vol > 0 ? sprintf(" -v %d", snd_vol) : "";
     let a = e.args != "" ? " " + e.args : "";
-    system(sprintf("touch_poll %s%s%s >/dev/null 2>&1 &", e.name, v, a));
+    system(sprintf("almond3s-lcd %s%s%s >/dev/null 2>&1 &", e.name, v, a));
 }
 
 function draw_sound_page() {
@@ -2507,7 +2553,7 @@ function svc_btn(i) {
 
 function svc_hosts() {
     if (ucur) {
-        let l = ucur.get("lcd", "services", "host");
+        let l = ucur.get("almond3s", "services", "host");
         if (type(l) == "array" && length(l) > 0) return l;
     }
     return [ "ya.ru", "api.telegram.org", "youtube.com", "github.com" ];
@@ -2700,9 +2746,9 @@ function draw_info_page() {
     let badc = int(+(bat?.adc ?? 0));
     let bpct = int(+(bat?.percent ?? 0));
 
-    // Версия драйвера - дата сборки, отдаётся ioctl'ом через touch_poll.
+    // Версия драйвера - дата сборки, отдаётся ioctl'ом через almond3s-lcd.
     let drv_ver = "?";
-    let p = fs.popen("touch_poll version 2>/dev/null", "r");
+    let p = fs.popen("almond3s-lcd version 2>/dev/null", "r");
     if (p) {
         drv_ver = trim(p.read("all") ?? "?");
         p.close();
@@ -2763,7 +2809,7 @@ function draw_info_page() {
         lcd_text(cx + 10, y2 + 32, line, C.white, C.widget, 1);
     }
     lcd_text(cx + 10, y2 + 44,
-             sprintf(tr("raw %s, cutoff %d"), braw, 612),
+             sprintf(tr("raw %s, cutoff %d"), braw, int(+(bat?.cutoff ?? 512))),
              C.dim, C.widget, 1);
 
     // Card 3: Software
@@ -2779,8 +2825,10 @@ function draw_info_page() {
     let dv = drv_ver;
     let dm = match(dv, /^([0-9]{4})-([0-9]{2})-([0-9]{2})$/);
     dv = dm ? sprintf(tr("build %s.%s.%s"), dm[3], dm[2], dm[1]) : sprintf(tr("build %s"), dv);
-    lcd_text(cx + 10, y3 + 32, "almond3s-lcd", C.accent, C.widget, 1);
-    lcd_text(cx + 10, y3 + 44, dv, C.accent, C.widget, 1);
+    // Имя драйвера слева цветом, дата сборки - в правый серый столбец
+    // между ядром и ссылкой.
+    lcd_text(cx + 10, y3 + 32, "kmod-lcd-almond3s", C.accent, C.widget, 1);
+    lcd_text(cx + cw - 10 - tlen(dv) * 6, y3 + 32, dv, C.dim, C.widget, 1);
     lcd_text(cx + cw - 10 - tlen(TG_LINK) * 6, y3 + 44, TG_LINK, C.dim, C.widget, 1);
 
     draw_back();
@@ -2829,7 +2877,7 @@ function wind_fmt(v) {
 // Список правится без пересборки: uci add_list lcd.weather.choices='Berlin'
 function wcity_list() {
     if (ucur) {
-        let l = ucur.get("lcd", "weather", "choices");
+        let l = ucur.get("almond3s", "weather", "choices");
         if (type(l) == "array" && length(l) > 0) return l;
     }
     return WCITY_DEFAULT;
@@ -2841,7 +2889,7 @@ function wcity_pages() {
 }
 
 function wcity_current() {
-    return (ucur ? ucur.get("lcd", "weather", "city") : null) ?? "Moscow";
+    return (ucur ? ucur.get("almond3s", "weather", "city") : null) ?? "Moscow";
 }
 
 function wcity_btn(i) {
@@ -2971,7 +3019,7 @@ function draw_metric_row(x, y, w, key, label, v) {
     lcd_text(x, y, label, C.gray, C.widget, 1);
     lcd_text(x + 42, y, sprintf("%d", v), col, C.widget, 1);
     lcd_rect(bx, y + 1, bw, 6, C.dim);
-    let fill = int(bw * clampi(m.bar(v), 0, 100) / 100);
+    let fill = bar_ease(key, int(bw * clampi(m.bar(v), 0, 100) / 100));
     if (fill > 0) lcd_rect(bx, y + 1, fill, 6, col);
 }
 
@@ -3088,15 +3136,23 @@ function draw_lte_page() {
     };
     let enb_s = cell_id("eNB", u?.enb_id);
     let earf_s = cell_id("EARFCN", l.earfcn);
+    // Вверху опознаватели соты, внизу параметры радио - по два значения в
+    // строке, слева и справа.
     lcd_text(cx + 10, y3 + 18, cell_id("PCI", u?.pci), C.white, C.widget, 1);
-    lcd_text(cx + int((cw - tlen(enb_s) * 6) / 2), y3 + 18, enb_s, C.white, C.widget, 1);
-    lcd_text(rx(earf_s), y3 + 18, earf_s, C.white, C.widget, 1);
+    lcd_text(rx(enb_s), y3 + 18, enb_s, C.white, C.widget, 1);
+    lcd_text(cx + 10, y3 + 30, earf_s, C.white, C.widget, 1);
 
     let mcc = int(+(u?.mcc ?? 0)), mnc = int(+(u?.mnc ?? 0));
     let plmn_name = get_plmn_name(mcc, mnc);
-    lcd_text(cx + 10, y3 + 30, l.operator ?? "Unknown", C.white, C.widget, 1);
+    // Оператора не повторяем - он уже в верхней карточке. Имя из таблицы
+    // PLMN дописываем только если модем рапортует другое: у виртуальных
+    // операторов имя сети и владелец частот не совпадают, и вот это уже
+    // стоит показать.
     if (mcc > 0) {
-        let plmn_s = sprintf("%d-%02d%s", mcc, mnc, plmn_name ? " " + plmn_name : "");
+        let oper = lc(trim(l.operator ?? ""));
+        let plmn_s = sprintf("%d-%02d", mcc, mnc);
+        if (plmn_name && lc(plmn_name) != oper)
+            plmn_s += " " + plmn_name;
         lcd_text(rx(plmn_s), y3 + 30, plmn_s, C.gray, C.widget, 1);
     }
 
@@ -3456,15 +3512,31 @@ function night_dim(lvl) {
 }
 
 function backlight_write(on) {
-    // Яркость убавляем ЦИФРОЙ - драйвер рисует кадр затемнённым, а подсветка
-    // горит ровно. ШИМ на подсветке давал настоящую темноту, но каждая
-    // перерисовка была видна как мерцание: панель обновляется постепенно, и
-    // моргающая подсветка показывала её в разных стадиях. Сама подсветка
-    // теперь только включается и выключается.
+    // Яркость крутим ШИМом по подсветке - это настоящая темнота, а не серая
+    // картинка. Цифровое затемнение (gray) снято совсем: оно давало не
+    // темноту, а блёклость, что особенно заметно ночью.
+    //
+    // Мерцание, из-за которого мы от ШИМа отказывались утром, ушло вместе с
+    // полной перерисовкой кадра: теперь на панель уходят только изменившиеся
+    // строки, а в покое - ноль строк, и переливать нечего.
     let lvl = on ? night_dim(int(bright_cfg() * 255 / 100)) : 0;
-    system(sprintf("touch_poll dim %d >/dev/null 2>&1", on ? 255 : 0));
-    if (on)
-        system(sprintf("touch_poll gray %d >/dev/null 2>&1", lvl));
+    if (lvl > 255) lvl = 255;
+    if (lvl < 8 && on) lvl = 8;   // ниже уже неразличимо, но экран не гасим
+
+    // Гибрид: ШИМ не опускаем ниже 30% - на глубокой скважности окно света
+    // такое короткое, что его рвёт любая передача кадра, и это видно как
+    // мерцание. Остаток затемнения добираем цифрой: свет физически убавлен
+    // ШИМом, поэтому картинка тёмная, а не серая, как при чистой цифре.
+    // Порог 20%: ниже него окно света такое короткое, что передачи кадра
+    // его рвут. На 20% окно 0.8 мс - уже устойчиво, а серости от цифровой
+    // добавки вдвое меньше, чем при пороге 30%.
+    let pwm = lvl, gray = 255;
+    if (on && lvl < 51) {
+        pwm = 51;
+        gray = int(lvl * 255 / 51);
+    }
+    system(sprintf("almond3s-lcd gray %d >/dev/null 2>&1", gray));
+    system(sprintf("almond3s-lcd dim %d >/dev/null 2>&1", on ? pwm : 0));
     // Классу светодиодов оставляем согласованное состояние, чтобы очередная
     // перезагрузка триггеров не зажгла панель мимо нас.
     let p = backlight_path();
@@ -3556,7 +3628,7 @@ function handle_touch(tx, ty) {
             return;
         }
         action_splash(tr("Services"), tr("Checking..."), C.cyan);
-        system("/etc/lcd/scripts/svcping.sh >/dev/null 2>&1 &");
+        system("/etc/almond3s/scripts/svcping.sh >/dev/null 2>&1 &");
         sock_poll(1500);
         refresh_data();
         draw_services_page();
@@ -3779,7 +3851,7 @@ function handle_touch(tx, ty) {
                 lcd_rect(b.x, b.y, 4, b.h, C.yellow);
                 lcd_rect(b.x + b.w - 14, b.y + 8, 8, 8, C.yellow);
                 lcd_flush();
-                system("/etc/lcd/scripts/svcping.sh " + sh_quote(hosts[i]) + " >/dev/null 2>&1");
+                system("/etc/almond3s/scripts/svcping.sh " + sh_quote(hosts[i]) + " >/dev/null 2>&1");
                 refresh_data();
                 draw_services_page();
                 return;
@@ -3934,9 +4006,12 @@ function handle_touch(tx, ty) {
             let bb = bright_btn(i);
             if (in_rect(tx, ty, bb.x, bb.y, bb.w, bb.h)) {
                 bright_set(BRIGHT_STEPS[i]);
+                // Применяем через общий путь: он крутит ШИМ подсветки и
+                // учитывает ночное приглушение. Раньше здесь стояло цифровое
+                // затемнение, из-за чего страница «Экран» продолжала делать
+                // картинку блёклой вместо настоящего убавления света.
                 if (!st.blank)
-                    system(sprintf("touch_poll gray %d >/dev/null 2>&1",
-                                   int(BRIGHT_STEPS[i] * 255 / 100)));
+                    backlight_write(true);
                 draw_display_page();
                 return;
             }
@@ -3990,10 +4065,10 @@ function handle_touch(tx, ty) {
             if (in_rect(tx, ty, b.x, b.y, b.w, b.h)) {
                 if (!ucur) { toast(tr("uci unavailable"), C.red, "#200000", 2); return; }
                 flash_btn(b.x, b.y, b.w, b.h, city_name(list[idx]));
-                ucur.set("lcd", "weather", "city", list[idx]);
-                ucur.commit("lcd");
+                ucur.set("almond3s", "weather", "city", list[idx]);
+                ucur.commit("almond3s");
                 action_splash(tr("Weather"), sprintf(tr("Fetching %s..."), city_name(list[idx])), C.yellow);
-                system("/etc/lcd/scripts/weather_fetch.sh >/dev/null 2>&1");
+                system("/etc/almond3s/scripts/weather_fetch.sh >/dev/null 2>&1");
                 refresh_data();
                 go_page("weather");
                 return;
@@ -4121,7 +4196,7 @@ function screen_req() {
 // =============================================
 
 function main() {
-    warn(sprintf("lcd_ui: starting (ucode) ubus=%s uci=%s uloop=%s\n",
+    warn(sprintf("almond3s-lcd: starting (ucode) ubus=%s uci=%s uloop=%s\n",
         uconn ? "OK" : "NO",
         ucur  ? "OK" : "NO",
         uloop_mod ? "OK" : "NO"));
@@ -4153,6 +4228,41 @@ function main() {
     // === uloop event-driven mode ===
     if (uloop_mod) {
         uloop_mod.init();
+
+        // Анимация зарядки: отдельный быстрый таймер, который что-то делает
+        // только пока идёт заряд. На панель при этом уходят лишь строки
+        // батарейки - остальное не меняется, и построчный вывод их не шлёт.
+        // Полоски метрик докатываются за несколько кадров. Таймер частый, но
+        // просыпается вхолостую только когда что-то реально движется.
+        let bar_t;
+        bar_t = uloop_mod.timer(90, function() {
+            if (bar_moving && st.screen == "active" && st.page == "lte") {
+                bar_moving = false;
+                draw_current();
+            } else {
+                bar_moving = false;
+            }
+            bar_t.set(90);
+        });
+
+        let anim_t, anim_tick = 0;
+        anim_t = uloop_mod.timer(700, function() {
+            let bat = st.data?.battery;
+            if (bat?.charging && !bat?.no_battery) {
+                anim_tick++;
+                if (st.screen == "active") {
+                    anim_phase++;
+                    draw_current();
+                } else if (st.screen == "screensaver" && !st.blank && (anim_tick % 2) == 0) {
+                    // На заставке шаг вдвое реже: она и задумана спокойной, а
+                    // строк батарейки в кадре всего шестнадцать, так что
+                    // перерисовка почти ничего не стоит.
+                    anim_phase++;
+                    draw_screensaver();
+                }
+            }
+            anim_t.set(700);
+        });
 
         // Data refresh + redraw (every 2s)
         let data_t;
@@ -4220,12 +4330,12 @@ function main() {
             burnin_t.set(T.burnin * 1000);
         });
 
-        warn("lcd_ui: uloop running\n");
+        warn("almond3s-lcd: uloop running\n");
         uloop_mod.run();
 
     // === Fallback: poll loop ===
     } else {
-        warn("lcd_ui: fallback poll loop (no uloop)\n");
+        warn("almond3s-lcd: fallback poll loop (no uloop)\n");
         let last_data = 0;
         let last_burnin = time();
 

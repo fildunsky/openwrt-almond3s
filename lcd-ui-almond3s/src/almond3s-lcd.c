@@ -1,19 +1,20 @@
 /*
- * touch_poll — Touch + backlight control for Almond 3S LCD
+ * almond3s-lcd — управление экраном Almond 3S: тач, подсветка, диод, звук
  *
  * Usage:
- *   touch_poll          — foreground touch demo (draw crosshairs)
- *   touch_poll daemon   — background daemon: write /tmp/.lcd_touch
- *   touch_poll led on   — диод над экраном (on|off|blink)
- *   touch_poll tone 800 40 600 40 — бипер: пары «частота длительность»
- *   touch_poll rotate 1  — экран вверх ногами
- *   touch_poll volume 2 — громкость бипера 1..3
- *   touch_poll bl 0     — backlight OFF (ioctl cmd=4, arg=0)
- *   touch_poll bl 1     — backlight ON  (ioctl cmd=4, arg=1)
- *   touch_poll bl 2     — show splash   (ioctl cmd=4, arg=2)
+ *   almond3s-lcd          — foreground touch demo (draw crosshairs)
+ *   almond3s-lcd daemon   — background daemon: write /tmp/.lcd_touch
+ *   almond3s-lcd led on   — диод над экраном (on|off|blink)
+ *   almond3s-lcd tone 800 40 600 40 — бипер: пары «частота длительность»
+ *   almond3s-lcd rotate 1  — экран вверх ногами
+ *   almond3s-lcd volume 2 — громкость бипера 1..3
+ *   almond3s-lcd bl 0     — backlight OFF (ioctl cmd=4, arg=0)
+ *   almond3s-lcd bl 1     — backlight ON  (ioctl cmd=4, arg=1)
+ *   almond3s-lcd bl 2     — show splash   (ioctl cmd=4, arg=2)
  *
  * Daemon writes: "raw_x raw_y pressed\n" to /tmp/.lcd_touch every 50ms
- * Build: zig cc -target mipsel-linux-musleabi -Os -static -o touch_poll touch_poll.c
+ * Сборка вручную: zig cc -target mipsel-linux-musleabi -Os -static \
+ *                 -o almond3s-lcd almond3s-lcd.c
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +24,7 @@
 #include <sys/ioctl.h>
 #include <signal.h>
 #include <sys/types.h>
+#include <sys/file.h>
 
 #define LCD_W 320
 #define LCD_H 240
@@ -195,14 +197,14 @@ int main(int argc, char **argv)
     int fd = open("/dev/lcd", O_RDWR);
     if (fd < 0) { perror("/dev/lcd"); return 1; }
 
-    /* touch_poll bl <0|1|2> — backlight control */
+    /* almond3s-lcd bl <0|1|2> — backlight control */
     if (argc >= 3 && argv[1][0] == 'b') {
         int ret = ioctl(fd, 4, (unsigned long)atoi(argv[2]));
         close(fd);
         return ret < 0 ? 1 : 0;
     }
 
-    /* touch_poll version — read lcd_drv version */
+    /* almond3s-lcd version — read lcd_drv version */
     if (argc >= 2 && argv[1][0] == 'v') {
         char ver[64] = {0};
         if (ioctl(fd, 7, ver) == 0)
@@ -213,7 +215,7 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    /* touch_poll dim <0..255> — яркость подсветки программным ШИМ (ioctl 16).
+    /* almond3s-lcd dim <0..255> — яркость подсветки программным ШИМ (ioctl 16).
      * 0 - погашено, 255 - полный накал, между ними драйвер крутит пин. */
     if (argc >= 3 && argv[1][0] == 'd') {
         int ret = ioctl(fd, 16, (unsigned long)atoi(argv[2]));
@@ -221,14 +223,35 @@ int main(int argc, char **argv)
         return ret < 0 ? 1 : 0;
     }
 
-    /* touch_poll rotate 0|1 — разворот экрана на 180 (ioctl 22). */
+    /* almond3s-lcd pwm <Гц> — частота ШИМ подсветки (ioctl 24). */
+    if (argc >= 3 && strcmp(argv[1], "pwm") == 0) {
+        int hz = atoi(argv[2]);
+        if (hz < 50) hz = 50;
+        if (hz > 20000) hz = 20000;
+        int ret = ioctl(fd, 24, (unsigned long)(1000000 / hz));
+        close(fd);
+        return ret < 0 ? 1 : 0;
+    }
+
+    /* almond3s-lcd panel <команда> [данные] — сырая команда в ILI9341.
+     * Для проверки аппаратной яркости: panel 0x53 0x2C, затем panel 0x51 0x40. */
+    if (argc >= 3 && strcmp(argv[1], "panel") == 0) {
+        int c = (int)strtol(argv[2], NULL, 0) & 0xFF;
+        int d = argc > 3 ? (int)strtol(argv[3], NULL, 0) & 0xFF : 0;
+        int n = argc > 3 ? 1 : 0;
+        int ret = ioctl(fd, 23, (unsigned long)((c << 16) | (d << 8) | n));
+        close(fd);
+        return ret < 0 ? 1 : 0;
+    }
+
+    /* almond3s-lcd rotate 0|1 — разворот экрана на 180 (ioctl 22). */
     if (argc >= 3 && strcmp(argv[1], "rotate") == 0) {
         int ret = ioctl(fd, 22, (unsigned long)(atoi(argv[2]) ? 1 : 0));
         close(fd);
         return ret < 0 ? 1 : 0;
     }
 
-    /* touch_poll replay [уровень] — только старт по уже загруженной таблице,
+    /* almond3s-lcd replay [уровень] — только старт по уже загруженной таблице,
      * без сброса шины. Нужен, чтобы отделить «громкость глушит» от
      * «команда съедает следующую». */
     if (argc >= 2 && strcmp(argv[1], "replay") == 0) {
@@ -253,7 +276,7 @@ int main(int argc, char **argv)
         return ret < 0 ? 1 : 0;
     }
 
-    /* touch_poll volume 1|2|3 — громкость бипера. Заводской драйвер шлёт
+    /* almond3s-lcd volume 1|2|3 — громкость бипера. Заводской драйвер шлёт
      * {0x34, 0x00, уровень}: три режима раскачки пищалки. */
     if (argc >= 3 && strcmp(argv[1], "volume") == 0) {
         struct { int len; unsigned char data[152]; } p;
@@ -266,7 +289,7 @@ int main(int argc, char **argv)
         return ret < 0 ? 1 : 0;
     }
 
-    /* touch_poll tone <Гц> <мс> | melody | siren — бипер на PIC.
+    /* almond3s-lcd tone <Гц> <мс> | melody | siren — бипер на PIC.
      * Порядок взят из заводского драйвера: сброс шины, стоп, пауза, число
      * нот, таблица частот, таблица длительностей, старт. Байты в таблицах
      * идут старшим вперёд. */
@@ -345,6 +368,24 @@ int main(int argc, char **argv)
             return -1;
         }
 
+        /* Один звук за раз. Загрузка таблицы в чип занимает секунды, а
+         * каждое нажатие на странице «Звук» запускает нас заново: без замка
+         * несколько экземпляров дерутся за очередь пакетов, и в PIC уезжает
+         * мешанина из двух мелодий. */
+        int lock = open("/tmp/.lcd_tone.lock", O_CREAT | O_RDWR, 0600);
+        if (lock >= 0 && flock(lock, LOCK_EX | LOCK_NB) < 0) {
+            close(lock);
+            close(fd);
+            return 0;
+        }
+
+        /* Пауза нулевой частотой ломает чип: pwm_compute делит на частоту, а
+         * в делении 32-битных чисел у него нет защиты от нуля - в частное
+         * уходит мусор, и мелодия рассыпается на щелчки. Поэтому паузы
+         * кодируем ультразвуком: арифметика цела, а слышно ничего. */
+        for (int i = 0; i < n; i++)
+            if (f[i] <= 0) f[i] = 20000;
+
         unsigned char ssp[] = { 0x39 };
         unsigned char stop[] = { 0x2F, 0x00, 0x02 };
         unsigned char size[] = { 0x33, 0x00, (unsigned char)n };
@@ -381,18 +422,49 @@ int main(int argc, char **argv)
         return ret < 0 ? 1 : 0;
     }
 
-    /* touch_poll led on|off|blink — диод над экраном. Он висит на PIC, а не
-     * на GPIO: PORTE бит 4, команды 0x32/0x31/0x30. Полярность обратна той,
-     * что указана в разборе прошивки, - проверено на живом железе. */
+    /* almond3s-lcd led on|off|blink — диод над экраном.
+     *
+     * Ходим через класс светодиодов ядра, а не своим ioctl: драйвер
+     * регистрирует диод как /sys/class/leds/white:status, и управление в
+     * обход разошлось бы с состоянием в системе - ровно та же история, что
+     * с подсветкой. Мигание аппаратное, его делает сам PIC, поэтому ставим
+     * штатный триггер timer с интервалом, который драйвер принимает.
+     * Прямой ioctl оставлен запасным путём для сборок со старым драйвером,
+     * где светодиода в системе ещё нет. */
     if (argc >= 3 && strcmp(argv[1], "led") == 0) {
-        int c = strcmp(argv[2], "on") == 0 ? 0x32
-              : strcmp(argv[2], "blink") == 0 ? 0x30 : 0x31;
+        static const char *dir = "/sys/class/leds/white:status";
+        char path[128];
+        FILE *f;
+        int on = strcmp(argv[2], "on") == 0;
+        int blink = strcmp(argv[2], "blink") == 0;
+
+        snprintf(path, sizeof(path), "%s/brightness", dir);
+        if (access(path, W_OK) == 0) {
+            snprintf(path, sizeof(path), "%s/trigger", dir);
+            if ((f = fopen(path, "w"))) {
+                fputs(blink ? "timer" : "none", f);
+                fclose(f);
+            }
+            if (blink) {
+                snprintf(path, sizeof(path), "%s/delay_on", dir);
+                if ((f = fopen(path, "w"))) { fputs("250", f); fclose(f); }
+                snprintf(path, sizeof(path), "%s/delay_off", dir);
+                if ((f = fopen(path, "w"))) { fputs("250", f); fclose(f); }
+            } else {
+                snprintf(path, sizeof(path), "%s/brightness", dir);
+                if ((f = fopen(path, "w"))) { fputs(on ? "1" : "0", f); fclose(f); }
+            }
+            close(fd);
+            return 0;
+        }
+
+        int c = on ? 0x32 : blink ? 0x30 : 0x31;
         int ret = ioctl(fd, 9, (unsigned long)(10000 + c));
         close(fd);
         return ret < 0 ? 1 : 0;
     }
 
-    /* touch_poll level — текущая яркость (ioctl 17). */
+    /* almond3s-lcd level — текущая яркость (ioctl 17). */
     if (argc >= 2 && argv[1][0] == 'l') {
         int lvl[2] = { -1, -1 };
         if (ioctl(fd, 17, lvl) == 0)
@@ -401,14 +473,14 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    /* touch_poll gray <0..255> — цифровое затемнение картинки (ioctl 19). */
+    /* almond3s-lcd gray <0..255> — цифровое затемнение картинки (ioctl 19). */
     if (argc >= 3 && argv[1][0] == 'g') {
         int ret = ioctl(fd, 19, (unsigned long)atoi(argv[2]));
         close(fd);
         return ret < 0 ? 1 : 0;
     }
 
-    /* touch_poll stat — сколько строк ушло на панель в последнем кадре. */
+    /* almond3s-lcd stat — сколько строк ушло на панель в последнем кадре. */
     if (argc >= 2 && argv[1][0] == 's') {
         int d[3] = { -1, -1, -1 };
         if (ioctl(fd, 18, d) == 0)
@@ -417,7 +489,7 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    /* touch_poll pic — сырые 17 байт статуса PIC (ioctl 3).
+    /* almond3s-lcd pic — сырые 17 байт статуса PIC (ioctl 3).
      * Нужно, чтобы ловить, докладывает ли PIC о нажатиях кнопки питания:
      * до ядра она не доходит, вся надежда на эти байты. */
     if (argc >= 2 && argv[1][0] == 'p') {
@@ -433,12 +505,12 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    /* touch_poll daemon — background poller (fork) */
+    /* almond3s-lcd daemon — background poller (fork) */
     if (argc >= 2 && strcmp(argv[1], "daemon") == 0) {
         return daemon_mode(fd);
     }
 
-    /* touch_poll daemon_fg — foreground poller (for procd) */
+    /* almond3s-lcd daemon_fg — foreground poller (for procd) */
     if (argc >= 2 && strcmp(argv[1], "daemon_fg") == 0) {
         signal(SIGTERM, sig_handler);
         signal(SIGINT, sig_handler);
