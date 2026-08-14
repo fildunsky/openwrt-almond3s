@@ -195,6 +195,50 @@ static const struct { uint16_t cp; uint8_t g[5]; } font5x7_sym[] = {
     { 0x2019, {0x00,0x00,0x03,0x00,0x00} },   /* rsquo */
 };
 
+#include "flipper_fonts.h"
+
+/* Режим шрифта: 0 - встроенный 5x7, 1 - haxrcorp4089 из Flipper Zero.
+   Рисуем его МОНОШИРИННО в ту же клетку 6x8, что и 5x7: вся геометрия
+   страниц посчитана из ширины 6*scale на символ, и пропорциональный вывод
+   разъехался бы по всем правым краям и центровкам. */
+static int font_mode = 0;
+
+static const struct fz_glyph *fz_find(const struct fz_glyph *g, int n, unsigned cp)
+{
+    int lo = 0, hi = n - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (g[mid].cp == cp) return &g[mid];
+        if (g[mid].cp < cp) lo = mid + 1; else hi = mid - 1;
+    }
+    return NULL;
+}
+
+/* Символ шрифтом Flipper в клетке 6x8: фон клетки, базовая линия на 7-й
+   строке, как у 5x7. Вернуть 0, если глифа нет - вызывающий нарисует 5x7. */
+static int fz_char_mono(int x, int y, unsigned cp, uint16_t fg, uint16_t bg, int scale, int draw_bg)
+{
+    const struct fz_glyph *g = fz_find(fz_hax_glyphs, FZ_HAX_COUNT, cp);
+    int row, col, sx, sy;
+    if (!g) return 0;
+    if (draw_bg)
+        for (row = 0; row < 8 * scale; row++)
+            for (sx = 0; sx < 6 * scale; sx++)
+                fb_pixel(x + sx, y + row, bg);
+    {
+        int bpr = (g->w + 7) / 8;
+        int gx = x + g->x * scale;
+        int gy = y + (7 - g->h - g->y) * scale;
+        for (row = 0; row < g->h; row++)
+            for (col = 0; col < g->w; col++)
+                if (fz_hax_bits[g->off + row * bpr + col / 8] & (0x80 >> (col % 8)))
+                    for (sy = 0; sy < scale; sy++)
+                        for (sx = 0; sx < scale; sx++)
+                            fb_pixel(gx + col * scale + sx, gy + row * scale + sy, fg);
+    }
+    return 1;
+}
+
 /* cp - код символа Unicode. Латиница берётся из font5x7, кириллица - из
    font5x7_cyr (порядок юникодный, индекс - арифметика), остальное ищем в
    font5x7_sym. */
@@ -202,6 +246,9 @@ static void fb_char(int x, int y, unsigned cp, uint16_t fg, uint16_t bg, int sca
 {
     const uint8_t *g;
     int col, row, sx, sy;
+
+    if (font_mode == 1 && fz_char_mono(x, y, cp, fg, bg, scale, 1))
+        return;
 
     if (cp >= 0x0410 && cp <= 0x042F)      g = font5x7_cyr[cp - 0x0410];
     else if (cp >= 0x0430 && cp <= 0x044F) g = font5x7_cyr[32 + (cp - 0x0430)];
@@ -236,9 +283,12 @@ static void fb_char(int x, int y, unsigned cp, uint16_t fg, uint16_t bg, int sca
 static void fb_text(int x, int y, const char *s, uint16_t fg, uint16_t bg, int scale)
 {
     int x0 = x;
+    unsigned cps[256];
+    int cx[256], cy[256], adv[256];
+    int n = 0, i;
     const unsigned char *p = (const unsigned char *)s;
 
-    while (*p) {
+    while (*p && n < 256) {
         unsigned cp;
         if (*p == '\n') { y += 8 * scale; x = x0; p++; continue; }
         if ((*p & 0xE0) == 0xC0 && (p[1] & 0xC0) == 0x80) {
@@ -252,9 +302,33 @@ static void fb_text(int x, int y, const char *s, uint16_t fg, uint16_t bg, int s
             cp = *p;
             p++;
         }
-        fb_char(x, y, cp, fg, bg, scale);
-        x += 6 * scale;
+        cps[n] = cp; cx[n] = x; cy[n] = y;
+        if (font_mode == 1) {
+            const struct fz_glyph *g = fz_find(fz_hax_glyphs, FZ_HAX_COUNT, cp);
+            adv[n] = (g ? g->adv : 6) * scale;
+        } else {
+            adv[n] = 6 * scale;
+        }
+        x += adv[n];
+        n++;
     }
+
+    if (font_mode == 1) {
+        /* Два прохода: сперва фон всех клеток, затем глифы. Иначе широкий
+           глиф (W, Ж, Щ) срезается фоном соседней клетки. */
+        int row, sx;
+        for (i = 0; i < n; i++)
+            for (row = 0; row < 8 * scale; row++)
+                for (sx = 0; sx < adv[i]; sx++)
+                    fb_pixel(cx[i] + sx, cy[i] + row, bg);
+        for (i = 0; i < n; i++)
+            if (!fz_char_mono(cx[i], cy[i], cps[i], fg, bg, scale, 0))
+                fb_char(cx[i], cy[i], cps[i], fg, bg, scale);
+        return;
+    }
+
+    for (i = 0; i < n; i++)
+        fb_char(cx[i], cy[i], cps[i], fg, bg, scale);
 }
 
 static void flush_cmd(void)
@@ -354,6 +428,9 @@ static void handle_cmd(const char *json)
         /* \n уже развёрнут в json_str */
         fb_text(x, y, text, parse_color(color[0] ? color : "white"),
                 parse_color(bg_color[0] ? bg_color : "black"), size);
+    }
+    else if (!strcmp(cmd, "fontmode")) {
+        font_mode = json_int(json, "mode", 0);
     }
     else if (!strcmp(cmd, "flush")) {
         flush_cmd();

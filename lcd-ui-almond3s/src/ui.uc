@@ -201,6 +201,17 @@ if (ubus_mod) {
 let ucur = null;
 if (uci_mod) ucur = uci_mod.cursor();
 
+// Режим шрифта интерфейса: std - встроенный 5x7, flipper - haxrcorp4089
+// из Flipper Zero. Рендер переключается командой fontmode; кэшируем
+// значение и шлём его в каждом кадре первой командой - render мог
+// перезапуститься и забыть режим.
+let FONT_MODE = 0;
+function font_load() {
+    let v = ucur ? ucur.get("almond3s", "display", "font") : null;
+    FONT_MODE = (v == "flipper") ? 1 : 0;
+}
+font_load();
+
 // ---- Язык интерфейса ----
 //
 // Ключ словаря - английская строка, значение - русская. Незнакомая строка
@@ -361,6 +372,10 @@ let TR_RU = {
     "No uplinks": "Аплинков нет",
     "Switching...": "Переключаю...",
     "VIEW": "ВИД",
+    "Saver": "Заставка",
+    "Night mode": "НОЧНОЙ РЕЖИМ",
+    "FONT FLIPPER": "ШРИФТ: FLIPPER",
+    "FONT STD": "ШРИФТ: СТАНДАРТ",
     "LIGHT": "ЯРКОСТЬ",
     "Shift": "Сдвиг",
     "Night": "Ночь",
@@ -458,6 +473,7 @@ function lcd_text(x, y, text, color, bg, sz) {
 // Native socket — connect/send/close per flush (fast, no deadlock)
 function lcd_flush() {
     if (!length(cmds)) return;
+    unshift(cmds, sprintf('{"cmd":"fontmode","mode":%d}', FONT_MODE));
     push(cmds, '{"cmd":"flush"}');
     let payload = join("\n", cmds) + "\n";
     cmds = [];
@@ -1224,7 +1240,7 @@ function rot_apply() {
 }
 
 function rot_btn() {
-    return { x: 10, y: 28, w: 44, h: 22 };
+    return { x: 10, y: 36, w: 56, h: 32 };
 }
 
 // Круговые стрелки рисуем кольцом с двумя разрывами и стрелками на концах:
@@ -1305,7 +1321,7 @@ function saver_style_set(v) {
 }
 
 function style_btn(i) {
-    return { x: 100 + i * 54, y: 108, w: 50, h: 26 };
+    return { x: 10 + i * 76, y: 96, w: 72, h: 30 };
 }
 
 function burnin_cfg() {
@@ -1340,17 +1356,29 @@ function saver_label(v) {
 
 // Страница «Экран»: карточка таймаута и кнопки шага - три равных блока в ряд.
 function saver_box() {
-    return { x: 10, y: 56, w: 96, h: 42 };
+    return { x: 10, y: 32, w: 96, h: 42 };
 }
 
 function saver_btn(which) {
-    return which > 0 ? { x: 112, y: 56, w: 96, h: 42 }
-                     : { x: 214, y: 56, w: 96, h: 42 };
+    return which > 0 ? { x: 112, y: 32, w: 96, h: 42 }
+                     : { x: 214, y: 32, w: 96, h: 42 };
+}
+
+function svshift_btn() {
+    return { x: 10, y: 150, w: 130, h: 36 };
+}
+
+function svnight_btn() {
+    return { x: 150, y: 150, w: 160, h: 36 };
 }
 
 // Язык - одной кнопкой в правом верхнем углу: флаг и код языка.
 function lang_btn() {
-    return { x: 244, y: 28, w: 66, h: 22 };
+    return { x: 236, y: 36, w: 74, h: 32 };
+}
+
+function font_btn() {
+    return { x: 74, y: 36, w: 154, h: 32 };
 }
 
 // Переключатели: гашение, сдвиг, ночь. Состояние показывает цвет полоски,
@@ -1358,13 +1386,12 @@ function lang_btn() {
 // Семь шагов в ряд: ряд занимает всю ширину, подпись уезжает строкой выше -
 // иначе на кнопку остаётся 28 пикселей, это уже уже пальца.
 function bright_btn(i) {
-    return { x: 10 + i * 44, y: 183, w: 42, h: 22 };
+    return { x: 10 + i * 44, y: 118, w: 42, h: 48 };
 }
 
 function tog_btn(i) {
-    if (i == 0) return { x: 10,  y: 142, w: 104, h: 30 };
-    if (i == 1) return { x: 120, y: 142, w: 92,  h: 30 };
-    return { x: 218, y: 142, w: 92, h: 30 };
+    if (i == 0) return { x: 10, y: 64, w: 148, h: 38 };
+    return { x: 166, y: 64, w: 144, h: 38 };
 }
 
 // Часы «с» и «до» живут на своей странице: две группы «минус - значение - плюс».
@@ -1519,7 +1546,6 @@ function draw_status_row(y, o) {
 function draw_header(title, bg_c) {
     bg_c ??= C.hdr;
     lcd_rect(0, 0, LCD_W, HDR_H, bg_c);
-    lcd_rect(0, HDR_H, LCD_W, 1, C.border); // header bottom line
     draw_status_row(3, { bg: bg_c, time: true, pct: true });
 }
 
@@ -2413,30 +2439,37 @@ function draw_menu() {
             C.white, ns > 0 ? C.green : C.gray);
         draw_btn(2, tr("Services"), tr("check"), C.white, C.gray);
         draw_btn(3, tr("Weather"), tr("Update now"), C.white, C.gray);
-        draw_btn(4, tr("Display"), saver_label(saver_cfg()), C.white, C.gray);
+        draw_btn(4, tr("Display"), sprintf("%d%%", bright_cfg()), C.white, C.gray);
+        draw_btn(5, tr("Saver"), saver_label(saver_cfg()), C.white, C.gray);
+
+        let b = btn_pos(6);
+        lcd_rect(b.x, b.y, b.w, b.h, C.hdr);
+        lcd_text(b.x + 20, b.y + 20, tr("MORE >>>"), C.white, C.hdr, 2);
+
+    } else if (st.mpg == 3) {
         let lc = led_cfg();
-        draw_btn(5, tr("LED"),
+        draw_btn(1, tr("LED"),
             led_blinking ? tr("blinking") : (lc.on ? tr("on") : tr("off")),
             C.white, (lc.on || led_blinking) ? C.green : C.gray);
+        draw_btn(2, tr("Sound"), tr("buzzer test"), C.white, C.gray);
+        let bt = st.data?.battery;
+        let bp = int(+(bt?.percent ?? -1));
+        draw_btn(3, tr("Battery"), bp >= 0 ? sprintf("%d%%", bp) : "--",
+                 C.white, bt?.charging ? C.green : C.gray);
+        draw_btn(4, "Zigbee", "EM357", C.white, C.gray);
 
         let b = btn_pos(6);
         lcd_rect(b.x, b.y, b.w, b.h, C.hdr);
         lcd_text(b.x + 20, b.y + 20, tr("MORE >>>"), C.white, C.hdr, 2);
 
     } else {
-        draw_btn(1, tr("Sound"), tr("buzzer test"), C.white, C.gray);
-        let bt = st.data?.battery;
-        let bp = int(+(bt?.percent ?? -1));
-        draw_btn(2, tr("Battery"), bp >= 0 ? sprintf("%d%%", bp) : "--",
-                 C.white, bt?.charging ? C.green : C.gray);
-        draw_btn(3, "Zigbee", "EM357", C.white, C.gray);
-        // Сброс модема - оранжевая, в тон трём палочкам сигнала: действие
-        // не разрушительное, но и не рядовое.
-        draw_btn(4, tr("Modem Reset"), tr("LTE restart"), C.white, "#E8C27A", "#6B4A0F");
-        let mb = btn_pos(4);
+        // Последняя страница - только опасные действия: их сложнее
+        // нажать случайно по дороге к обычным пунктам.
+        draw_btn(1, tr("Modem Reset"), tr("LTE restart"), C.white, "#E8C27A", "#6B4A0F");
+        let mb = btn_pos(1);
         lcd_rect(mb.x, mb.y, mb.w, 2, C.yellow);
-        draw_btn(5, tr("Reboot"), tr("System"), C.white, "#F0B0B8", C.back);
-        let rb = btn_pos(5);
+        draw_btn(2, tr("Reboot"), tr("System"), C.white, "#F0B0B8", C.back);
+        let rb = btn_pos(2);
         lcd_rect(rb.x, rb.y, rb.w, 2, "#D32F2F");
 
         // 6: <<< BACK. Ровно одна ячейка: растянутая на две выглядела единой
@@ -2531,15 +2564,44 @@ function draw_display_page() {
     // Язык - одной кнопкой сверху справа: флажок и код.
     let rb = rot_btn();
     lcd_rect(rb.x, rb.y, rb.w, rb.h, C.widget);
-    draw_rot_icon(rb.x + 15, rb.y + 4, rot_cfg() ? C.green : C.gray);
+    draw_rot_icon(rb.x + 21, rb.y + 9, rot_cfg() ? C.green : C.gray);
 
     let ru = (lang() == "ru");
     let lb = lang_btn();
     lcd_rect(lb.x, lb.y, lb.w, lb.h, C.widget);
-    draw_flag(lb.x + 8, lb.y + 6, ru ? "ru" : "en");
-    lcd_text(lb.x + 30, lb.y + 4, ru ? "RU" : "EN", C.white, C.widget, 2);
+    draw_flag(lb.x + 10, lb.y + 11, ru ? "ru" : "en");
+    lcd_text(lb.x + 34, lb.y + 9, ru ? "RU" : "EN", C.white, C.widget, 2);
 
-    // Таймаут: карточка с подписью внутри и два равных ей шага рядом.
+    // Шрифт интерфейса: тап переключает Flipper <-> стандартный.
+    let fb = font_btn(), ff = (FONT_MODE == 1);
+    lcd_rect(fb.x, fb.y, fb.w, fb.h, C.widget);
+    lcd_rect(fb.x, fb.y, 4, fb.h, ff ? C.green : C.border);
+    let flab = ff ? tr("FONT FLIPPER") : tr("FONT STD");
+    lcd_text(fb.x + int((fb.w - tlen(flab) * 6) / 2) + 2, fb.y + 13, flab,
+             ff ? C.white : C.gray, C.widget, 1);
+
+    // Яркость: семь шагов, выбранный подсвечен.
+    let bp = bright_cfg();
+    lcd_text(12, 102, tr("LIGHT"), C.gray, C.bg, 1);
+    for (let i = 0; i < length(BRIGHT_STEPS); i++) {
+        let b = bright_btn(i), sel = (BRIGHT_STEPS[i] == bp);
+        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+        lcd_rect(b.x, b.y, 3, b.h, sel ? C.green : C.border);
+        let t = sprintf("%d", BRIGHT_STEPS[i]);
+        lcd_text(b.x + int((b.w - tlen(t) * 6) / 2) + 2, b.y + 18, t,
+                 sel ? C.white : C.gray, C.widget, 1);
+    }
+
+    draw_back();
+    lcd_flush();
+}
+
+// Страница «Заставка»: таймаут, вид, сдвиг против выгорания. Тап по виду
+// открывает состав элементов и размер часов.
+function draw_saver_page() {
+    lcd_clear(C.bg);
+    draw_header(tr("Screensaver"));
+
     let sb = saver_box(), a = saver_btn(-1), z = saver_btn(1);
     lcd_rect(sb.x, sb.y, sb.w, sb.h, C.widget);
     lcd_rect(sb.x, sb.y, 4, sb.h, C.cyan);
@@ -2550,43 +2612,32 @@ function draw_display_page() {
     lcd_rect(z.x, z.y, z.w, z.h, C.widget);
     lcd_text(z.x + int(z.w / 2) - 7, z.y + 8, "+", C.accent, C.widget, 4);
 
-    // Вид заставки
     let stl = saver_style();
-    lcd_text(20, 116, tr("VIEW"), C.gray, C.bg, 1);
+    lcd_text(12, 84, tr("VIEW"), C.gray, C.bg, 1);
     for (let i = 0; i < length(SAVER_STYLES); i++) {
         let b = style_btn(i), sel = (SAVER_STYLES[i] == stl);
         lcd_rect(b.x, b.y, b.w, b.h, C.widget);
         lcd_rect(b.x, b.y, 3, b.h, sel ? C.green : C.border);
         let t = style_label(SAVER_STYLES[i]);
-        lcd_text(b.x + int((b.w - tlen(t) * 6) / 2) + 2, b.y + 9, t,
+        lcd_text(b.x + int((b.w - tlen(t) * 6) / 2) + 2, b.y + 11, t,
                  sel ? C.white : C.gray, C.widget, 1);
     }
 
-    // Переключатели: состояние показывает цвет полоски слева.
-    let togs = [
-        [ tr("Blank"), C.cyan ],
-        [ tr("Shift"),     burnin_cfg()  ? C.green : C.dim ],
-        [ tr("Night"),     night_cfg().on ? C.green : C.dim ],
-    ];
-    for (let i = 0; i < 3; i++) {
-        let b = tog_btn(i), t = togs[i][0];
-        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
-        lcd_rect(b.x, b.y, 4, b.h, togs[i][1]);
-        lcd_text(b.x + int((b.w - tlen(t) * 12) / 2) + 2, b.y + 9, t,
-                 C.white, C.widget, 2);
-    }
+    let hb = svshift_btn(), on = burnin_cfg();
+    lcd_rect(hb.x, hb.y, hb.w, hb.h, C.widget);
+    lcd_rect(hb.x, hb.y, 4, hb.h, on ? C.green : C.dim);
+    let ht = tr("Shift");
+    lcd_text(hb.x + int((hb.w - tlen(ht) * 12) / 2) + 2, hb.y + 12, ht,
+             C.white, C.widget, 2);
 
-    // Яркость: семь шагов, выбранный подсвечен.
-    let bp = bright_cfg();
-    lcd_text(12, 175, tr("LIGHT"), C.gray, C.bg, 1);
-    for (let i = 0; i < length(BRIGHT_STEPS); i++) {
-        let b = bright_btn(i), sel = (BRIGHT_STEPS[i] == bp);
-        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
-        lcd_rect(b.x, b.y, 3, b.h, sel ? C.green : C.border);
-        let t = sprintf("%d", BRIGHT_STEPS[i]);
-        lcd_text(b.x + int((b.w - tlen(t) * 6) / 2) + 2, b.y + 8, t,
-                 sel ? C.white : C.gray, C.widget, 1);
-    }
+    // Ночной режим: зелёная тусклая заставка по расписанию. Тап открывает
+    // часы и включает, если был выключен.
+    let nb = svnight_btn(), non = night_cfg().on;
+    lcd_rect(nb.x, nb.y, nb.w, nb.h, C.widget);
+    lcd_rect(nb.x, nb.y, 4, nb.h, non ? C.green : C.dim);
+    let nt = tr("Night mode");
+    lcd_text(nb.x + int((nb.w - tlen(nt) * 6) / 2) + 2, nb.y + 15, nt,
+             C.white, C.widget, 1);
 
     draw_back();
     lcd_flush();
@@ -3896,6 +3947,7 @@ function draw_current() {
     case "led":       draw_led_page(); break;
     case "battery":   draw_battery_page(); break;
     case "savercfg":  draw_savercfg_page(); break;
+    case "saver":     draw_saver_page(); break;
     case "zigbee":    draw_zigbee_page(); break;
     case "sound":     draw_sound_page(); break;
     case "stascan":   draw_stascan_page(); break;
@@ -4304,9 +4356,12 @@ function handle_touch(tx, ty) {
                         tr("Traffic"), tr("Info"), tr("MORE >>>") ]
                     : (st.mpg == 2
                         ? [ tr("SMS"), tr("Services"), tr("Weather"),
-                            tr("Display"), tr("LED"), tr("MORE >>>") ]
-                        : [ tr("Sound"), tr("Battery"), "Zigbee",
-                            tr("Modem Reset"), tr("Reboot"), tr("<<< BACK") ]);
+                            tr("Display"), tr("Saver"), tr("MORE >>>") ]
+                        : (st.mpg == 3
+                            ? [ tr("LED"), tr("Sound"), tr("Battery"),
+                                "Zigbee", "", tr("MORE >>>") ]
+                            : [ tr("Modem Reset"), tr("Reboot"), "",
+                                "", "", tr("<<< BACK") ]));
                 flash_btn(b.x, b.y, b.w, b.h, labels[i - 1] ?? "", i == 6);
                 sock_poll(150);
 
@@ -4321,7 +4376,15 @@ function handle_touch(tx, ty) {
                     }
                 } else if (st.mpg == 3) {
                     switch (i) {
-                    case 4:
+                    case 1: go_page("led"); return;
+                    case 2: go_page("sound"); return;
+                    case 3: go_page("battery"); return;
+                    case 4: go_page("zigbee"); return;
+                    case 6: st.mpg = 4; draw_menu(); return;
+                    }
+                } else if (st.mpg == 4) {
+                    switch (i) {
+                    case 1:
                         // Перезапуск модема. Своего скрипта у нас нет, а у
                         // 5gmodem есть отлаженная лестница: питание слота по
                         // GPIO (modem_power/modem_reset/4g/5g1/5g2), затем
@@ -4353,7 +4416,7 @@ function handle_touch(tx, ty) {
                               rsrp < 0 ? "#002000" : "#200000", 2);
                         draw_menu();
                         return;
-                    case 5:
+                    case 2:
                         // Reboot with confirmation dialog
                         lcd_clear("#200000");
                         lcd_rect(30, 60, 260, 120, "#300000");
@@ -4388,9 +4451,6 @@ function handle_touch(tx, ty) {
                         toast(tr("Cancelled (timeout)"), C.gray, "#1082", 1);
                         draw_menu();
                         return;
-                    case 1: go_page("sound"); return;
-                    case 2: go_page("battery"); return;
-                    case 3: go_page("zigbee"); return;
                     case 6: st.mpg = 1; draw_menu(); return;
                     }
                 } else if (st.mpg == 2) {
@@ -4417,7 +4477,7 @@ function handle_touch(tx, ty) {
                     case 4:
                         go_page("display");
                         return;
-                    case 5: go_page("led"); return;
+                    case 5: go_page("saver"); return;
                     case 6:
                         st.mpg = 3;
                         draw_menu();
@@ -4711,7 +4771,29 @@ function handle_touch(tx, ty) {
             draw_display_page();
             return;
         }
+        let fb = font_btn();
+        if (in_rect(tx, ty, fb.x, fb.y, fb.w, fb.h)) {
+            FONT_MODE = FONT_MODE ? 0 : 1;
+            ucur.set("almond3s", "display", "font",
+                     FONT_MODE ? "flipper" : "std");
+            ucur.commit("almond3s");
+            draw_display_page();
+            return;
+        }
+        for (let i = 0; i < length(BRIGHT_STEPS); i++) {
+            let bb = bright_btn(i);
+            if (in_rect(tx, ty, bb.x, bb.y, bb.w, bb.h)) {
+                bright_set(BRIGHT_STEPS[i]);
+                if (!st.blank)
+                    backlight_write(true);
+                draw_display_page();
+                return;
+            }
+        }
+        return;
+    }
 
+    if (st.page == "saver") {
         let cur = saver_cfg();
         let idx = 0;
         for (let i = 0; i < length(SAVER_STEPS); i++)
@@ -4720,22 +4802,20 @@ function handle_touch(tx, ty) {
         let a = saver_btn(-1), z = saver_btn(1);
         if (in_rect(tx, ty, a.x, a.y, a.w, a.h)) {
             saver_set(SAVER_STEPS[(idx + length(SAVER_STEPS) - 1) % length(SAVER_STEPS)]);
-            draw_display_page();
+            draw_saver_page();
             return;
         }
         if (in_rect(tx, ty, z.x, z.y, z.w, z.h)) {
             saver_set(SAVER_STEPS[(idx + 1) % length(SAVER_STEPS)]);
-            draw_display_page();
+            draw_saver_page();
             return;
         }
 
         for (let i = 0; i < length(SAVER_STYLES); i++) {
             let sb = style_btn(i);
             if (in_rect(tx, ty, sb.x, sb.y, sb.w, sb.h)) {
-                // Повторный тап по выбранному стилю открывает настройки
-                // заставки: что показывать и какого размера часы.
-                // Любой тап по стилю выбирает его и открывает настройки:
-                // так сразу видно, из чего этот стиль состоит.
+                // Любой тап по стилю выбирает его и открывает состав
+                // элементов: сразу видно, из чего этот стиль состоит.
                 if (SAVER_STYLES[i] != saver_style())
                     saver_style_set(SAVER_STYLES[i]);
                 go_page("savercfg");
@@ -4743,41 +4823,20 @@ function handle_touch(tx, ty) {
             }
         }
 
-        for (let i = 0; i < length(BRIGHT_STEPS); i++) {
-            let bb = bright_btn(i);
-            if (in_rect(tx, ty, bb.x, bb.y, bb.w, bb.h)) {
-                bright_set(BRIGHT_STEPS[i]);
-                // Применяем через общий путь: он крутит ШИМ подсветки и
-                // учитывает ночное приглушение. Раньше здесь стояло цифровое
-                // затемнение, из-за чего страница «Экран» продолжала делать
-                // картинку блёклой вместо настоящего убавления света.
-                if (!st.blank)
-                    backlight_write(true);
-                draw_display_page();
-                return;
-            }
+        let hb = svshift_btn();
+        if (in_rect(tx, ty, hb.x, hb.y, hb.w, hb.h)) {
+            burnin_set(!burnin_cfg());
+            draw_saver_page();
+            return;
         }
 
-        for (let i = 0; i < 3; i++) {
-            let b = tog_btn(i);
-            if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
-            switch (i) {
-            case 0:
-                st.screen = "screensaver";
-                st.saver_frame = 0;
-                set_blank(true);
-                return;
-            case 1:
-                burnin_set(!burnin_cfg());
-                draw_display_page();
-                return;
-            case 2:
-                // Выключенную ночь тап включает, и в любом случае открывает
-                // страницу с часами - там же её можно выключить обратно.
-                if (!night_cfg().on) night_set("night", "1");
-                go_page("night");
-                return;
-            }
+        let nb = svnight_btn();
+        if (in_rect(tx, ty, nb.x, nb.y, nb.w, nb.h)) {
+            // Выключенный режим тап включает, и в любом случае открывает
+            // страницу с часами - там же его можно выключить обратно.
+            if (!night_cfg().on) night_set("night", "1");
+            go_page("night");
+            return;
         }
         return;
     }
@@ -4921,6 +4980,7 @@ function goto_req() {
     r = trim(r);
     if (r == "menu2") { st.page = "menu"; st.mpg = 2; }
     else if (r == "menu3") { st.page = "menu"; st.mpg = 3; }
+    else if (r == "menu4") { st.page = "menu"; st.mpg = 4; }
     else if (r == "menu") { st.page = "menu"; st.mpg = 1; }
     else if (r == "net") { st.page = "dashboard"; netpri_refresh(); }
     else st.page = r;
