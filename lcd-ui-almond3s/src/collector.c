@@ -177,10 +177,33 @@ static void get_battery(struct battery_info *bi) {
             bat_adc_before_charge = bi->adc;
             bat_charge_bump = 0;
         }
+        /* Флаг зарядки от PIC иногда дребезжит (замер 14.08: минутные
+         * качели 0-1 на живой зарядке). Каждая ложная смена режима
+         * переключала таблицу процентов и пересеивала фильтр - на экране
+         * качало 46-41-49, а в журнал циклов сыпался мусор. Смену режима
+         * засчитываем после трёх одинаковых чтений подряд. */
+        {
+            static int chg_pending = -1, chg_streak = 0;
+            if (bat_last_charging != -1 && bi->charging != bat_last_charging) {
+                if (chg_pending == bi->charging) chg_streak++;
+                else { chg_pending = bi->charging; chg_streak = 1; }
+                if (chg_streak < 3)
+                    bi->charging = bat_last_charging;
+            } else {
+                chg_pending = -1;
+                chg_streak = 0;
+            }
+        }
+
         /* Сглаживаем сам АЦП: шкала такая, что одна единица это около
          * процента, а показания дрожат на единицу-две - отсюда скачки
-         * «26 -> 25 -> 27» на ровном месте. */
+         * «26 -> 25 -> 27» на ровном месте. Но через смену режима фильтр
+         * НЕ тянем: скачок от зарядного - не шум, и размазывание его на
+         * полминуты давало и «71% при подключении», и «97 через миг после
+         * выдёргивания» (замер перехода 14.08.2026). */
         if (bat_adc_filt <= 0) bat_adc_filt = bi->adc * 8;
+        if (bat_last_charging != -1 && bat_last_charging != bi->charging)
+            bat_adc_filt = bi->adc * 8;
         bat_adc_filt = bat_adc_filt - bat_adc_filt / 8 + bi->adc;
         int adc_sm = bat_adc_filt / 8;
 
@@ -208,7 +231,7 @@ static void get_battery(struct battery_info *bi) {
         int target;
         if (bi->charging) {
             int to_full = charge_table_lookup(adc_eff);
-            target = 100 - to_full * 100 / 124;
+            target = 100 - to_full * 100 / 155;
         } else {
             target = bat_table_lookup(adc_eff) * 100 / 262;
         }
@@ -216,21 +239,67 @@ static void get_battery(struct battery_info *bi) {
         if (target > 100) target = 100;
         if (target < 0) target = 0;
 
-        /* Показания двигаем плавно: скачок с 88 на 100 за один замер
-         * выглядит как ошибка, даже когда напряжение и правда подскочило. */
-        /* Внутри одного цикла процент ходит только в одну сторону: при
-         * зарядке не падает, при разряде не растёт. Дрожание шкалы иначе
-         * выглядит как метания. */
-        if (bat_last_charging != bi->charging) bat_disp_percent = -1;
-        if (bat_disp_percent >= 0) {
-            if (bi->charging && target < bat_disp_percent) target = bat_disp_percent;
-            if (!bi->charging && target > bat_disp_percent) target = bat_disp_percent;
+        /* Показания двигаем плавно и с направленным гистерезисом: в
+         * ожидаемую сторону (вверх на зарядке, вниз на разряде) реагируем
+         * сразу, в неожиданную - только при расхождении от 3%, иначе
+         * дрожание АЦП на ±1 превращалось в храповик: за полчаса покоя
+         * процент «стекал» 98 -> 86, ведь каждый провал засчитывался, а
+         * каждый возврат блокировался прежним односторонним правилом. */
+        if (bat_disp_percent < 0) {
+            bat_disp_percent = target;
+        } else {
+            int diff = target - bat_disp_percent;
+            int expected_up = bi->charging;
+            if (diff > 0 && (expected_up || diff >= 3))
+                bat_disp_percent += (diff > 10) ? 2 : 1;
+            else if (diff < 0 && (!expected_up || diff <= -3))
+                bat_disp_percent -= (diff < -10) ? 2 : 1;
         }
-        if (bat_disp_percent < 0) bat_disp_percent = target;
-        else if (target > bat_disp_percent) bat_disp_percent += (target - bat_disp_percent > 2) ? 2 : (target - bat_disp_percent);
-        else if (target < bat_disp_percent) bat_disp_percent -= (bat_disp_percent - target > 2) ? 2 : (bat_disp_percent - target);
         bi->percent = bat_disp_percent;
+
+        /* Начало зарядки - строка в журнал циклов: страница «Батарея»
+         * показывает их счёт, а со временем по журналу посчитаем износ. */
+        if (bat_last_charging == 0 && bi->charging) {
+            FILE *cf = fopen("/etc/almond3s/charge_events", "a");
+            if (cf) { fprintf(cf, "%ld\n", (long)time(NULL)); fclose(cf); }
+        }
         bat_last_charging = bi->charging;
+
+        /* История для графиков страницы «Батарея»: точка в минуту в файл,
+         * последние два часа. Живёт в /tmp у КОЛЛЕКТОРА, а не в памяти
+         * интерфейса: рестарты UI и обновления пакета её не стирают -
+         * страница показывает кривую сразу, а не копит её на глазах. */
+        {
+            static int hist_ticks = 0;
+            hist_ticks++;
+            if (hist_ticks >= 30) {
+                hist_ticks = 0;
+                FILE *hf = fopen("/tmp/almond3s_bat_hist", "a");
+                if (hf) {
+                    fprintf(hf, "%d %d %d\n", bi->adc, bi->percent,
+                            bi->charging ? 1 : 0);
+                    fclose(hf);
+                }
+                /* Подрезаем разросшийся файл до последних 120 строк. */
+                hf = fopen("/tmp/almond3s_bat_hist", "r");
+                if (hf) {
+                    char lines[240][24];
+                    int n = 0;
+                    while (n < 240 && fgets(lines[n], 24, hf)) n++;
+                    fclose(hf);
+                    if (n >= 240) {
+                        FILE *wf = fopen("/tmp/almond3s_bat_hist.new", "w");
+                        if (wf) {
+                            for (int i = n - 120; i < n; i++)
+                                fputs(lines[i], wf);
+                            fclose(wf);
+                            rename("/tmp/almond3s_bat_hist.new",
+                                   "/tmp/almond3s_bat_hist");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /* «Нет батареи» верим только после пяти подряд, иначе кратковременная
@@ -385,21 +454,21 @@ static void bat_estimate(struct bat_estimator *e, int cur_adc) {
     if (e->remain_min < 0) e->remain_min = 0;
 }
 
-/* ADC → минуты до полного заряда. Потолок 726 измерен: под кабелем
- * напряжение выше, чем на разряде, и рост останавливается на этом
- * значении (наблюдение 13.08.2026, двадцать минут без изменений).
- * Форма кривой пока унаследованная - честную снимет регистратор на
- * первом же полном цикле зарядки. */
+/* ADC → минуты до полного заряда. Кривая ИЗМЕРЕНА 14.08.2026 двумя
+ * полными циклами на двух банках (совпали с точностью до пары минут):
+ * низ 573-720 - банка 1 от отсечки, верх 626-726 - банка 2 до плато.
+ * Первые минуты заряд летит (573-612 за десять минут), потом плавно
+ * замедляется. Итого ~155 минут от отсечки. */
 static const struct { int adc; int min; } charge_table[] = {
-    { 512, 124}, { 526, 119}, { 540, 113}, { 552, 104}, { 566,  94},
-    { 580,  86}, { 593,  77}, { 606,  69}, { 620,  61}, { 633,  52},
-    { 647,  44}, { 659,  37}, { 673,  29}, { 687,  22}, { 700,  15},
-    { 713,   7}, { 726,   0},
+    { 512, 155}, { 573, 150}, { 612, 140}, { 621, 130}, { 630, 120},
+    { 636, 110}, { 641, 100}, { 647,  90}, { 654,  80}, { 661,  70},
+    { 671,  60}, { 681,  50}, { 690,  40}, { 699,  30}, { 709,  20},
+    { 720,  10}, { 726,   0},
 };
 #define CHARGE_TABLE_SIZE 17
 
 static int charge_table_lookup(int adc) {
-    if (adc <= 512) return 124;
+    if (adc <= 512) return 155;
     if (adc >= 726) return 0;
     for (int i = 0; i < CHARGE_TABLE_SIZE - 1; i++) {
         if (adc < charge_table[i + 1].adc) {

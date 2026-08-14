@@ -43,6 +43,8 @@ let C = {
     gray:    "#8B949E", // GH Text Secondary
     btn:     "#21262D", // GH Sub-panel
     back:    "#A40E26", // Subdued red for back bar
+    press:   "#0B0E13", // нажатая кнопка: уходит в тень
+    back_press: "#6E0A18", // нажатая полоса «Назад»: тёмно-красная
     accent:  "#58A6FF", // Same as cyan
     dim:     "#484F58", // GH Border/Dim
     widget:  "#161B22", // GitHub Dark Overlay
@@ -212,6 +214,14 @@ function font_load() {
 }
 font_load();
 
+// Иконки плиток меню: выключены, пока набор не дорисован. Тумблер на
+// странице «Экран».
+let MICONS_ON = false;
+function micons_load() {
+    MICONS_ON = (ucur ? ucur.get("almond3s", "display", "micons") : null) == "1";
+}
+micons_load();
+
 // ---- Язык интерфейса ----
 //
 // Ключ словаря - английская строка, значение - русская. Незнакомая строка
@@ -260,7 +270,7 @@ let TR_RU = {
     "Modem Reset": "Сброс",
     "LTE restart": "модема",
     "Resetting modem...": "Перезапуск модема...",
-    "Reboot": "Перезапуск",
+    "Reboot": "Ребут",
     "LED": "Диод",
     "Sound": "Звук",
     "Forget network?": "Забыть сеть?",
@@ -373,6 +383,35 @@ let TR_RU = {
     "Switching...": "Переключаю...",
     "VIEW": "ВИД",
     "Saver": "Заставка",
+    "Menu icons": "Иконки меню",
+    "Debug": "Дебаг",
+    "CHARGE %": "ЗАРЯД %",
+    "ADC RAW": "АЦП",
+    "Charge cycles: %d  ADC %d..726": "Циклов заряда: %d • АЦП %d..726",
+    "ADC %d..726, discharges in %s": "АЦП %d..726, разряд за %s",
+    "Editor": "Редактор",
+    "pixel art": "пиксель-арт",
+    "Save": "Сохранить",
+    "Clear": "Очистить",
+    "Clr": "Очист",
+    "editing": "правится",
+    "Pick an icon to edit": "Выбери иконку для правки",
+    "Pick a color for the slot": "Выбери цвет кисти",
+    "8 colors max": "Максимум 8 цветов в иконке",
+    "Invert": "Инверт",
+    "Saved": "Сохранено",
+    "panel tuning": "настройки панели",
+    "Invert colors": "Инверсия цветов",
+    "GAMMA CURVE": "ГАММА-КРИВАЯ",
+    "COLOR ENHANCE": "ЦВЕТОУСИЛЕНИЕ",
+    "BACKLIGHT PWM, HZ": "ШИМ ПОДСВЕТКИ, ГЦ",
+    "photo": "фото",
+    "video": "видео",
+    "Uptime": "Время работы",
+    "Free RAM": "ОЗУ свободно",
+    "Flash free": "Флеш свободно",
+    "Kernel": "Ядро",
+    "Driver": "Драйвер",
     "Night mode": "НОЧНОЙ РЕЖИМ",
     "FONT FLIPPER": "ШРИФТ: FLIPPER",
     "FONT STD": "ШРИФТ: СТАНДАРТ",
@@ -656,7 +695,7 @@ function draw_graph(x, y, w, h, data, color, mn, mx, thresholds, fill) {
     // Threshold lines (dashed — draw every 4px)
     if (thresholds) {
         for (let t in thresholds) {
-            let ty2 = y + h - int((t.val - mn) / range * h);
+            let ty2 = y + h - int((t.val - mn) * h / range);
             if (ty2 > y && ty2 < y + h) {
                 for (let dx = 0; dx < w; dx += 8)
                     lcd_rect(x + dx, ty2, 4, 1, t.color ?? C.gray);
@@ -679,7 +718,7 @@ function draw_graph(x, y, w, h, data, color, mn, mx, thresholds, fill) {
     for (let i = 0; i < pts; i++) {
         let val = data[start + i];
         let px = x + 1 + int(i * step_x);
-        let py = y + h - 1 - int((val - mn) / range * (h - 2));
+        let py = y + h - 1 - int((val - mn) * (h - 2) / range);
         if (py < y) py = y;
         if (py >= y + h) py = y + h - 1;
 
@@ -706,7 +745,7 @@ function draw_graph(x, y, w, h, data, color, mn, mx, thresholds, fill) {
     // Current value — bright dot
     if (pts > 0) {
         let last_val = data[n - 1];
-        let last_py = y + h - 1 - int((last_val - mn) / range * (h - 2));
+        let last_py = y + h - 1 - int((last_val - mn) * (h - 2) / range);
         let last_px = x + w - 3;
         lcd_rect(last_px - 1, last_py - 1, 4, 4, C.white);
     }
@@ -718,26 +757,34 @@ function draw_graph_compact(x, y, w, h, data, color, mn, mx, fill) {
     if (n < 2) return;
     if (mx <= mn) mx = mn + 1;
     let range = mx - mn;
-    let pts = n > HIST_LEN ? HIST_LEN : n;
-    let start = n - pts;
+    // Каждый массив истории сам ограничивает свою длину (трафик 60,
+    // батарея 120) - рисуем всё, что есть.
+    let pts = n;
+    let start = 0;
     let step_x = (w - 2) / (pts - 1);
     let prev_px = -1, prev_py = -1;
 
     for (let i = 0; i < pts; i++) {
         let val = data[start + i];
         let px = x + 1 + int(i * step_x);
-        let py = y + h - 1 - int((val - mn) / range * (h - 2));
+        let py = y + h - 1 - int((val - mn) * (h - 2) / range);
         if (py < y) py = y;
         if (py >= y + h) py = y + h - 1;
+        // Сегмент не должен выходить за рамку графика: при малом числе
+        // точек шаг крупный, и последний прямоугольник вылезал за экран.
+        let seg_lim = x + w - 1 - px;
         if (fill) {
             let fh = int(log_frac(val, mx) * (h - 2) / 1000);
             let seg_w0 = int(step_x); if (seg_w0 < 1) seg_w0 = 1;
-            if (fh > 0) lcd_rect(px, y + h - fh, seg_w0, fh, color);
+            if (seg_w0 > seg_lim) seg_w0 = seg_lim;
+            if (fh > 0 && seg_w0 > 0) lcd_rect(px, y + h - fh, seg_w0, fh, color);
             prev_px = px;
             prev_py = y + h - fh;
             continue;
         }
         let seg_w = int(step_x); if (seg_w < 1) seg_w = 1;
+        if (seg_w > seg_lim) seg_w = seg_lim;
+        if (seg_w < 1) seg_w = 1;
         {
             lcd_rect(px, py, seg_w, 1, color);
             if (prev_px >= 0) {
@@ -958,7 +1005,14 @@ function read_touch() {
     if (raw) {
         fs.unlink(TOUCH_PATH);
         let m = match(trim(raw), /^(\d+)\s+(\d+)/);
-        if (m) return { x: +m[1], y: +m[2] };
+        if (m) return { x: +m[1], y: +m[2], move: false };
+    }
+    // Движение живёт в отдельном файле, чтобы не затирать нажатия.
+    raw = fs.readfile(TOUCH_PATH + ".move");
+    if (raw) {
+        fs.unlink(TOUCH_PATH + ".move");
+        let m = match(trim(raw), /^(\d+)\s+(\d+)/);
+        if (m) return { x: +m[1], y: +m[2], move: true };
     }
     // Poll /dev/lcd via the C touch helper
     if (touch_read_ok == null)
@@ -1290,11 +1344,19 @@ function night_cfg() {
     let on = ucur ? ucur.get("almond3s", "display", "night") : null;
     let f  = ucur ? ucur.get("almond3s", "display", "night_from") : null;
     let t  = ucur ? ucur.get("almond3s", "display", "night_to") : null;
+    let b  = ucur ? ucur.get("almond3s", "display", "night_bright") : null;
     return {
         on:   (on == null || on == "") ? true : (on == "1"),
         from: clampi(int(+(f ?? 22)), 0, 23),
         to:   clampi(int(+(t ?? 6)), 0, 23),
+        bright: clampi(int(+((b == null || b == "") ? 15 : b)), 3, 50),
     };
+}
+
+let NIGHT_BRIGHT_STEPS = [ 3, 7, 15, 25, 40 ];
+
+function nbright_btn(i) {
+    return { x: 96 + i * 44, y: 178, w: 40, h: 26 };
 }
 
 function night_set(key, v) {
@@ -1555,17 +1617,422 @@ function draw_back() {
     lcd_text(120, BACK_Y + 9, tr("< BACK"), C.white, C.back, 2);
 }
 
-function draw_btn(idx, title, subtitle, title_c, sub_c, bg_c, middle) {
-    let b = btn_pos(idx);
-    let bg = bg_c ?? C.btn;
-    lcd_rect(b.x, b.y, b.w, b.h, bg);
-    lcd_rect(b.x, b.y + b.h - 3, b.w, 3, C.border); // internal shadow element
-    lcd_text(b.x + 8, b.y + 8, title, title_c ?? C.white, bg, 2);
-    if (middle)
-        lcd_text(b.x + 8, b.y + 27, tcut(middle, 24), C.white, bg, 1);
-    if (subtitle)
-        lcd_text(b.x + 8, b.y + 38, subtitle, sub_c ?? C.gray, bg, 1);
+// Пиксель-арт иконки плиток меню, 14x14, рисуются в масштабе 2 (28x28 -
+// высота двух строк текста плитки). Слева от текста, по мотивам эмодзи.
+let MICONS = {
+    // конвертик - нарисован в редакторе на роутере
+    sms: [
+        ".111111111111.",
+        "18111111111181",
+        "11811111111811",
+        "11181111118111",
+        "11118111181111",
+        "11118811881111",
+        "11181188118111",
+        "11811111111811",
+        "18111111111181",
+        ".111111111111.",
+        "..............",
+        "..............",
+        "..............",
+        "..............",
+    ],
+    // молния - нарисован в редакторе на роутере
+    bolt: [
+        "....433333....",
+        "....43333.....",
+        "...43333......",
+        "...4333.......",
+        "..43333.......",
+        "..43333333....",
+        ".43333333.....",
+        "....4333......",
+        "....433.......",
+        "...433........",
+        "...43.........",
+        "..43..........",
+        "..3...........",
+        ".3............",
+    ],
+    network: [
+        "..............",
+        "....666666....",
+        "..6656666666..",
+        ".665566666556.",
+        ".666666655666.",
+        ".665566666666.",
+        ".666666556666.",
+        ".655666666566.",
+        ".666655666666.",
+        ".665666665566.",
+        "..6666556666..",
+        "....666666....",
+        "..............",
+        "..............",
+    ],
+    wifi: [
+        "..............",
+        "...11111111...",
+        ".11........11.",
+        "1............1",
+        "....111111....",
+        "..11......11..",
+        ".1..........1.",
+        ".....1111.....",
+        "...11....11...",
+        "..............",
+        "......11......",
+        "......11......",
+        "..............",
+        "..............",
+    ],
+    modem: {
+        pal: [ "#FFFFFF", "#F85149", "#FFA930", "#FFD866",
+               "#3FB950", "#58A6FF", "#B180F0", "#484F58" ],
+        art: [
+        "..............",
+        ".888888888888.",
+        ".888888888888.",
+        ".855555588118.",
+        ".855555588888.",
+        ".855555588118.",
+        ".888888888888.",
+        ".811811811888.",
+        ".888888888888.",
+        "..............",
+        "..............",
+        "..............",
+        "..............",
+        "..............",
+        ],
+    },
+    traffic: [
+        "..............",
+        "....##........",
+        "...####.......",
+        "..######......",
+        "....##....##..",
+        "....##....##..",
+        "....##....##..",
+        "....##....##..",
+        "....##....##..",
+        "....##....##..",
+        "..........##..",
+        "......######..",
+        ".......####...",
+        "........##....",
+    ],
+    info: [
+        "..............",
+        "....######....",
+        "..##......##..",
+        ".#....##....#.",
+        ".#....##....#.",
+        "#............#",
+        "#.....##.....#",
+        "#.....##.....#",
+        "#.....##.....#",
+        ".#....##....#.",
+        ".#....##....#.",
+        "..##......##..",
+        "....######....",
+        "..............",
+    ],
+    weather: [
+        "..............",
+        "..............",
+        "....1111......",
+        "...111111.11..",
+        "..1111111111..",
+        ".111111111111.",
+        ".111111111111.",
+        "1111111111111.",
+        ".888888888888.",
+        "..............",
+        "..............",
+        "..............",
+        "..............",
+        "..............",
+    ],
+    services: [
+        ".############.",
+        ".#..........#.",
+        ".#........#.#.",
+        ".#.......##.#.",
+        ".#.#....##..#.",
+        ".#.##..##...#.",
+        ".#..####....#.",
+        ".#...##.....#.",
+        ".#..........#.",
+        ".############.",
+        "..............",
+        "..............",
+        "..............",
+        "..............",
+    ],
+    display: [
+        "11111111111111",
+        "18888888888881",
+        "18..........81",
+        "18..........81",
+        "18..........81",
+        "18..........81",
+        "18..........81",
+        "18..........81",
+        "18888888888881",
+        "11111111111111",
+        "..............",
+        "..............",
+        "..............",
+        "..............",
+    ],
+    saver: [
+        ".....######...",
+        "...###....##..",
+        "..##........#.",
+        ".##...........",
+        ".#............",
+        ".#............",
+        ".#............",
+        ".##...........",
+        "..##........#.",
+        "...###....##..",
+        ".....######...",
+        "..............",
+        "..............",
+        "..............",
+    ],
+    // диод-огонёк - нарисован в редакторе на роутере
+    led: [
+        ".....1111.....",
+        "....111111....",
+        "....111111....",
+        "....111111....",
+        "....111111....",
+        ".....1111.....",
+        "..............",
+        "..............",
+        "..............",
+        "..............",
+        "..............",
+        "..............",
+        "..............",
+        "..............",
+    ],
+    sound: [
+        "..............",
+        "........1.....",
+        ".......11..8..",
+        "..8...111...8.",
+        ".88888111.8.8.",
+        ".88888111.8.8.",
+        ".88888111.8.8.",
+        ".88888111.8.8.",
+        ".88888111.8.8.",
+        "..8...111...8.",
+        ".......11..8..",
+        "........1.....",
+        "..............",
+        "..............",
+    ],
+    // зигби - нарисован в редакторе на роутере
+    zigbee: [
+        "....2111111...",
+        "...212222221..",
+        "..21222222111.",
+        ".2222222211112",
+        ".2222222111122",
+        ".2222221111222",
+        ".2222211112222",
+        ".2222111122222",
+        ".2221111222222",
+        ".2211112222212",
+        "..21112222212.",
+        "...211111112..",
+        "....2222222...",
+        "..............",
+    ],
+    debug: {
+        pal: [ "#F778BA", "#FFA8D8", "#BF4B8A", "#FFD866",
+               "#3FB950", "#58A6FF", "#B180F0", "#8B949E" ],
+        art: [
+        "..............",
+        "....111111....",
+        "..1111111111..",
+        ".111311131111.",
+        ".113111311311.",
+        ".131131131131.",
+        ".111311131113.",
+        ".131131131311.",
+        ".113111311131.",
+        "..1131131311..",
+        "...11311311...",
+        ".....1111.....",
+        "..............",
+        "..............",
+        ],
+    },
+    editor: {
+        pal: [ "#FFFFFF", "#F778BA", "#FFA930", "#FFD866",
+               "#3FB950", "#58A6FF", "#484F58", "#8B949E" ],
+        art: [
+        "..........22..",
+        ".........2228.",
+        ".........2833.",
+        "........8333..",
+        ".......3333...",
+        "......3333....",
+        ".....3333.....",
+        "....3333......",
+        "...4333.......",
+        "..443.........",
+        ".74...........",
+        "7.............",
+        "..............",
+        "..............",
+        ],
+    },
+    reset: [
+        "..............",
+        ".....#####....",
+        "...##.....##..",
+        "..#.........#.",
+        ".#....#......#",
+        ".#....##......",
+        ".#....###.....",
+        ".#............",
+        ".#...........#",
+        "..#.........#.",
+        "...##.....##..",
+        ".....#####..#.",
+        "...........##.",
+        "..........###.",
+    ],
+    reboot: [
+        "..............",
+        "......##......",
+        "......##......",
+        "...#..##..#...",
+        "..#...##...#..",
+        ".#....##....#.",
+        ".#....##....#.",
+        ".#..........#.",
+        ".#..........#.",
+        ".#..........#.",
+        "..#........#..",
+        "...##....##...",
+        ".....####.....",
+        "..............",
+    ],
+};
+
+let ED_PAL_DEF = [ "#FFFFFF", "#F85149", "#FFA930", "#FFD866",
+                   "#3FB950", "#58A6FF", "#B180F0", "#8B949E" ];
+let ED_PAL = [ "#FFFFFF", "#F85149", "#FFA930", "#FFD866",
+               "#3FB950", "#58A6FF", "#B180F0", "#8B949E" ];
+
+// Расширенный выбор цвета: перекрашивает текущий слот палитры.
+let ED_COLORS = [
+    "#FFFFFF", "#C9D1D9", "#8B949E", "#484F58", "#21262D", "#101418",
+    "#FFB3AB", "#F85149", "#A40E26", "#FFC680", "#FFA930", "#B25E00",
+    "#FFE28A", "#FFD866", "#D29922", "#7EE2A8", "#3FB950", "#1F6F3D",
+    "#7CE4E4", "#39C5CF", "#0E7490", "#A5C9FF", "#58A6FF", "#1F6FEB",
+    "#D2A8FF", "#B180F0", "#8250DF", "#FFA8D8", "#F778BA", "#BF4B8A",
+];
+
+// Переопределения иконок, нарисованные в редакторе: файлы-сетки в
+// /etc/almond3s/icons/<имя>.txt берут верх над вшитым пиксель-артом.
+let MICON_CUSTOM = {};
+
+function micon_load_custom() {
+    let names = fs.lsdir("/etc/almond3s/icons") ?? [];
+    for (let f in names) {
+        let m = match(f, /^([a-z0-9_]+)\.txt$/);
+        if (!m) continue;
+        let raw = fs.readfile("/etc/almond3s/icons/" + f);
+        if (!raw) continue;
+        let grid = [];
+        let pal = null;
+        for (let line in split(raw, "\n")) {
+            let lm = match(line, /^colors:(.*)$/);
+            if (lm) {
+                pal = [];
+                for (let pm in match(lm[1], /[0-9]=(#[0-9A-Fa-f]{6})/g))
+                    push(pal, pm[1]);
+                continue;
+            }
+            if (length(grid) >= 14 || length(line) < 14) continue;
+            let row = [];
+            for (let c = 0; c < 14; c++) {
+                let ch = substr(line, c, 1);
+                push(row, (ch >= "1" && ch <= "8") ? int(ch) : 0);
+            }
+            push(grid, row);
+        }
+        if (length(grid) == 14)
+            MICON_CUSTOM[m[1]] = {
+                g: grid,
+                pal: (pal != null && length(pal) == 8) ? pal : ED_PAL_DEF,
+            };
+    }
 }
+micon_load_custom();
+
+function draw_micon(x, y, name, color, sc) {
+    sc ??= 2;
+    let cu = MICON_CUSTOM[name];
+    if (cu) {
+        for (let r = 0; r < 14; r++)
+            for (let c = 0; c < 14; c++)
+                if (cu.g[r][c])
+                    lcd_rect(x + c * sc, y + r * sc, sc, sc, cu.pal[cu.g[r][c] - 1]);
+        return;
+    }
+    let e = MICONS[name];
+    if (!e) return;
+    let art = e, pal = ED_PAL_DEF;
+    if (type(e) == "object") {
+        art = e.art;
+        pal = e.pal ?? ED_PAL_DEF;
+    }
+    for (let r = 0; r < length(art); r++) {
+        let row = art[r];
+        let c = 0;
+        while (c < 14) {
+            let ch = substr(row, c, 1);
+            if (ch == ".") { c++; continue; }
+            let c0 = c;
+            while (c < 14 && substr(row, c, 1) == ch) c++;
+            lcd_rect(x + c0 * sc, y + r * sc, (c - c0) * sc, sc,
+                     ch == "#" ? color : pal[int(ch) - 1]);
+        }
+    }
+}
+
+// «Вдавленная» кнопка: тот же код отрисовки, но фон акцентный и весь
+// контент смещён на 2 пикселя вправо-вниз. Никаких вторых вёрсток.
+let menu_pressed = null;
+
+function draw_btn(idx, title, subtitle, title_c, sub_c, bg_c, middle, icon, icon_c) {
+    let b = btn_pos(idx);
+    let pressed = (menu_pressed != null && menu_pressed == idx);
+    let bg = pressed ? C.press : (bg_c ?? C.btn);
+    let o = pressed ? 2 : 0;
+    let tx = b.x + 8 + o;
+    lcd_rect(b.x, b.y, b.w, b.h, bg);
+    if (!pressed)
+        lcd_rect(b.x, b.y + b.h - 3, b.w, 3, C.border); // internal shadow element
+    if (icon && MICONS_ON) {
+        draw_micon(b.x + 8 + o, b.y + 14 + o, icon, icon_c ?? C.white, 2);
+        tx = b.x + 42 + o;
+    }
+    lcd_text(tx, b.y + 14 + o, title, title_c ?? C.white, bg, 2);
+    if (middle)
+        lcd_text(tx, b.y + 33 + o, tcut(middle, 24), C.white, bg, 1);
+    if (subtitle)
+        lcd_text(tx, b.y + 44 + o, subtitle, sub_c ?? C.gray, bg, 1);
+}
+
 
 
 // =============================================
@@ -2028,6 +2495,18 @@ function netpri_btn(i) {
 }
 
 
+// Две кнопки скана - по диапазону, на фиксированном месте над «Назад»,
+// чтобы их положение не зависело от числа аплинков.
+function draw_scan_btns() {
+    let ny = BACK_Y - 36;
+    lcd_rect(10, ny, 145, 30, C.widget);
+    lcd_rect(10, ny, 4, 30, C.accent);
+    lcd_text(24, ny + 11, "+ Wi-Fi 2.4GHz", C.accent, C.widget, 1);
+    lcd_rect(165, ny, 145, 30, C.widget);
+    lcd_rect(165, ny, 4, 30, C.accent);
+    lcd_text(185, ny + 11, "+ Wi-Fi 5GHz", C.accent, C.widget, 1);
+}
+
 function draw_dashboard() {
     lcd_clear(C.bg);
     draw_header(tr("Network"));
@@ -2056,12 +2535,16 @@ function draw_dashboard() {
 
     if (l == null) {
         lcd_text(20, 100, tr("Reading uplinks..."), C.gray, C.bg, 2);
+        draw_scan_btns();
         draw_back();
         lcd_flush();
         return;
     }
     if (length(l) == 0) {
+        // Кнопки скана обязаны быть и здесь: после «забыть сеть» без SIM
+        // список пуст, и без них со страницы некуда идти (issue #4).
         lcd_text(20, 100, tr("No uplinks"), C.dim, C.bg, 2);
+        draw_scan_btns();
         draw_back();
         lcd_flush();
         return;
@@ -2125,16 +2608,7 @@ function draw_dashboard() {
         }
     }
 
-    // Две кнопки скана - по диапазону, на фиксированном месте над «Назад»,
-    // чтобы их положение не зависело от числа аплинков.
-    let ny = BACK_Y - 36;
-    lcd_rect(10, ny, 145, 30, C.widget);
-    lcd_rect(10, ny, 4, 30, C.accent);
-    lcd_text(24, ny + 11, "+ Wi-Fi 2.4GHz", C.accent, C.widget, 1);
-    lcd_rect(165, ny, 145, 30, C.widget);
-    lcd_rect(165, ny, 4, 30, C.accent);
-    lcd_text(185, ny + 11, "+ Wi-Fi 5GHz", C.accent, C.widget, 1);
-
+    draw_scan_btns();
     draw_back();
     lcd_flush();
 }
@@ -2395,6 +2869,16 @@ function draw_sms_one() {
     lcd_flush();
 }
 
+// Плитка «ЕЩЁ >>>»/«<<< НАЗАД»: та же вдавленность, что у draw_btn.
+function draw_nav_tile(label) {
+    let b = btn_pos(6);
+    let pressed = (menu_pressed != null && menu_pressed == 6);
+    let bg = pressed ? C.press : C.hdr;
+    let o = pressed ? 2 : 0;
+    lcd_rect(b.x, b.y, b.w, b.h, bg);
+    lcd_text(b.x + 20 + o, b.y + 20 + o, label, C.white, bg, 2);
+}
+
 function draw_menu() {
     let d = st.data;
     lcd_clear(C.bg);
@@ -2402,81 +2886,89 @@ function draw_menu() {
 
     if (st.mpg == 1) {
         // 1: Сеть
-        draw_btn(1, tr("Network"), netpri_primary(), C.white, C.gray);
+        draw_btn(1, tr("Network"), netpri_primary(), C.white, C.gray,
+            null, null, "network", C.cyan);
 
         // 2: WiFi
         let nc = type(d?.wifi?.clients) == "array" ? length(d.wifi.clients) : 0;
         draw_btn(2, tr("WiFi"),
             sprintf(tr("%d clients"), nc),
-            C.white, C.gray);
+            C.white, C.gray, null, null, "wifi", C.cyan);
 
         // 3: Modem
         draw_btn(3, tr("Modem"),
             modem_status(d?.lte),
-            C.white, C.gray, null, d?.lte?.operator);
+            C.white, C.gray, null, d?.lte?.operator, "modem", C.cyan);
 
         // 4: Traffic
         let rx_last = length(hist.rx) > 0 ? hist.rx[length(hist.rx) - 1] : 0;
         let tx_last = length(hist.tx) > 0 ? hist.tx[length(hist.tx) - 1] : 0;
         draw_btn(4, tr("Traffic"),
             sprintf("R:%s T:%s", fmt_bytes(rx_last), fmt_bytes(tx_last)),
-            C.white, C.gray);
+            C.white, C.gray, null, null, "traffic", C.cyan);
 
         // 5: Info
         draw_btn(5, tr("Info"),
             fmt_uptime(d?.uptime),
-            C.white, C.gray);
+            C.white, C.gray, null, null, "info", C.cyan);
 
         // 6: MORE
-        let b = btn_pos(6);
-        lcd_rect(b.x, b.y, b.w, b.h, C.hdr);
-        lcd_text(b.x + 20, b.y + 20, tr("MORE >>>"), C.white, C.hdr, 2);
+        draw_nav_tile(tr("MORE >>>"));
 
     } else if (st.mpg == 2) {
         let ns = int(d?.sms_new ?? 0);
         draw_btn(1, tr("SMS"),
             ns > 0 ? sprintf(tr("%d new"), ns) : tr("inbox"),
-            C.white, ns > 0 ? C.green : C.gray);
-        draw_btn(2, tr("Services"), tr("check"), C.white, C.gray);
-        draw_btn(3, tr("Weather"), tr("Update now"), C.white, C.gray);
-        draw_btn(4, tr("Display"), sprintf("%d%%", bright_cfg()), C.white, C.gray);
-        draw_btn(5, tr("Saver"), saver_label(saver_cfg()), C.white, C.gray);
+            C.white, ns > 0 ? C.green : C.gray, null, null,
+            "sms", C.white);
+        draw_btn(2, tr("Services"), tr("check"), C.white, C.gray,
+            null, null, "services", C.green);
+        draw_btn(3, tr("Weather"), tr("Update now"), C.white, C.gray,
+            null, null, "weather", C.yellow);
+        draw_btn(4, tr("Display"), sprintf("%d%%", bright_cfg()), C.white,
+            C.gray, null, null, "display", C.cyan);
+        draw_btn(5, tr("Saver"), saver_label(saver_cfg()), C.white, C.gray,
+            null, null, "saver", C.yellow);
 
-        let b = btn_pos(6);
-        lcd_rect(b.x, b.y, b.w, b.h, C.hdr);
-        lcd_text(b.x + 20, b.y + 20, tr("MORE >>>"), C.white, C.hdr, 2);
+        draw_nav_tile(tr("MORE >>>"));
 
     } else if (st.mpg == 3) {
         let lc = led_cfg();
         draw_btn(1, tr("LED"),
             led_blinking ? tr("blinking") : (lc.on ? tr("on") : tr("off")),
-            C.white, (lc.on || led_blinking) ? C.green : C.gray);
-        draw_btn(2, tr("Sound"), tr("buzzer test"), C.white, C.gray);
+            C.white, (lc.on || led_blinking) ? C.green : C.gray,
+            null, null, "led", C.yellow);
+        draw_btn(2, tr("Sound"), tr("buzzer test"), C.white, C.gray,
+            null, null, "sound", C.cyan);
         let bt = st.data?.battery;
         let bp = int(+(bt?.percent ?? -1));
         draw_btn(3, tr("Battery"), bp >= 0 ? sprintf("%d%%", bp) : "--",
-                 C.white, bt?.charging ? C.green : C.gray);
-        draw_btn(4, "Zigbee", "EM357", C.white, C.gray);
+                 C.white, bt?.charging ? C.green : C.gray, null, null,
+                 "bolt", "#FFA930");
+        draw_btn(4, "Zigbee", "EM357", C.white, C.gray,
+            null, null, "zigbee", C.green);
+        draw_btn(5, tr("Debug"), tr("panel tuning"), C.white, C.gray,
+            null, null, "debug", C.gray);
 
-        let b = btn_pos(6);
-        lcd_rect(b.x, b.y, b.w, b.h, C.hdr);
-        lcd_text(b.x + 20, b.y + 20, tr("MORE >>>"), C.white, C.hdr, 2);
+        draw_nav_tile(tr("MORE >>>"));
 
     } else {
         // Последняя страница - только опасные действия: их сложнее
         // нажать случайно по дороге к обычным пунктам.
-        draw_btn(1, tr("Modem Reset"), tr("LTE restart"), C.white, "#E8C27A", "#6B4A0F");
+        draw_btn(1, tr("Modem Reset"), tr("LTE restart"), C.white, "#E8C27A",
+            "#6B4A0F", null, "reset", "#E8C27A");
         let mb = btn_pos(1);
         lcd_rect(mb.x, mb.y, mb.w, 2, C.yellow);
-        draw_btn(2, tr("Reboot"), tr("System"), C.white, "#F0B0B8", C.back);
+        draw_btn(2, tr("Reboot"), tr("System"), C.white, "#F0B0B8", C.back,
+            null, "reboot", "#F0B0B8");
         let rb = btn_pos(2);
         lcd_rect(rb.x, rb.y, rb.w, 2, "#D32F2F");
+        draw_btn(3, tr("Editor"), tr("pixel art"), C.white, C.gray,
+            null, null, "editor", C.cyan);
 
         // 6: <<< BACK. Ровно одна ячейка: растянутая на две выглядела единой
         // кнопкой, а тач считал половины разными - нажатие слева уходило мимо.
-        let b = btn_pos(6);
-        lcd_rect(b.x, b.y, b.w, b.h, C.hdr);
-        lcd_text(b.x + 20, b.y + 20, tr("<<< BACK"), C.white, C.hdr, 2);
+        draw_nav_tile(tr("<<< BACK"));
     }
 
     lcd_flush();
@@ -2557,6 +3049,293 @@ function qr_box(y) {
     return { x: 10 + 300 - 68, y: y + 9, w: 62, h: 62 };
 }
 
+// === Страница «Дебаг»: тонкие настройки вывода панели ===
+// Сырые команды ILI9341 через CLI: инверсия, гамма-кривая, CABC
+// (адаптивное цветоусиление) и частота ШИМ подсветки. Значения живут в uci
+// и накатываются при старте интерфейса.
+let PWM_STEPS = [ 120, 250, 500, 1000, 2000 ];
+
+function pancfg() {
+    let inv = ucur ? ucur.get("almond3s", "display", "pinv") : null;
+    let gam = ucur ? ucur.get("almond3s", "display", "pgamma") : null;
+    let cab = ucur ? ucur.get("almond3s", "display", "pcabc") : null;
+    let hz  = ucur ? ucur.get("almond3s", "display", "pwmhz") : null;
+    return {
+        inv:   inv == "1",
+        gamma: clampi(int(+(gam ?? 1)), 1, 4),
+        cabc:  clampi(int(+(cab ?? 0)), 0, 3),
+        hz:    clampi(int(+((hz == null || hz == "") ? 250 : hz)), 50, 20000),
+    };
+}
+
+function pancfg_set(key, v) {
+    if (!ucur) return;
+    ucur.set("almond3s", "display", key, sprintf("%s", v));
+    ucur.commit("almond3s");
+}
+
+function panel_apply() {
+    let c = pancfg();
+    system(sprintf("almond3s-lcd panel %s >/dev/null 2>&1", c.inv ? "0x21" : "0x20"));
+    system(sprintf("almond3s-lcd panel 0x26 0x%02X >/dev/null 2>&1", 1 << (c.gamma - 1)));
+    system(sprintf("almond3s-lcd panel 0x55 0x%02X >/dev/null 2>&1", c.cabc));
+    system(sprintf("almond3s-lcd pwm %d >/dev/null 2>&1", c.hz));
+}
+
+function dbg_inv_btn()   { return { x: 10, y: 30, w: 300, h: 28 }; }
+function dbg_gamma_btn(i){ return { x: 10 + i * 76, y: 78, w: 72, h: 28 }; }
+function dbg_cabc_btn(i) { return { x: 10 + i * 76, y: 126, w: 72, h: 28 }; }
+function dbg_pwm_btn(i)  { return { x: 10 + i * 60, y: 174, w: 56, h: 28 }; }
+
+function draw_debug_page() {
+    lcd_clear(C.bg);
+    draw_header(tr("Debug"));
+    let c = pancfg();
+
+    let ib = dbg_inv_btn();
+    lcd_rect(ib.x, ib.y, ib.w, ib.h, C.widget);
+    lcd_rect(ib.x, ib.y, 4, ib.h, c.inv ? C.green : C.dim);
+    let it = tr("Invert colors");
+    lcd_text(ib.x + 12, ib.y + 8, it, C.white, C.widget, 1);
+    lcd_text(ib.x + ib.w - 44, ib.y + 8, c.inv ? tr("on") : tr("off"),
+             c.inv ? C.green : C.gray, C.widget, 1);
+
+    lcd_text(12, 66, tr("GAMMA CURVE"), C.gray, C.bg, 1);
+    for (let i = 0; i < 4; i++) {
+        let b = dbg_gamma_btn(i), sel = (c.gamma == i + 1);
+        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+        lcd_rect(b.x, b.y, 3, b.h, sel ? C.green : C.border);
+        let t = sprintf("%d", i + 1);
+        lcd_text(b.x + int((b.w - 6) / 2), b.y + 10, t,
+                 sel ? C.white : C.gray, C.widget, 1);
+    }
+
+    lcd_text(12, 114, tr("COLOR ENHANCE"), C.gray, C.bg, 1);
+    let cl = [ tr("off"), "UI", tr("photo"), tr("video") ];
+    for (let i = 0; i < 4; i++) {
+        let b = dbg_cabc_btn(i), sel = (c.cabc == i);
+        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+        lcd_rect(b.x, b.y, 3, b.h, sel ? C.green : C.border);
+        lcd_text(b.x + int((b.w - tlen(cl[i]) * 6) / 2) + 2, b.y + 10, cl[i],
+                 sel ? C.white : C.gray, C.widget, 1);
+    }
+
+    lcd_text(12, 162, tr("BACKLIGHT PWM, HZ"), C.gray, C.bg, 1);
+    for (let i = 0; i < length(PWM_STEPS); i++) {
+        let b = dbg_pwm_btn(i), sel = (c.hz == PWM_STEPS[i]);
+        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+        lcd_rect(b.x, b.y, 3, b.h, sel ? C.green : C.border);
+        let t = sprintf("%d", PWM_STEPS[i]);
+        lcd_text(b.x + int((b.w - tlen(t) * 6) / 2) + 2, b.y + 10, t,
+                 sel ? C.white : C.gray, C.widget, 1);
+    }
+
+    draw_back();
+    lcd_flush();
+}
+
+// === Редактор пиксель-арта 14x14: рисовать иконки прямо на экране ===
+// Палитра из 8 цветов и ластик; тап красит клетку кистью, движение с
+// прижатым стилусом рисует непрерывно (клетки между точками доливаются).
+// «Сохранить» пишет сетку в /tmp/icon_art.txt: '.' пусто, '1'..'8' цвет.
+let ED_CELL = 12;
+let ED_X = 8, ED_Y = 28;
+// Слоты иконок меню, которые можно открыть на правку: имя и цвет,
+// которым моно-арт превращается в редактируемую сетку.
+let ED_SLOTS = [
+    { name: "network",  pal: 6 }, { name: "wifi",   pal: 6 },
+    { name: "modem",    pal: 6 }, { name: "traffic", pal: 6 },
+    { name: "sms",      pal: 1 }, { name: "info",   pal: 6 },
+    { name: "weather",  pal: 4 }, { name: "services", pal: 5 },
+    { name: "display",  pal: 6 }, { name: "saver",  pal: 4 },
+    { name: "led",      pal: 4 }, { name: "sound",  pal: 6 },
+    { name: "bolt",     pal: 3 }, { name: "zigbee", pal: 5 },
+    { name: "debug",    pal: 8 }, { name: "editor", pal: 6 },
+    { name: "reset",    pal: 4 }, { name: "reboot", pal: 2 },
+];
+let ed_pick = false;
+let ed_cpick = false;
+let ed_target = null;
+let ed_grid = null;
+let ed_color = 1;
+let ed_last = null;
+let ed_saved = "";
+
+function ed_init() {
+    if (ed_grid != null) return;
+    ed_grid = [];
+    for (let r = 0; r < 14; r++) {
+        let row = [];
+        for (let c = 0; c < 14; c++) push(row, 0);
+        push(ed_grid, row);
+    }
+}
+
+function ed_btn(i) {
+    return { x: 192, y: 28 + i * 30, w: 118, h: 26 };
+}
+
+function ed_pal_btn(i) {
+    // 3x3: восемь цветов и ластик в правом нижнем углу
+    return { x: 192 + (i % 3) * 28, y: 92 + int(i / 3) * 28, w: 24, h: 24 };
+}
+
+function ed_cell_draw(r, c) {
+    let v = ed_grid[r][c];
+    lcd_rect(ED_X + c * ED_CELL + 1, ED_Y + r * ED_CELL + 1,
+             ED_CELL - 2, ED_CELL - 2, v ? ED_PAL[v - 1] : C.btn);
+}
+
+function ed_preview() {
+    lcd_rect(282, 92, 28, 80, C.bg);
+    lcd_rect(280, 116, 32, 32, C.widget);
+    for (let r = 0; r < 14; r++)
+        for (let c = 0; c < 14; c++)
+            if (ed_grid[r][c])
+                lcd_rect(282 + c * 2, 118 + r * 2, 2, 2, ED_PAL[ed_grid[r][c] - 1]);
+}
+
+function ed_paint(r, c) {
+    if (r < 0 || r > 13 || c < 0 || c > 13) return false;
+    if (ed_grid[r][c] == ed_color) return false;
+    ed_grid[r][c] = ed_color;
+    ed_cell_draw(r, c);
+    return true;
+}
+
+function ed_load(name) {
+    let grid = [];
+    let cust = MICON_CUSTOM[name];
+    let slot_pal = 1;
+    for (let sl in ED_SLOTS)
+        if (sl.name == name) slot_pal = sl.pal;
+    // Палитру ставим под открываемую иконку: кастомная несёт свою,
+    // вшитая - либо собственную, либо дефолтную. Иначе чужой цвет в
+    // слоте перекрашивал её прямо при загрузке.
+    let bart = null, bpal = ED_PAL_DEF;
+    if (!cust) {
+        let e = MICONS[name];
+        bart = e;
+        if (type(e) == "object") {
+            bart = e.art;
+            bpal = e.pal ?? ED_PAL_DEF;
+        }
+    }
+    if (cust)
+        for (let i = 0; i < 8; i++) ED_PAL[i] = cust.pal[i];
+    else
+        for (let i = 0; i < 8; i++) ED_PAL[i] = bpal[i];
+    for (let r = 0; r < 14; r++) {
+        let row = [];
+        for (let c = 0; c < 14; c++) {
+            if (cust) push(row, cust.g[r][c]);
+            else {
+                let ch = bart ? substr(bart[r], c, 1) : ".";
+                if (ch == "#") push(row, slot_pal);
+                else if (ch >= "1" && ch <= "8") push(row, int(ch));
+                else push(row, 0);
+            }
+        }
+        push(grid, row);
+    }
+    ed_grid = grid;
+    ed_target = name;
+}
+
+function draw_iconedit_page() {
+    ed_init();
+    lcd_clear(C.bg);
+    draw_header(tr("Editor"));
+    if (ed_cpick) {
+        // Пикер цветов: расширенная палитра для текущего слота.
+        lcd_text(ED_X, ED_Y, tr("Pick a color for the slot"), C.gray, C.bg, 1);
+        for (let i = 0; i < length(ED_COLORS); i++) {
+            let px = ED_X + (i % 6) * 28;
+            let py = ED_Y + 14 + int(i / 6) * 30;
+            lcd_rect(px, py, 26, 26, ED_COLORS[i]);
+            if (ed_color > 0 && ED_PAL[ed_color - 1] == ED_COLORS[i]) {
+                lcd_rect(px, py, 26, 2, C.bg);
+                lcd_rect(px, py + 24, 26, 2, C.bg);
+                lcd_rect(px, py, 2, 26, C.bg);
+                lcd_rect(px + 24, py, 2, 26, C.bg);
+            }
+        }
+        draw_back();
+        lcd_flush();
+        return;
+    }
+    if (ed_pick) {
+        // Пикер: все иконки меню сеткой на месте холста.
+        lcd_text(ED_X, ED_Y, tr("Pick an icon to edit"), C.gray, C.bg, 1);
+        for (let i = 0; i < length(ED_SLOTS); i++) {
+            let px = ED_X + (i % 5) * 34;
+            let py = ED_Y + 14 + int(i / 5) * 36;
+            lcd_rect(px, py, 32, 32, ed_target == ED_SLOTS[i].name ? C.accent : C.btn);
+            draw_micon(px + 2, py + 2, ED_SLOTS[i].name,
+                       ED_PAL[ED_SLOTS[i].pal - 1], 2);
+        }
+        draw_back();
+        lcd_flush();
+        return;
+    }
+    lcd_rect(ED_X, ED_Y, 14 * ED_CELL, 14 * ED_CELL, C.border);
+    for (let r = 0; r < 14; r++)
+        for (let c = 0; c < 14; c++)
+            ed_cell_draw(r, c);
+    let b0 = ed_btn(0);
+    lcd_rect(b0.x, b0.y, b0.w, b0.h, C.widget);
+    lcd_rect(b0.x, b0.y, 4, b0.h, C.green);
+    lcd_text(b0.x + 14, b0.y + 6, tr("Save"), C.white, C.widget, 2);
+    let b1 = ed_btn(1);
+    lcd_rect(b1.x, b1.y, 62, b1.h, C.widget);
+    lcd_rect(b1.x, b1.y, 4, b1.h, C.red);
+    lcd_text(b1.x + 10, b1.y + 9, tr("Clr"), C.white, C.widget, 1);
+    // Кнопка пикера: открыть иконку меню на правку.
+    lcd_rect(260, b1.y, 50, 24, C.btn);
+    for (let dy = 0; dy < 3; dy++)
+        for (let dx = 0; dx < 3; dx++)
+            lcd_rect(268 + dx * 12, b1.y + 5 + dy * 6, 6, 3, C.cyan);
+    for (let i = 0; i < 9; i++) {
+        let b = ed_pal_btn(i);
+        if (i < 8) {
+            lcd_rect(b.x, b.y, b.w, b.h, ED_PAL[i]);
+            if (ed_color == i + 1) {
+                lcd_rect(b.x, b.y, b.w, 2, C.bg);
+                lcd_rect(b.x, b.y + b.h - 2, b.w, 2, C.bg);
+                lcd_rect(b.x, b.y, 2, b.h, C.bg);
+                lcd_rect(b.x + b.w - 2, b.y, 2, b.h, C.bg);
+                lcd_rect(b.x + 2, b.y + 2, b.w - 4, 2, C.white);
+                lcd_rect(b.x + 2, b.y + b.h - 4, b.w - 4, 2, C.white);
+            }
+        } else {
+            // резинка: классический розовый ластик с белой полосой
+            lcd_rect(b.x, b.y, b.w, b.h, "#E8889C");
+            lcd_rect(b.x, b.y + int(b.h / 2) - 3, b.w, 6, "#F5EFF0");
+            if (ed_color == 0) {
+                lcd_rect(b.x, b.y, b.w, 2, C.bg);
+                lcd_rect(b.x, b.y + b.h - 2, b.w, 2, C.bg);
+                lcd_rect(b.x, b.y, 2, b.h, C.bg);
+                lcd_rect(b.x + b.w - 2, b.y, 2, b.h, C.bg);
+                lcd_rect(b.x + 2, b.y + 2, b.w - 4, 2, C.white);
+                lcd_rect(b.x + 2, b.y + b.h - 4, b.w - 4, 2, C.white);
+            }
+        }
+    }
+    ed_preview();
+    // Радуга: расширенный выбор цвета для выбранного слота палитры.
+    // После превью - оно чистит свою зону и затирало кнопку.
+    for (let i = 0; i < 4; i++)
+        lcd_rect(282 + i * 7, 94, 7, 16,
+                 [ "#F85149", "#FFD866", "#3FB950", "#58A6FF" ][i]);
+    lcd_text(192, 180, ed_target != null
+             ? sprintf("%s: %s", tr("editing"), ed_target)
+             : "/etc/almond3s/art", C.dim, C.bg, 1);
+    if (ed_saved != "")
+        lcd_text(192, 192, ed_saved, C.gray, C.bg, 1);
+    draw_back();
+    lcd_flush();
+}
+
 function draw_display_page() {
     lcd_clear(C.bg);
     draw_header(tr("Display"));
@@ -2579,6 +3358,14 @@ function draw_display_page() {
     let flab = ff ? tr("FONT FLIPPER") : tr("FONT STD");
     lcd_text(fb.x + int((fb.w - tlen(flab) * 6) / 2) + 2, fb.y + 13, flab,
              ff ? C.white : C.gray, C.widget, 1);
+
+    // Иконки меню: тумблер, пока набор дорисовывается.
+    let mb = { x: 10, y: 72, w: 300, h: 26 };
+    lcd_rect(mb.x, mb.y, mb.w, mb.h, C.widget);
+    lcd_rect(mb.x, mb.y, 4, mb.h, MICONS_ON ? C.green : C.dim);
+    lcd_text(mb.x + 12, mb.y + 9, tr("Menu icons"), C.white, C.widget, 1);
+    lcd_text(mb.x + mb.w - 44, mb.y + 9, MICONS_ON ? tr("on") : tr("off"),
+             MICONS_ON ? C.green : C.gray, C.widget, 1);
 
     // Яркость: семь шагов, выбранный подсвечен.
     let bp = bright_cfg();
@@ -2652,19 +3439,24 @@ function led_row(i) {
 // almond3s-lcd: загрузка таблицы в PIC занимает около секунды, поэтому зовём
 // его фоном, иначе интерфейс замирал бы на каждое нажатие.
 let SOUNDS = [
-    { label: "звонок",  name: "bell",  args: "" },
+    // Заводские частоты звонка (1975/1675) вешают PIC на части плат -
+    // байты таблицы 0xB7/0x8B чип съедает как команды и роняет выходы
+    // вместе с питанием панели (issue #5). Играем октавой ниже.
+    { label: "звонок",  name: "tone",  args: "988 130 988 267 838 130 838 535" },
     { label: "скорая",  name: "ambulance", args: "" },
     { label: "полиция", name: "police", args: "" },
     { label: "мелодия", name: "melody", args: "" },
     { label: "марш",    name: "tone",
       args: "440 500 440 500 440 500 349 375 523 125 440 500 349 375 523 125 440 650" },
     { label: "сирена",  name: "siren", args: "" },
+    // Тема из «Бумера» (Шнуров), 14 нот: e g | g e | a g a g a g a g a | b.
+    // Длительности в тиках PIC (полмиллисекунды), темп 125.
+    { label: "бумер",   name: "tone",
+      args: "660 240 784 720 0 400 784 240 660 720 0 400 880 240 784 240 880 240 784 240 880 240 784 240 880 240 784 240 880 240 988 720" },
     { label: "гр 1",    name: "vol", args: "1" },
     { label: "гр 2",    name: "vol", args: "2" },
     { label: "гр 3",    name: "vol", args: "3" },
-    { label: "звонок-",  name: "tone", args: "988 130 988 267 838 130 838 535" },
-    { label: "звонок--", name: "tone", args: "494 130 494 267 419 130 419 535" },
-    { label: "стоп",    name: "tone", args: "0 1" },
+    { label: "стоп",    name: "stop", args: "" },
 ];
 
 // Выбранный уровень громкости запоминается и подставляется следующему звуку:
@@ -2672,7 +3464,7 @@ let SOUNDS = [
 let snd_vol = 1;
 
 function snd_btn(i) {
-    return { x: 6 + (i % 3) * 104, y: 30 + int(i / 3) * 44, w: 100, h: 40 };
+    return { x: 6 + (i % 3) * 104, y: 28 + int(i / 3) * 42, w: 100, h: 38 };
 }
 
 function snd_play(i) {
@@ -2683,22 +3475,34 @@ function snd_play(i) {
     }
     let v = snd_vol > 0 ? sprintf(" -v %d", snd_vol) : "";
     let a = e.args != "" ? " " + e.args : "";
+    // Прерываем играющую мелодию: её процесс ждёт конца проигрывания и
+    // умирает по TERM (во время заливки сигнал у него заблокирован).
+    system("k=$(cat /tmp/.lcd_tone.pid 2>/dev/null); " +
+           "[ -n \"$k\" ] && kill $k 2>/dev/null; " +
+           "almond3s-lcd stop >/dev/null 2>&1");
     system(sprintf("almond3s-lcd %s%s%s >/dev/null 2>&1 &", e.name, v, a));
 }
+
+let snd_pressed = null;
 
 function draw_sound_page() {
     lcd_clear(C.bg);
     draw_header(tr("Sound"));
     for (let i = 0; i < length(SOUNDS); i++) {
         let b = snd_btn(i), last = (i == length(SOUNDS) - 1);
-        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+        let pressed = (snd_pressed != null && snd_pressed == i);
+        let o = pressed ? 2 : 0;
+        let bg = pressed ? C.press : C.widget;
+        lcd_rect(b.x, b.y, b.w, b.h, bg);
         let vol_sel = (SOUNDS[i].name == "vol" && int(SOUNDS[i].args) == snd_vol);
-        lcd_rect(b.x, b.y, 4, b.h,
-                 last ? C.red
-                      : (SOUNDS[i].name == "vol" ? (vol_sel ? C.green : C.yellow)
-                                                 : (i < 6 ? C.cyan : C.gray)));
+        if (!pressed)
+            lcd_rect(b.x, b.y, 4, b.h,
+                     last ? C.red
+                          : (SOUNDS[i].name == "vol" ? (vol_sel ? C.green : C.yellow)
+                                                     : (i < 6 ? C.cyan : C.gray)));
         let t = SOUNDS[i].label;
-        lcd_text(b.x + int((b.w - tlen(t) * 12) / 2), b.y + 12, t, C.white, C.widget, 2);
+        lcd_text(b.x + int((b.w - tlen(t) * 12) / 2) + o, b.y + 12 + o, t,
+                 C.white, bg, 2);
     }
     lcd_text(10, 214, tr("Factory tones and volume from stock firmware"), C.dim, C.bg, 1);
     draw_back();
@@ -2909,17 +3713,44 @@ function draw_battery_page() {
     lcd_text(cx + cw - 12 - tlen(d1) * 6, y2 + 8, d1, C.white, C.widget, 1);
     lcd_text(cx + cw - 12 - tlen(d2) * 6, y2 + 22, d2, C.gray, C.widget, 1);
 
-    // Пределы этой платы, измеренные на живых циклах.
+    // Графики за последние ~2 часа: слева заряд, справа сырой АЦП.
     let y3 = y2 + 46;
-    lcd_rect(cx, y3, cw, 52, C.widget);
-    lcd_rect(cx, y3, 4, 52, C.gray);
-    lcd_text(cx + 12, y3 + 6, tr("MEASURED LIMITS"), C.gray, C.widget, 1);
-    lcd_text(cx + 12, y3 + 20, sprintf(tr("shutdown at %d ADC"), int(+(bat?.cutoff ?? 512))), C.white, C.widget, 1);
-    let f_s = sprintf(tr("full %d ADC"), 726);
-    lcd_text(cx + cw - 12 - tlen(f_s) * 6, y3 + 20, f_s, C.white, C.widget, 1);
-    lcd_text(cx + 12, y3 + 34, sprintf(tr("discharges in %s"), fmt_dur(263, true)), C.white, C.widget, 1);
+    lcd_rect(cx, y3, cw, 56, C.widget);
+    lcd_rect(cx, y3, 4, 56, chg ? C.green : C.yellow);
+    lcd_text(cx + 12, y3 + 4, tr("CHARGE %"), C.gray, C.widget, 1);
+    lcd_text(cx + 158, y3 + 4, tr("ADC RAW"), C.gray, C.widget, 1);
+    // Историю ведёт collector в файле (двухчасовое окно, точка в минуту):
+    // страница показывает кривые сразу, рестарты UI их не стирают.
+    let bh_pct = [], bh_adc = [];
+    let bh_raw = fs.readfile("/tmp/almond3s_bat_hist");
+    if (bh_raw) {
+        for (let line in split(bh_raw, "\n")) {
+            let m = match(line, /^(\d+) (\d+) [01]$/);
+            if (!m) continue;
+            push(bh_adc, +m[1]);
+            push(bh_pct, +m[2]);
+        }
+    }
+    // Заряд - линией по честной шкале 0..100 (режим заливки считает
+    // высоту логарифмом под байты трафика и для процентов даёт ноль).
+    draw_graph_compact(cx + 10, y3 + 16, 136, 36, bh_pct, C.green, 0, 100, false);
+    // АЦП - с автомасштабом по данным: на фиксированной шкале 500..730
+    // час зарядки выглядел одной неподвижной полосой.
+    let abm = arr_minmax(bh_adc);
+    draw_graph_compact(cx + 156, y3 + 16, 136, 36, bh_adc, C.cyan,
+                       abm.min - 4, abm.max + 4, false);
 
-    lcd_text(cx + 2, y3 + 62, tr("Cycle stats will appear here"), C.dim, C.bg, 1);
+    // Подвал: счётчик циклов (копится с этой версии) и пределы платы.
+    let cyc = 0;
+    let ce = fs.readfile("/etc/almond3s/charge_events");
+    if (ce) {
+        for (let ch in split(ce, "\n"))
+            if (ch != "") cyc++;
+    }
+    let foot = cyc > 0
+        ? sprintf(tr("Charge cycles: %d  ADC %d..726"), cyc, int(+(bat?.cutoff ?? 512)))
+        : sprintf(tr("ADC %d..726, discharges in %s"), int(+(bat?.cutoff ?? 512)), fmt_dur(263, true));
+    lcd_text(cx + 2, y3 + 62, foot, C.dim, C.bg, 1);
 
     draw_back();
     lcd_flush();
@@ -3005,7 +3836,15 @@ function draw_night_page() {
         lcd_text(pl.x + 18, pl.y + 10, "+", C.accent, C.widget, 4);
     }
 
-    lcd_text(20, 184, tr("Screensaver dims to green at night"), C.dim, C.bg, 1);
+    lcd_text(24, 186, tr("LIGHT"), C.gray, C.bg, 1);
+    for (let i = 0; i < length(NIGHT_BRIGHT_STEPS); i++) {
+        let b = nbright_btn(i), sel = (NIGHT_BRIGHT_STEPS[i] == c.bright);
+        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+        lcd_rect(b.x, b.y, 3, b.h, sel ? C.green : C.border);
+        let t = sprintf("%d", NIGHT_BRIGHT_STEPS[i]);
+        lcd_text(b.x + int((b.w - tlen(t) * 6) / 2) + 2, b.y + 10, t,
+                 sel ? C.white : C.gray, C.widget, 1);
+    }
 
     draw_back();
     lcd_flush();
@@ -3336,7 +4175,82 @@ function draw_wifi_page() {
     lcd_flush();
 }
 
+// Полноэкранная карточка «Инфо» (issue #2, для слабовидящих): тап по
+// карточке разворачивает её крупным шрифтом, повторный тап сворачивает.
+function info_zoom_rows(i) {
+    let d = st.data;
+    let board = uconn ? uconn.call("system", "board", {}) : null;
+    if (i == 0) {
+        let bat = d?.battery;
+        let bpct = int(+(bat?.percent ?? -1));
+        let load = d?.cpu_load_raw ? sprintf("%.2f", d.cpu_load_raw / 65536.0)
+                 : (d?.cpu_load ?? "?");
+        let busy = int(+(d?.cpu_busy ?? -1));
+        let mfree = int(+(d?.mem_free_mb ?? 0));
+        let mtot  = int(+(d?.mem_total_mb ?? 0));
+        return [
+            [ tr("SYSTEM"), board?.model ?? "?" ],
+            [ tr("Uptime"), fmt_uptime(d?.uptime) ],
+            [ tr("Free RAM"), mtot > 0 ? sprintf("%d / %d MB", mfree, mtot)
+                                       : sprintf("%d MB", mfree) ],
+            [ "CPU", busy >= 0 ? sprintf("%s, %d%%", load, busy) : load ],
+            [ tr("Battery"), bpct >= 0 ? sprintf("%d%%%s", bpct,
+                  bat?.charging ? " +" : "") : "--" ],
+        ];
+    }
+    if (i == 1) {
+        let so = d?.storage;
+        let s_free = int(+(so?.free_kb ?? 0)), s_tot = int(+(so?.total_kb ?? 0));
+        let lan = d?.lan;
+        return [
+            [ tr("STORAGE AND NETWORK"), "" ],
+            [ tr("Flash free"), s_tot > 0
+                ? sprintf("%.1f / %.1f MB", s_free / 1024.0, s_tot / 1024.0)
+                : tr("no data") ],
+            [ "LAN IP", lan?.ip ?? "?" ],
+            [ "MAC", uc(lan?.mac ?? "?") ],
+        ];
+    }
+    let drv = "?";
+    let pf = fs.popen("almond3s-lcd version 2>/dev/null", "r");
+    if (pf) { drv = trim(pf.read("all") ?? "?"); pf.close(); }
+    return [
+        [ tr("SOFTWARE"), "" ],
+        [ "OpenWrt", board?.release?.version ?? "?" ],
+        [ tr("Kernel"), board?.kernel ?? "?" ],
+        [ tr("Driver"), drv ],
+        [ "Telegram", TG_LINK ],
+    ];
+}
+
+function draw_info_zoom(i) {
+    lcd_clear(C.bg);
+    draw_header(tr("System Info"));
+    let rows = info_zoom_rows(i);
+    let y = 34;
+    for (let r = 0; r < length(rows); r++) {
+        let lab = rows[r][0], val = rows[r][1];
+        if (r == 0) {
+            lcd_text(12, y, lab, C.gray, C.bg, 1);
+            if (val != "") {
+                y += 12;
+                lcd_text(12, y, tcut(val, 25), C.white, C.bg, 2);
+                y += 22;
+            } else {
+                y += 14;
+            }
+            continue;
+        }
+        lcd_text(12, y, lab, C.gray, C.bg, 1);
+        lcd_text(12, y + 11, tcut(val, 25), C.white, C.bg, 2);
+        y += 34;
+    }
+    draw_back();
+    lcd_flush();
+}
+
 function draw_info_page() {
+    if (st.izoom != null) { draw_info_zoom(st.izoom); return; }
     let d = st.data;
     lcd_clear(C.bg);
     draw_header(tr("System Info"));
@@ -3775,7 +4689,59 @@ function draw_lte_page() {
     lcd_flush();
 }
 
+// Полноэкранный интерфейс «Трафика» (issue #2): крупные RX/TX и график
+// на весь экран. Тап по карточке разворачивает, повторный сворачивает.
+function draw_traffic_zoom(i) {
+    lcd_clear(C.bg);
+    let wwan = (i == 0);
+    draw_header(wwan ? "MODEM - wwan0" : sprintf(tr("UPLINK - %s"), default_iface() ?? "none"));
+
+    let hrx = wwan ? hist.rx : hist.wan_rx;
+    let htx = wwan ? hist.tx : hist.wan_tx;
+    let rx_last = length(hrx) > 0 ? hrx[length(hrx) - 1] : 0;
+    let tx_last = length(htx) > 0 ? htx[length(htx) - 1] : 0;
+
+    lcd_text(12, 34, "RX", C.green, C.bg, 2);
+    lcd_text(44, 30, fmt_bytes(rx_last) + "/s", C.white, C.bg, 3);
+    lcd_text(12, 66, "TX", C.red, C.bg, 2);
+    lcd_text(44, 62, fmt_bytes(tx_last) + "/s", C.white, C.bg, 3);
+
+    let rm = arr_minmax(hrx);
+    let tm = arr_minmax(htx);
+    let mx = rm.max > tm.max ? rm.max : tm.max;
+    if (mx < 10240) mx = 10240;
+    let gy = 96, gh = 100, gx = 12, gw = 296;
+    draw_graph_compact(gx, gy, gw, gh, hrx, C.green, 0, mx, true);
+    let n = length(htx);
+    if (n >= 2) {
+        let pts = n > HIST_LEN ? HIST_LEN : n;
+        let start = n - pts;
+        let step_x = (gw - 2) / (pts - 1);
+        let prev_px = -1, prev_py = -1;
+        for (let k = 0; k < pts; k++) {
+            let val = htx[start + k];
+            let px = gx + 1 + int(k * step_x);
+            let py = gy + gh - 1 - int(log_frac(val, mx) * (gh - 2) / 1000);
+            if (py < gy) py = gy;
+            if (py > gy + gh - 1) py = gy + gh - 1;
+            let sw = int(step_x); if (sw < 1) sw = 1;
+            if (px + sw > gx + gw - 1) sw = gx + gw - 1 - px;
+            if (sw < 1) sw = 1;
+            lcd_rect(px, py, sw, 1, C.red);
+            if (prev_px >= 0) {
+                let dy = py - prev_py;
+                let ys = dy > 0 ? prev_py : py;
+                if (dy != 0) lcd_rect(px, ys, 1, (dy > 0 ? dy : -dy), C.red);
+            }
+            prev_px = px; prev_py = py;
+        }
+    }
+    draw_back();
+    lcd_flush();
+}
+
 function draw_traffic_page() {
+    if (st.tzoom != null) { draw_traffic_zoom(st.tzoom); return; }
     lcd_clear(C.bg);
     draw_header(tr("Traffic"));
 
@@ -3813,6 +4779,8 @@ function draw_traffic_page() {
             if (py < y1 + 34) py = y1 + 34;
             if (py > y1 + 61) py = y1 + 61;
             let sw = int(step_x); if (sw < 1) sw = 1;
+            if (px + sw > cx + cw - 9) sw = cx + cw - 9 - px;
+            if (sw < 1) sw = 1;
             lcd_rect(px, py, sw, 1, C.red);
             if (prev_px >= 0) {
                 let dy = py - prev_py;
@@ -3853,6 +4821,8 @@ function draw_traffic_page() {
             if (py < y2 + 34) py = y2 + 34;
             if (py > y2 + 61) py = y2 + 61;
             let sw = int(step_x); if (sw < 1) sw = 1;
+            if (px + sw > cx + cw - 9) sw = cx + cw - 9 - px;
+            if (sw < 1) sw = 1;
             lcd_rect(px, py, sw, 1, C.red);
             if (prev_px >= 0) {
                 let dy = py - prev_py;
@@ -3948,6 +4918,8 @@ function draw_current() {
     case "battery":   draw_battery_page(); break;
     case "savercfg":  draw_savercfg_page(); break;
     case "saver":     draw_saver_page(); break;
+    case "debug":     draw_debug_page(); break;
+    case "iconedit":  draw_iconedit_page(); break;
     case "zigbee":    draw_zigbee_page(); break;
     case "sound":     draw_sound_page(); break;
     case "stascan":   draw_stascan_page(); break;
@@ -4150,8 +5122,11 @@ function backlight_path() {
 // если человек подошёл и ткнул, ему нужно видеть.
 function night_dim(lvl) {
     if (!night_now() || st.screen != "screensaver") return lvl;
-    let d = int(lvl * 35 / 100);
-    return d < 10 ? 10 : d;
+    // Своя ночная яркость (issue #1): процент от полной шкалы, а не от
+    // дневного уровня - так настройка предсказуема при любой дневной.
+    let d = int(255 * night_cfg().bright / 100);
+    if (d > lvl) d = lvl;   // ночью не ярче, чем днём
+    return d < 8 ? 8 : d;
 }
 
 function backlight_write(on) {
@@ -4203,6 +5178,8 @@ function run_script(name, bg) {
 function go_page(p) {
     st.page = p;
     st.page_sig = "";   /* смена страницы - подпись заведомо другая */
+    st.izoom = null;    /* полноэкранные карточки не переживают переходы */
+    st.tzoom = null;
     draw_current();
 }
 
@@ -4254,14 +5231,24 @@ function action_splash(title, subtitle, color) {
 // Подсветка нажатия: перекрашиваем карточку и рисуем ТУ ЖЕ надпись на том же
 // месте. Раньше текст рисовался по своим координатам и своим кеглем, из-за
 // чего у «ЕЩЁ >>>» и «<<< НАЗАД» он подпрыгивал и менялся - выглядело как сбой.
-function flash_btn(bx, by, bw, bh, label, nav) {
-    lcd_rect(bx, by, bw, bh, C.accent);
-    if (label && label != "")
-        lcd_text(bx + (nav ? 20 : 8), by + (nav ? 20 : 8), label, C.bg, C.accent, 2);
+
+// Вдавленная полоса «Назад»: голубой фон, текст +2 пикселя.
+function back_press_fx() {
+    lcd_rect(0, BACK_Y, LCD_W, 32, C.back_press);
+    lcd_text(122, BACK_Y + 11, tr("< BACK"), C.white, C.back_press, 2);
     lcd_flush();
+    sock_poll(120);
 }
 
-function handle_touch(tx, ty) {
+// Нажатая плитка меню: перерисовать меню с вдавленной кнопкой её же кодом.
+function menu_press_fx(idx) {
+    menu_pressed = idx;
+    draw_menu();
+    menu_pressed = null;
+    sock_poll(150);
+}
+
+function handle_touch(tx, ty, tmove) {
     // Кнопка скана Wi-Fi на «Сети» - раньше общих правил, иначе полоса «низ -
     // назад» съедала её нижний край.
     if (st.page == "dashboard" && fs.stat(NETPRI_SH) &&
@@ -4306,6 +5293,19 @@ function handle_touch(tx, ty) {
     // правило «низ - это назад» съедало нажатия по стрелкам целиком.
     if (st.page != "menu" && st.page != "sms" && st.page != "sms1" &&
         ty >= BACK_Y - 10) {
+        // Из развёрнутой карточки «назад» ведёт к списку карточек, а не
+        // сразу в меню: разворот - это подстраница.
+        if (st.page == "info" && st.izoom != null) {
+            st.izoom = null;
+            draw_info_page();
+            return;
+        }
+        if (st.page == "traffic" && st.tzoom != null) {
+            st.tzoom = null;
+            draw_traffic_page();
+            return;
+        }
+        back_press_fx();
         go_page("menu");
         return;
     }
@@ -4351,19 +5351,7 @@ function handle_touch(tx, ty) {
             let b = btn_pos(i);
             if (in_rect(tx, ty, b.x, b.y, b.w, b.h)) {
                 // Flash button with label
-                let labels = st.mpg == 1
-                    ? [ tr("Network"), tr("WiFi"), tr("Modem"),
-                        tr("Traffic"), tr("Info"), tr("MORE >>>") ]
-                    : (st.mpg == 2
-                        ? [ tr("SMS"), tr("Services"), tr("Weather"),
-                            tr("Display"), tr("Saver"), tr("MORE >>>") ]
-                        : (st.mpg == 3
-                            ? [ tr("LED"), tr("Sound"), tr("Battery"),
-                                "Zigbee", "", tr("MORE >>>") ]
-                            : [ tr("Modem Reset"), tr("Reboot"), "",
-                                "", "", tr("<<< BACK") ]));
-                flash_btn(b.x, b.y, b.w, b.h, labels[i - 1] ?? "", i == 6);
-                sock_poll(150);
+                menu_press_fx(i);
 
                 if (st.mpg == 1) {
                     switch (i) {
@@ -4380,10 +5368,12 @@ function handle_touch(tx, ty) {
                     case 2: go_page("sound"); return;
                     case 3: go_page("battery"); return;
                     case 4: go_page("zigbee"); return;
+                    case 5: go_page("debug"); return;
                     case 6: st.mpg = 4; draw_menu(); return;
                     }
                 } else if (st.mpg == 4) {
                     switch (i) {
+                    case 3: go_page("iconedit"); return;
                     case 1:
                         // Перезапуск модема. Своего скрипта у нас нет, а у
                         // 5gmodem есть отлаженная лестница: питание слота по
@@ -4610,7 +5600,10 @@ function handle_touch(tx, ty) {
         for (let i = 0; i < length(SOUNDS); i++) {
             let b = snd_btn(i);
             if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
-            flash_btn(b.x, b.y, b.w, b.h, SOUNDS[i].label, false);
+            snd_pressed = i;
+            draw_sound_page();
+            snd_pressed = null;
+            sock_poll(150);
             snd_play(i);
             draw_sound_page();
             return;
@@ -4731,8 +5724,226 @@ function handle_touch(tx, ty) {
         return;
     }
 
+    if (st.page == "info") {
+        if (st.izoom != null) { st.izoom = null; draw_info_page(); return; }
+        let oy = st.oy;
+        if (ty >= 28 + oy && ty < 80 + oy)  { st.izoom = 0; draw_info_page(); return; }
+        if (ty >= 86 + oy && ty < 138 + oy) { st.izoom = 1; draw_info_page(); return; }
+        if (ty >= 144 + oy && ty < 196 + oy){ st.izoom = 2; draw_info_page(); return; }
+        return;
+    }
+
+    if (st.page == "traffic") {
+        if (st.tzoom != null) { st.tzoom = null; draw_traffic_page(); return; }
+        if (ty >= 28 && ty < 100)  { st.tzoom = 0; draw_traffic_page(); return; }
+        if (ty >= 106 && ty < 178) { st.tzoom = 1; draw_traffic_page(); return; }
+        return;
+    }
+
+    if (st.page == "debug") {
+        let ib = dbg_inv_btn();
+        if (in_rect(tx, ty, ib.x, ib.y, ib.w, ib.h)) {
+            pancfg_set("pinv", pancfg().inv ? "0" : "1");
+            panel_apply();
+            draw_debug_page();
+            return;
+        }
+        for (let i = 0; i < 4; i++) {
+            let b = dbg_gamma_btn(i);
+            if (in_rect(tx, ty, b.x, b.y, b.w, b.h)) {
+                pancfg_set("pgamma", i + 1);
+                panel_apply();
+                draw_debug_page();
+                return;
+            }
+        }
+        for (let i = 0; i < 4; i++) {
+            let b = dbg_cabc_btn(i);
+            if (in_rect(tx, ty, b.x, b.y, b.w, b.h)) {
+                pancfg_set("pcabc", i);
+                panel_apply();
+                draw_debug_page();
+                return;
+            }
+        }
+        for (let i = 0; i < length(PWM_STEPS); i++) {
+            let b = dbg_pwm_btn(i);
+            if (in_rect(tx, ty, b.x, b.y, b.w, b.h)) {
+                pancfg_set("pwmhz", PWM_STEPS[i]);
+                panel_apply();
+                draw_debug_page();
+                return;
+            }
+        }
+        return;
+    }
+
+    if (st.page == "iconedit") {
+        ed_init();
+        if (ed_cpick) {
+            if (tmove) return;
+            for (let i = 0; i < length(ED_COLORS); i++) {
+                let px = ED_X + (i % 6) * 28;
+                let py = ED_Y + 14 + int(i / 6) * 30;
+                if (!in_rect(tx, ty, px, py, 26, 26)) continue;
+                let want = ED_COLORS[i];
+                // Цвет уже в палитре - просто выбрать его слот.
+                let slot = 0;
+                for (let k = 0; k < 8; k++)
+                    if (ED_PAL[k] == want) slot = k + 1;
+                if (slot == 0) {
+                    // Иначе занять слот, которым на холсте не нарисовано ни
+                    // пикселя: нарисованное не перекрашивается (формат
+                    // иконки держит до 8 цветов одновременно).
+                    let used = [ false, false, false, false,
+                                 false, false, false, false ];
+                    for (let r = 0; r < 14; r++)
+                        for (let c = 0; c < 14; c++)
+                            if (ed_grid[r][c])
+                                used[ed_grid[r][c] - 1] = true;
+                    for (let k = 7; k >= 0; k--)
+                        if (!used[k]) slot = k + 1;
+                    if (slot == 0) {
+                        toast(tr("8 colors max"), C.yellow, "#201800", 1);
+                        ed_cpick = false;
+                        draw_iconedit_page();
+                        return;
+                    }
+                    ED_PAL[slot - 1] = want;
+                }
+                ed_color = slot;
+                ed_cpick = false;
+                draw_iconedit_page();
+                return;
+            }
+            ed_cpick = false;
+            draw_iconedit_page();
+            return;
+        }
+        if (ed_pick) {
+            if (tmove) return;
+            for (let i = 0; i < length(ED_SLOTS); i++) {
+                let px = ED_X + (i % 5) * 34;
+                let py = ED_Y + 14 + int(i / 5) * 36;
+                if (in_rect(tx, ty, px, py, 32, 32)) {
+                    ed_load(ED_SLOTS[i].name);
+                    ed_pick = false;
+                    draw_iconedit_page();
+                    return;
+                }
+            }
+            ed_pick = false;
+            draw_iconedit_page();
+            return;
+        }
+        if (tx >= ED_X && tx < ED_X + 14 * ED_CELL &&
+            ty >= ED_Y && ty < ED_Y + 14 * ED_CELL) {
+            let c = int((tx - ED_X) / ED_CELL);
+            let r = int((ty - ED_Y) / ED_CELL);
+            let changed = ed_paint(r, c);
+            // Движение: доливаем клетки между прошлой и текущей точкой,
+            // иначе быстрый штрих оставляет пунктир.
+            if (tmove && ed_last != null) {
+                let dr = r - ed_last.r, dc = c - ed_last.c;
+                let steps = (dr < 0 ? -dr : dr) > (dc < 0 ? -dc : dc)
+                          ? (dr < 0 ? -dr : dr) : (dc < 0 ? -dc : dc);
+                for (let i = 1; i < steps; i++) {
+                    if (ed_paint(ed_last.r + int(dr * i / steps),
+                                 ed_last.c + int(dc * i / steps)))
+                        changed = true;
+                }
+            }
+            ed_last = { r: r, c: c };
+            if (changed) {
+                ed_preview();
+                lcd_flush();
+            }
+            return;
+        }
+        if (tmove) return;
+        ed_last = null;
+        let b0 = ed_btn(0);
+        if (in_rect(tx, ty, b0.x, b0.y, b0.w, b0.h)) {
+            let out = "";
+            for (let r = 0; r < 14; r++) {
+                for (let c = 0; c < 14; c++)
+                    out += ed_grid[r][c] ? sprintf("%d", ed_grid[r][c]) : ".";
+                out += "\n";
+            }
+            out += "colors:";
+            for (let i = 0; i < 8; i++)
+                out += sprintf(" %d=%s", i + 1, ED_PAL[i]);
+            out += "\n";
+            if (ed_target != null) {
+                // Правка иконки меню: переопределение на флеш и сразу в
+                // работу - меню перерисует её при следующем показе.
+                system("mkdir -p /etc/almond3s/icons");
+                fs.writefile("/etc/almond3s/icons/" + ed_target + ".txt", out);
+                let copy = [];
+                for (let r = 0; r < 14; r++) {
+                    let row = [];
+                    for (let c = 0; c < 14; c++) push(row, ed_grid[r][c]);
+                    push(copy, row);
+                }
+                let palc = [];
+                for (let i = 0; i < 8; i++) push(palc, ED_PAL[i]);
+                MICON_CUSTOM[ed_target] = { g: copy, pal: palc };
+                ed_saved = ed_target + ".txt";
+                toast(ed_saved, C.green, "#002000", 1);
+                draw_iconedit_page();
+                return;
+            }
+            // Свободный рисунок: новый нумерованный файл, ничего не затирает.
+            system("mkdir -p /etc/almond3s/art");
+            let n = 1;
+            let names = fs.lsdir("/etc/almond3s/art") ?? [];
+            for (let f in names)
+                if (match(f, /^art_[0-9]+\.txt$/)) n++;
+            ed_saved = sprintf("art_%03d.txt", n);
+            fs.writefile("/etc/almond3s/art/" + ed_saved, out);
+            toast(ed_saved, C.green, "#002000", 1);
+            draw_iconedit_page();
+            return;
+        }
+        let b1 = ed_btn(1);
+        if (in_rect(tx, ty, b1.x, b1.y, 62, b1.h)) {
+            ed_grid = null;
+            ed_target = null;
+            draw_iconedit_page();
+            return;
+        }
+        if (in_rect(tx, ty, 260, b1.y, 50, 24)) {
+            ed_pick = true;
+            draw_iconedit_page();
+            return;
+        }
+        if (in_rect(tx, ty, 280, 92, 34, 20)) {
+            ed_cpick = true;
+            draw_iconedit_page();
+            return;
+        }
+        for (let i = 0; i < 9; i++) {
+            let b = ed_pal_btn(i);
+            if (in_rect(tx, ty, b.x, b.y, b.w, b.h)) {
+                ed_color = i < 8 ? i + 1 : 0;
+                draw_iconedit_page();
+                return;
+            }
+        }
+        return;
+    }
+
     if (st.page == "night") {
         let c = night_cfg();
+        for (let i = 0; i < length(NIGHT_BRIGHT_STEPS); i++) {
+            let b = nbright_btn(i);
+            if (in_rect(tx, ty, b.x, b.y, b.w, b.h)) {
+                night_set("night_bright", NIGHT_BRIGHT_STEPS[i]);
+                if (!st.blank) backlight_write(true);
+                draw_night_page();
+                return;
+            }
+        }
         let nb = night_btn();
         if (in_rect(tx, ty, nb.x, nb.y, nb.w, nb.h)) {
             night_set("night", c.on ? "0" : "1");
@@ -4776,6 +5987,13 @@ function handle_touch(tx, ty) {
             FONT_MODE = FONT_MODE ? 0 : 1;
             ucur.set("almond3s", "display", "font",
                      FONT_MODE ? "flipper" : "std");
+            ucur.commit("almond3s");
+            draw_display_page();
+            return;
+        }
+        if (in_rect(tx, ty, 10, 72, 300, 26)) {
+            MICONS_ON = !MICONS_ON;
+            ucur.set("almond3s", "display", "micons", MICONS_ON ? "1" : "0");
             ucur.commit("almond3s");
             draw_display_page();
             return;
@@ -4864,7 +6082,11 @@ function handle_touch(tx, ty) {
             let b = wcity_btn(i);
             if (in_rect(tx, ty, b.x, b.y, b.w, b.h)) {
                 if (!ucur) { toast(tr("uci unavailable"), C.red, "#200000", 2); return; }
-                flash_btn(b.x, b.y, b.w, b.h, city_name(list[idx]));
+                lcd_rect(b.x, b.y, b.w, b.h, C.press);
+                let ct = city_name(list[idx]);
+                lcd_text(b.x + int((b.w - tlen(ct) * 6) / 2) + 2, b.y + 10 + 2,
+                         ct, C.white, C.press, 1);
+                lcd_flush();
                 ucur.set("almond3s", "weather", "city", list[idx]);
                 ucur.commit("almond3s");
                 action_splash(tr("Weather"), sprintf(tr("Fetching %s..."), city_name(list[idx])), C.yellow);
@@ -5139,11 +6361,12 @@ function main() {
                 st.ltch = time();
                 if (st.screen != "active")
                     set_screen("active");
-                else
-                    handle_touch(t.x, t.y);
+                else if (!t.move || st.page == "iconedit")
+                    handle_touch(t.x, t.y, t.move ?? false);
             }
-            // Poll slower when screen is off
-            touch_t.set(st.screen == "off" ? 500 : 100);
+            // На редакторе опрашиваем чаще: непрерывное рисование.
+            touch_t.set(st.screen == "off" ? 500
+                        : (st.page == "iconedit" ? 40 : 100));
         });
 
         // Idle check (every 1s)

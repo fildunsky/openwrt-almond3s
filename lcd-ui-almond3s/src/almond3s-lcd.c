@@ -293,6 +293,19 @@ int main(int argc, char **argv)
      * Порядок взят из заводского драйвера: сброс шины, стоп, пауза, число
      * нот, таблица частот, таблица длительностей, старт. Байты в таблицах
      * идут старшим вперёд. */
+    /* Мгновенный стоп звука: одиночный пакет вне замка, чтобы бить и по
+     * играющей мелодии, чей процесс ещё держит lock. */
+    if (argc >= 2 && strcmp(argv[1], "stop") == 0) {
+        struct { int len; unsigned char data[152]; } p;
+        p.len = 3; p.data[0] = 0x2F; p.data[1] = 0x00; p.data[2] = 0x02;
+        for (int try = 0; try < 200; try++) {
+            if (ioctl(fd, 21, &p) == 0) { close(fd); return 0; }
+            usleep(50000);
+        }
+        close(fd);
+        return 1;
+    }
+
     if (argc >= 2 && (strcmp(argv[1], "tone") == 0 ||
                       strcmp(argv[1], "melody") == 0 ||
                       strcmp(argv[1], "march") == 0 ||
@@ -360,7 +373,11 @@ int main(int argc, char **argv)
             p.len = len;
             for (int try = 0; try < 200; try++) {
                 if (ioctl(fd, 21, &p) == 0) {
-                    usleep((len * 16 + 60) * 1000);
+                    /* Запас 60 мс между пакетами был мал: на части плат PIC
+                     * не успевает переварить таблицу, ловит переполнение
+                     * шины и виснет с погашенными выходами (issue #5,
+                     * «звонок» ронял экран). 300 мс держат даже её. */
+                    usleep((len * 16 + 300) * 1000);
                     return 0;
                 }
                 usleep(50000);
@@ -377,6 +394,34 @@ int main(int argc, char **argv)
             close(lock);
             close(fd);
             return 0;
+        }
+
+        /* Свой pid - наружу: интерфейс прерывает играющую мелодию новой.
+         * TERM на время заливки блокируем: смерть посреди пакета оставляет
+         * PIC с полузалитой таблицей и вешает его. Сигнал долетит на фазе
+         * ожидания, где убивать безопасно. */
+        {
+            FILE *pf = fopen("/tmp/.lcd_tone.pid", "w");
+            if (pf) { fprintf(pf, "%d\n", getpid()); fclose(pf); }
+        }
+        sigset_t sig_term;
+        sigemptyset(&sig_term);
+        sigaddset(&sig_term, SIGTERM);
+        sigprocmask(SIG_BLOCK, &sig_term, NULL);
+
+        /* 0x39 сбрасывает состояние выходов PIC - горевший диод после
+         * мелодии молча гас (issue #5 жалуется и на погасший экран: на
+         * части плат от выходов PIC зависит и панель). Запоминаем диод и
+         * возвращаем его после последовательности. */
+        int led_was = 0;
+        {
+            FILE *lf = fopen("/sys/class/leds/white:status/brightness", "r");
+            if (lf) { if (fscanf(lf, "%d", &led_was) != 1) led_was = 0; fclose(lf); }
+        }
+        void led_restore(void) {
+            if (led_was <= 0) return;
+            FILE *lf = fopen("/sys/class/leds/white:status/brightness", "w");
+            if (lf) { fprintf(lf, "%d\n", led_was); fclose(lf); }
         }
 
         /* Пауза нулевой частотой ломает чип: pwm_compute делит на частоту, а
@@ -405,6 +450,8 @@ int main(int argc, char **argv)
                 tbl[2 + i * 2] = src[i] & 0xFF;
             }
             if (send_pkt(tbl, 1 + n * 2) < 0) {
+                send_pkt(stop, 3);
+                led_restore();
                 close(fd);
                 return 1;
             }
@@ -418,6 +465,18 @@ int main(int argc, char **argv)
         }
 
         int ret = send_pkt(play, 3);
+
+        /* PIC зациклит таблицу - ждём одно полное проигрывание и глушим.
+         * Тик длительности у PIC - полмиллисекунды: при ожидании полного
+         * номинала каждая мелодия успевала прозвучать дважды. */
+        if (ret == 0) {
+            int total = 0;
+            for (int i = 0; i < n; i++) total += d[i];
+            sigprocmask(SIG_UNBLOCK, &sig_term, NULL);
+            usleep((unsigned)total * 500 + 150000);
+            send_pkt(stop, 3);
+        }
+        led_restore();
         close(fd);
         return ret < 0 ? 1 : 0;
     }
@@ -522,6 +581,12 @@ int main(int argc, char **argv)
                 FILE *out = fopen(TOUCH_FILE, "w");
                 if (out) { fprintf(out, "%d %d\n", data[0], data[1]); fclose(out); }
                 was_pressed = 1;
+            } else if (data[2] && was_pressed) {
+                /* Палец прижат - движение в ОТДЕЛЬНЫЙ файл: в общем оно
+                 * затирало событие нажатия раньше, чем интерфейс успевал
+                 * его прочитать, и тапы терялись. */
+                FILE *out = fopen(TOUCH_FILE ".move", "w");
+                if (out) { fprintf(out, "%d %d\n", data[0], data[1]); fclose(out); }
             } else if (!data[2]) {
                 was_pressed = 0;
             }
