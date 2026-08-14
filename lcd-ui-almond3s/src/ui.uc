@@ -252,14 +252,58 @@ let TR_RU = {
     "Reboot": "Перезапуск",
     "LED": "Диод",
     "Sound": "Звук",
+    "Forget network?": "Забыть сеть?",
+    "connecting...": "подключение...",
+    "Find network": "Поиск сети",
+    "Scanning...": "Сканирую...",
+    "No networks found": "Сети не найдены",
+    "Tap BACK and retry": "Назад и повторить",
+    "+ Find Wi-Fi network": "Подключиться к Wi-Fi",
+    "enter password": "введите пароль",
+    "space": "пробел",
+    "Password": "Пароль",
+    "STORAGE AND NETWORK": "ХРАНИЛИЩЕ И СЕТЬ",
+    "Flash %.1f of %.1f MB free": "Флеш: свободно %.1f из %.1f МБ",
+    "Flash: no data": "Флеш: нет данных",
+    "ON": "Вкл",
+    "OFF": "Выкл",
+    "Screensaver": "Заставка",
+    "Date": "Дата",
+    "Signal level": "Уровень сигнала",
+    "SMS envelope": "Конверт SMS",
+    "Clock wander": "Блуждание часов",
+    "Clock size": "Размер часов",
+    "left ~%dh %02dm": "осталось ~%dч %02dм",
+    "drain %.1f ADC/min": "расход %.1f АЦП/мин",
+    "drain: measuring": "расход: измеряется",
+    "MEASURED LIMITS": "ИЗМЕРЕННЫЕ ПРЕДЕЛЫ",
+    "To full charge": "До полного заряда",
+    "Time left": "Осталось",
+    "estimating": "оцениваю",
+    "drain": "расход",
+    "ADC/min": "АЦП/мин",
+    "measuring": "измеряется",
+    "shutdown at %d ADC": "выключение на %d АЦП",
+    "discharges in %s": "разрядится за %s",
+    "cutoff %d ADC": "отсечка %d АЦП",
+    "full %d ADC": "полный %d АЦП",
+    "full discharge %dh %02dm": "полный разряд %dч %02dм",
+    "Cycle stats will appear here": "Здесь появится статистика циклов",
+    "Not joined to any network": "Ни к какой сети не подключён",
+    "Modern software needs EZSP 8+": "Современному софту нужен EZSP 8+",
+    "UPGRADE PATH": "ПУТЬ ОБНОВЛЕНИЯ",
+    "Flash EmberZNet 6.7.10 over SWD": "Прошить EmberZNet 6.7.10 по SWD",
+    "header J5705, see ZIGBEE.md": "колодка J5705, детали в ZIGBEE.md",
     "build %s.%s.%s": "сборка %s.%s.%s",
     "build %s": "сборка %s",
     "free RAM %d/%dM": "Свободно ОЗУ %d/%dМБ",
     "free RAM %dM": "Свободно ОЗУ %dМБ",
     ", %d threads": ", %d потока",
-    "to full ~%dh %02dm": "до полного ~%dч %02dм",
+    "to full %s": "до полного %s",
     "charging": "идёт зарядка",
-    "left ~%dh %02dm, %.1f/min": "осталось ~%dч %02dм, расход %.1f/мин",
+    "Plugged in": "Питание от сети",
+    "charge complete": "заряд завершён",
+    "left %s, %.1f/min": "осталось %s, расход %.1f/мин",
     "drain %.1f/min": "расход %.1f/мин",
     "measuring drain rate": "меряю скорость разряда",
     "raw %s, cutoff %d": "байты %s, отсечка %d",
@@ -383,14 +427,6 @@ function tr(s) {
     return lang() == "ru" ? (TR_RU[s] ?? s) : s;
 }
 
-// 5gmodem отдаёт время связи как «0d, 00:17:15» - латинская «d» на русском
-// экране смотрится чужеродно.
-function conn_fmt(v) {
-    v = trim(v ?? "");
-    if (v == "" || v == "-") return "";
-    return lang() == "ru" ? replace(v, "d,", "д,") : v;
-}
-
 
 
 // =============================================
@@ -452,34 +488,32 @@ function draw_sigbars(x, y, bars, col, empty) {
 // Носик у батарейки слева: значок стоит правее процентов, и так он «смотрит»
 // на них, а не в край экрана.
 function draw_batt_icon(x, y, w, h, bg, pct, nobat, mono, chg, empty) {
-    // Рамка всегда серая: про зарядку теперь говорит анимация «доливания»,
-    // а зелёный контур на неё же намекал второй раз.
-    let frame = mono ?? C.gray;
+    // Рамка серая; на завершённом заряде - зелёная: это единственный знак,
+    // что кабель подключён, когда мигать уже нечему.
+    let full_chg = chg && pct >= 100;
+    let frame = mono ?? (full_chg ? C.green : C.gray);
     lcd_rect(x, y, w, h, frame);
     lcd_rect(x + 1, y + 1, w - 2, h - 2, bg);
     lcd_rect(x - 2, y + 5, 2, h - 10, frame);
     if (nobat) return;
     let sections = pct > 75 ? 4 : (pct > 50 ? 3 : (pct > 25 ? 2 : (pct > 0 ? 1 : 0)));
-    // При зарядке батарейка «доливается»: от своего уровня до полной и заново.
-    // Когда все деления уже заполнены, доливать нечего - тогда последнее
-    // деление мигает, показывая, что заряд ещё идёт.
-    let blink_last = false;
-    if (chg) {
-        let span = 4 - sections + 1;
-        if (span > 1)
-            sections += anim_phase % span;
-        else
-            blink_last = (anim_phase % 2) == 1;
+
+    // Зарядка - как у телефонов: набранные деления горят постоянно, а то,
+    // которое наполняется сейчас, мигает. Носик слева, поэтому набранные
+    // жмутся к правому краю, а наполняемое - первое слева от них.
+    let blink_idx = -1;
+    if (chg && pct < 100) {
+        let full = pct >= 75 ? 3 : (pct >= 50 ? 2 : (pct >= 25 ? 1 : 0));
+        sections = full + 1;      // цвет - по наполняемому делению
+        blink_idx = 3 - full;
     }
+
     let sc = mono ?? (sections == 1 ? C.red : (sections == 2 ? C.yellow : C.green));
     let pitch = int((w - 4) / 4);
     let ec = empty ?? C.dim;
-    // Носик у нас слева (значок развёрнут на 180), поэтому заполненные
-    // ячейки жмутся к правому краю, а пустеет батарейка слева направо.
     for (let i = 0; i < 4; i++) {
         let on = i >= 4 - sections;
-        // Мигает деление у носика: носик слева, значит «верхнее» - это i=0.
-        if (blink_last && i == 0) on = false;
+        if (i == blink_idx && (anim_phase % 2) == 1) on = false;
         lcd_rect(x + 3 + i * pitch, y + 2, pitch - 2, h - 4, on ? sc : ec);
     }
 }
@@ -1036,18 +1070,66 @@ function fmt_bytes(b) {
     return sprintf("%d", b);
 }
 
+// Длительность словами, без сокращений и без «0ч»: «58 минут»,
+// «1 час 20 минут». acc - винительный падеж для «за 21 минуту».
+function plural_ru(n, one, few, many) {
+    let d = n % 100;
+    if (d >= 11 && d <= 19) return many;
+    d = n % 10;
+    if (d == 1) return one;
+    if (d >= 2 && d <= 4) return few;
+    return many;
+}
+
+function fmt_dur(min, acc) {
+    let h = int(min / 60), m = min % 60;
+    let parts = [];
+    if (lang() == "ru") {
+        if (h > 0)
+            push(parts, sprintf("%d %s", h, plural_ru(h, "час", "часа", "часов")));
+        if (m > 0 || h == 0)
+            push(parts, sprintf("%d %s", m,
+                 plural_ru(m, acc ? "минуту" : "минута", "минуты", "минут")));
+    } else {
+        if (h > 0)
+            push(parts, sprintf("%d %s", h, h == 1 ? "hour" : "hours"));
+        if (m > 0 || h == 0)
+            push(parts, sprintf("%d %s", m, m == 1 ? "minute" : "minutes"));
+    }
+    return join(" ", parts);
+}
+
+// 5gmodem отдаёт время связи как «0d, 00:17:15». Нулевые старшие разряды
+// не показываем, дни пишем словами: «28:52», «3:05:12», «2 дня, 3:05:12».
+function conn_fmt(v) {
+    v = trim(v ?? "");
+    if (v == "" || v == "-") return "";
+    let m = match(v, /^([0-9]+)d,\s*([0-9]+):([0-9]+):([0-9]+)/);
+    if (!m) return v;
+    let d = +m[1], hh = +m[2], mm = +m[3], ss = +m[4];
+    let clock = hh > 0 ? sprintf("%d:%02d:%02d", hh, mm, ss)
+                       : sprintf("%d:%02d", mm, ss);
+    if (d > 0) {
+        let w = lang() == "ru" ? plural_ru(d, "день", "дня", "дней")
+                               : (d == 1 ? "day" : "days");
+        return sprintf("%d %s, %s", d, w, clock);
+    }
+    return clock;
+}
+
 function fmt_uptime(s) {
     s = int(+(s ?? 0));
     let d = int(s / 86400);
     let h = int((s % 86400) / 3600);
     let m = int((s % 3600) / 60);
     if (lang() == "ru") {
-        if (d > 0) return sprintf("%dд %dч %dм", d, h, m);
+        if (d > 0) return sprintf("%d %s %dч %dм", d,
+                                  plural_ru(d, "день", "дня", "дней"), h, m);
         if (h > 0) return sprintf("%dч %dм", h, m);
         return sprintf("%dм", m);
     }
-    if (d > 0) return sprintf("%dd%dh%dm", d, h, m);
-    if (h > 0) return sprintf("%dh%dm", h, m);
+    if (d > 0) return sprintf("%d %s %dh %dm", d, d == 1 ? "day" : "days", h, m);
+    if (h > 0) return sprintf("%dh %dm", h, m);
     return sprintf("%dm", m);
 }
 
@@ -1163,6 +1245,29 @@ function draw_rot_icon(ox, oy, col) {
         lcd_rect(ox + 8 + k, oy + 0 + k, 7 - 2 * k, 1, col);       // верх, остриём вниз
         lcd_rect(ox + k, oy + 14 - k, 7 - 2 * k, 1, col);          // низ, остриём вверх
     }
+}
+
+// Элементы заставки: что показывать. По умолчанию всё включено.
+function svflags() {
+    let g = function(k, dflt) {
+        let v = ucur ? ucur.get("almond3s", "display", k) : null;
+        return (v == null || v == "") ? dflt : (v == "1");
+    };
+    let sz = ucur ? ucur.get("almond3s", "display", "clock_size") : null;
+    return {
+        date:   g("sv_date", true),
+        sig:    g("sv_signal", true),
+        batt:   g("sv_batt", true),
+        env:    g("sv_env", true),
+        wander: g("sv_wander", false),
+        size:   (sz == "s" || sz == "l") ? sz : "m",
+    };
+}
+
+function svflag_set(key, v) {
+    if (!ucur) return;
+    ucur.set("almond3s", "display", key, v);
+    ucur.commit("almond3s");
 }
 
 function night_cfg() {
@@ -1368,12 +1473,14 @@ function draw_status_row(y, o) {
     let mono = o?.mono;            /* ночной цвет или null */
     let empty = o?.empty ?? C.dim;
 
-    draw_sigbars(4, y, sig.bars, mono ?? sig.color, empty);
-
-    let rat = tcut(rat_label(d?.lte?.mode ?? ""), 4);
+    if (!o?.no_sig) {
+        draw_sigbars(4, y, sig.bars, mono ?? sig.color, empty);
+        let rat = tcut(rat_label(d?.lte?.mode ?? ""), 4);
+        if (rat != "" && rat != "-")
+            lcd_text(50, y + 1, rat, mono ?? C.cyan, bg, 2);
+    }
+    let rat = o?.no_sig ? "" : tcut(rat_label(d?.lte?.mode ?? ""), 4);
     let rat_x = 50;
-    if (rat != "" && rat != "-")
-        lcd_text(rat_x, y + 1, rat, mono ?? C.cyan, bg, 2);
 
     let tstr = clock_str();
     let t_x = int((LCD_W - tlen(tstr) * 12) / 2);
@@ -1381,8 +1488,9 @@ function draw_status_row(y, o) {
     // Конвертик встаёт сразу за ярлыком технологии, поэтому его место зависит
     // от длины ярлыка: «4G» короче, чем «4G+» при агрегации. К часам ближе чем
     // на 8 пикселей не подходит.
-    if (int(d?.sms_new ?? 0) > 0) {
-        let ex = rat_x + (rat == "" || rat == "-" ? 0 : tlen(rat) * 12 + 8);
+    if (!o?.no_env && int(d?.sms_new ?? 0) > 0) {
+        let ex = (o?.no_sig ? 4 : rat_x) +
+                 (rat == "" || rat == "-" ? 0 : tlen(rat) * 12 + 8);
         if (o?.time && ex + ENV_W + 8 > t_x) ex = t_x - ENV_W - 8;
         draw_env_icon(ex, y, 1, mono ? "#0A2A16" : null, mono);
     }
@@ -1398,10 +1506,14 @@ function draw_status_row(y, o) {
 
     if (o?.pct) {
         let bstr = (bat?.no_battery || bpct < 0) ? "" : sprintf("%d", bpct);
-        lcd_text(bat_x - 6 - tlen(bstr) * 12, y + 1, bstr,
-                 o?.time_color ?? C.white, bg, 2);
+        // Последние проценты - красным: предупреждение важнее стиля страницы,
+        // поэтому цвет перебивает и ночную заставку.
+        let pcol = (bpct <= 5 && !bchg && !bat?.no_battery)
+                 ? C.red : (o?.time_color ?? C.white);
+        lcd_text(bat_x - 6 - tlen(bstr) * 12, y + 1, bstr, pcol, bg, 2);
     }
-    draw_batt_icon(bat_x, y, b_w, b_h, bg, bpct, bat?.no_battery, mono, bchg, empty);
+    if (!o?.no_batt)
+        draw_batt_icon(bat_x, y, b_w, b_h, bg, bpct, bat?.no_battery, mono, bchg, empty);
 }
 
 function draw_header(title, bg_c) {
@@ -1741,6 +1853,150 @@ function netpri_primary() {
     return l[0].label ?? l[0].iface ?? "";
 }
 
+// === Wi-Fi STA: скан, выбор сети, подключение ===
+//
+// Готовый STA-интерфейс уже есть (его настроил 5gmodem как аплинк) - меняем
+// в нём ssid/key, а не создаём с нуля. Скан штатный: ubus iwinfo scan. Он
+// длится секунды, поэтому запускаем фоном в файл и опрашиваем, а не зовём
+// синхронно - иначе интерфейс замрёт.
+
+// Состояние мастера подключения к Wi-Fi. Объявлено до всех рисующих
+// функций: в ucode функция не видит того, что объявлено ниже неё.
+let sta = { nets: null, sel: -1, pass: "", shift: false, layer: 0, band: 5 };
+// Сеть, которую только что попросили подключить: рисуется пунктирной
+// карточкой, пока netpri не подхватит реальный аплинк.
+let sta_pending = { ssid: null, since: 0 };
+
+let SCAN_OUT = "/tmp/almond3s_scan.json";
+let SCAN_DONE = "/tmp/.almond3s_scan_done";
+let STA_SECTION = "wifinet2";   // секция STA в /etc/config/wireless
+
+// Беспроводные интерфейсы для скана: по одному «живому» на каждый phy.
+function wifi_ifaces() {
+    let out = [];
+    if (!uconn) return out;
+    let st_ = uconn.call("network.wireless", "status", {});
+    if (!st_) return out;
+    let seen = {};
+    for (let dev in st_) {
+        let ii = st_[dev]?.interfaces;
+        if (type(ii) != "array") continue;
+        for (let itf in ii) {
+            let ifn = itf?.ifname;
+            if (ifn && !exists(seen, dev)) { seen[dev] = true; push(out, ifn); }
+        }
+    }
+    return out;
+}
+
+// Радио для диапазона ищем по band в конфиге, а не по имени: на разных
+// платах MT7621 radio0 бывает и 5, и 2.4 ГГц - порядок зависит от DTS.
+function radio_for_band(band) {
+    let want = band == 5 ? "5g" : "2g";
+    let dev = null;
+    if (ucur)
+        ucur.foreach("wireless", "wifi-device", function(sec) {
+            if (sec.band == want && dev == null) dev = sec[".name"];
+        });
+    return dev ?? (band == 5 ? "radio0" : "radio1");
+}
+
+function wifi_iface_for(band) {
+    if (!uconn) return null;
+    let st_ = uconn.call("network.wireless", "status", {});
+    let dev = radio_for_band(band);
+    let ii = st_?.[dev]?.interfaces;
+    if (type(ii) != "array" || length(ii) == 0) return null;
+    return ii[0]?.ifname;
+}
+
+function wifi_scan_start(band) {
+    fs.unlink(SCAN_DONE);
+    fs.unlink(SCAN_OUT);
+    let one = band ? wifi_iface_for(band) : null;
+    let ifs = one ? [ one ] : wifi_ifaces();
+    if (length(ifs) == 0) return;
+    // Оборачиваем сканы каждого радио в валидный JSON-массив, чтобы прочитать
+    // одним json(). Просто конкатенация двух корней даёт невалидный JSON.
+    let cmd = sprintf("( echo '{\"scans\":[' > %s.t; ", SCAN_OUT);
+    for (let i = 0; i < length(ifs); i++) {
+        if (i > 0) cmd += sprintf("echo ',' >> %s.t; ", SCAN_OUT);
+        cmd += sprintf("ubus call iwinfo scan '{\"device\":\"%s\"}' >> %s.t 2>/dev/null; ",
+                       ifs[i], SCAN_OUT);
+    }
+    cmd += sprintf("echo ']}' >> %s.t; mv %s.t %s; touch %s ) &",
+                   SCAN_OUT, SCAN_OUT, SCAN_OUT, SCAN_DONE);
+    system(cmd);
+}
+
+// Читает результат скана, если он готов. Возвращает null пока идёт скан,
+// иначе массив сетей, отсортированный по сигналу, без дублей и без своей сети.
+function wifi_scan_read() {
+    if (!fs.stat(SCAN_DONE)) return null;
+    let raw = fs.readfile(SCAN_OUT);
+    if (!raw) return [];
+    let my = ucur ? (ucur.get("wireless", "default_radio0", "ssid") ?? "") : "";
+    let best = {};
+    let doc;
+    try { doc = json(raw); } catch (e) { return []; }
+    let scans = doc?.scans;
+    if (type(scans) != "array") return [];
+    for (let sc in scans) {
+        let res = sc?.results;
+        if (type(res) != "array") continue;
+        for (let n in res) {
+            let ss = n?.ssid ?? "";
+            if (ss == "" || ss == my) continue;
+            let sig = int(+(n?.signal ?? -100));
+            if (!exists(best, ss) || sig > best[ss].signal)
+                best[ss] = { ssid: ss, signal: sig,
+                             band: int(+(n?.band ?? 2)),
+                             enc: (n?.encryption?.enabled) ? 1 : 0 };
+        }
+    }
+    let arr = [];
+    for (let k in best) push(arr, best[k]);
+    // сортировка по сигналу убыванием
+    for (let i = 0; i < length(arr); i++)
+        for (let jx = i + 1; jx < length(arr); jx++)
+            if (arr[jx].signal > arr[i].signal) {
+                let t = arr[i]; arr[i] = arr[jx]; arr[jx] = t;
+            }
+    return arr;
+}
+
+// Применяет STA-сеть: пишет ssid/key/шифрование в готовую секцию, ставит
+// нужное радио по диапазону и перезагружает сеть.
+function sta_apply(ssid, key, band) {
+    if (!ucur) return;
+    let dev = radio_for_band(band);
+    // Секции может не быть: на свежей прошивке STA никто не создавал.
+    // uci set в несуществующую секцию молча теряется - создаём сами.
+    if (ucur.get("wireless", STA_SECTION) == null)
+        ucur.set("wireless", STA_SECTION, "wifi-iface");
+    // Интерфейс wwan для STA: без него сеть поднимется, но адреса не получит.
+    if (ucur.get("network", "wwan") == null) {
+        ucur.set("network", "wwan", "interface");
+        ucur.set("network", "wwan", "proto", "dhcp");
+        ucur.set("network", "wwan", "metric", "100");
+        ucur.commit("network");
+    }
+    ucur.set("wireless", STA_SECTION, "device", dev);
+    ucur.set("wireless", STA_SECTION, "ssid", ssid);
+    ucur.set("wireless", STA_SECTION, "mode", "sta");
+    ucur.set("wireless", STA_SECTION, "network", "wwan");
+    if (key != "") {
+        ucur.set("wireless", STA_SECTION, "encryption", "psk2");
+        ucur.set("wireless", STA_SECTION, "key", key);
+    } else {
+        ucur.set("wireless", STA_SECTION, "encryption", "none");
+        ucur.delete("wireless", STA_SECTION, "key");
+    }
+    ucur.set("wireless", STA_SECTION, "disabled", "0");
+    ucur.commit("wireless");
+    system("ubus call network reload >/dev/null 2>&1 &");
+}
+
 function netpri_btn(i) {
     return { x: 10, y: 32 + i * 44, w: 300, h: 40 };
 }
@@ -1787,7 +2043,7 @@ function draw_dashboard() {
 
     // Карточка на аплинк: слева цветная полоска (зелёная у основного), имя,
     // тип, справа метрика и адрес. Тап делает аплинк основным.
-    for (let i = 0; i < length(l) && i < 4; i++) {
+    for (let i = 0; i < length(l) && i < 3; i++) {
         let e = l[i], b = netpri_btn(i);
         let up = (e.health ?? "") == "up";
         let col = i == 0 ? C.green : (up ? C.cyan : C.dim);
@@ -1797,13 +2053,61 @@ function draw_dashboard() {
                  up ? C.white : C.gray, C.widget, 2);
         lcd_text(b.x + 12, b.y + 25, tcut(e.sub ?? e.type ?? "", 24),
                  C.gray, C.widget, 1);
+        // У Wi-Fi-аплинка справа зона «забыть сеть»: минус за разделителем.
+        // Отступ метрики и адреса одинаковый у всех карточек, чтобы колонка
+        // не прыгала между строками.
+        let wifi_card = (e.type ?? "") == "wifi";
+        let roff = 34;
+        if (wifi_card) {
+            lcd_rect(b.x + b.w - 34, b.y + 4, 1, b.h - 8, C.border);
+            lcd_text(b.x + b.w - 24, b.y + 10, "-", C.red, C.widget, 3);
+        }
         let ip = e.ip ?? "";
         if (ip != "")
-            lcd_text(b.x + b.w - 10 - tlen(ip) * 6, b.y + 25, ip, C.green, C.widget, 1);
+            lcd_text(b.x + b.w - 10 - roff - tlen(ip) * 6, b.y + 25, ip, C.green, C.widget, 1);
         let m = sprintf("%d", int(+(e.metric ?? 0)));
-        lcd_text(b.x + b.w - 10 - tlen(m) * 12, b.y + 5, m,
+        lcd_text(b.x + b.w - 10 - roff - tlen(m) * 12, b.y + 5, m,
                  i == 0 ? C.green : C.gray, C.widget, 2);
     }
+
+    // Пунктирная карточка ожидания: сеть подключается, но в netpri ещё не
+    // появилась. Гаснет, когда её ssid виден среди аплинков, или через 20 с.
+    if (sta_pending.ssid != null) {
+        let seen = false;
+        if (type(l) == "array")
+            for (let e in l)
+                if ((e.label ?? "") == sta_pending.ssid || (e.sub ?? "") == sta_pending.ssid)
+                    seen = true;
+        if (seen || (time() - sta_pending.since) > 20) {
+            sta_pending.ssid = null;
+        } else {
+            let cnt = (type(l) == "array") ? (length(l) < 3 ? length(l) : 3) : 0;
+            let py = 32 + cnt * 44;
+            if (py + 44 < BACK_Y - 36) {
+                // пунктирная рамка
+                for (let dx = 0; dx < 300; dx += 6) {
+                    lcd_rect(10 + dx, py, 3, 1, C.dim);
+                    lcd_rect(10 + dx, py + 39, 3, 1, C.dim);
+                }
+                for (let dy = 0; dy < 40; dy += 6) {
+                    lcd_rect(10, py + dy, 1, 3, C.dim);
+                    lcd_rect(309, py + dy, 1, 3, C.dim);
+                }
+                lcd_text(22, py + 6, tcut(sta_pending.ssid, 18), C.gray, C.bg, 2);
+                lcd_text(22, py + 26, tr("connecting..."), C.dim, C.bg, 1);
+            }
+        }
+    }
+
+    // Две кнопки скана - по диапазону, на фиксированном месте над «Назад»,
+    // чтобы их положение не зависело от числа аплинков.
+    let ny = BACK_Y - 36;
+    lcd_rect(10, ny, 145, 30, C.widget);
+    lcd_rect(10, ny, 4, 30, C.accent);
+    lcd_text(24, ny + 11, "+ Wi-Fi 2.4GHz", C.accent, C.widget, 1);
+    lcd_rect(165, ny, 145, 30, C.widget);
+    lcd_rect(165, ny, 4, 30, C.accent);
+    lcd_text(185, ny + 11, "+ Wi-Fi 5GHz", C.accent, C.widget, 1);
 
     draw_back();
     lcd_flush();
@@ -1875,7 +2179,7 @@ function sms_refresh() {
 // на «Входящих» в 5gmodem. Буквенные имена вроде «T-Mob» phone_fmt вернёт как
 // есть, поэтому проверять тип отправителя отдельно не нужно.
 function sms_from(raw) {
-    let f = phone_short(raw);
+    let f = phone_fmt(raw);
     return f != "" ? f : (raw ?? "?");
 }
 
@@ -2121,13 +2425,18 @@ function draw_menu() {
 
     } else {
         draw_btn(1, tr("Sound"), tr("buzzer test"), C.white, C.gray);
+        let bt = st.data?.battery;
+        let bp = int(+(bt?.percent ?? -1));
+        draw_btn(2, tr("Battery"), bp >= 0 ? sprintf("%d%%", bp) : "--",
+                 C.white, bt?.charging ? C.green : C.gray);
+        draw_btn(3, "Zigbee", "EM357", C.white, C.gray);
         // Сброс модема - оранжевая, в тон трём палочкам сигнала: действие
         // не разрушительное, но и не рядовое.
-        draw_btn(2, tr("Modem Reset"), tr("LTE restart"), C.white, "#E8C27A", "#6B4A0F");
-        let mb = btn_pos(2);
+        draw_btn(4, tr("Modem Reset"), tr("LTE restart"), C.white, "#E8C27A", "#6B4A0F");
+        let mb = btn_pos(4);
         lcd_rect(mb.x, mb.y, mb.w, 2, C.yellow);
-        draw_btn(3, tr("Reboot"), tr("System"), C.white, "#F0B0B8", C.back);
-        let rb = btn_pos(3);
+        draw_btn(5, tr("Reboot"), tr("System"), C.white, "#F0B0B8", C.back);
+        let rb = btn_pos(5);
         lcd_rect(rb.x, rb.y, rb.w, 2, "#D32F2F");
 
         // 6: <<< BACK. Ровно одна ячейка: растянутая на две выглядела единой
@@ -2341,6 +2650,255 @@ function draw_sound_page() {
         lcd_text(b.x + int((b.w - tlen(t) * 12) / 2), b.y + 12, t, C.white, C.widget, 2);
     }
     lcd_text(10, 214, tr("Factory tones and volume from stock firmware"), C.dim, C.bg, 1);
+    draw_back();
+    lcd_flush();
+}
+
+let SAVERCFG_ROWS = [
+    { key: "sv_date",   label: "Date" },
+    { key: "sv_signal", label: "Signal level" },
+    { key: "sv_batt",   label: "Battery" },
+    { key: "sv_env",    label: "SMS envelope" },
+    { key: "sv_wander", label: "Clock wander" },
+];
+
+function savercfg_row(i) {
+    return { x: 10, y: 30 + i * 30, w: 300, h: 26 };
+}
+
+function savercfg_size_btn(i) {
+    return { x: 118 + i * 68, y: 30 + 5 * 30, w: 60, h: 26 };
+}
+
+// Показываем только то, что в выбранном стиле вообще есть: у «строки» нет
+// даты, блуждание и размер - только у «часов».
+function savercfg_rows_for_style() {
+    let stl = saver_style();
+    let rows = [];
+    for (let r in SAVERCFG_ROWS) {
+        if (r.key == "sv_date" && stl == "line") continue;
+        if (r.key == "sv_wander" && stl != "clock") continue;
+        push(rows, r);
+    }
+    return rows;
+}
+
+function draw_savercfg_page() {
+    lcd_clear(C.bg);
+    draw_header(sprintf("%s: %s", tr("Screensaver"), style_label(saver_style())));
+    let fl = svflags();
+    let v = { sv_date: fl.date, sv_signal: fl.sig, sv_batt: fl.batt,
+              sv_env: fl.env, sv_wander: fl.wander };
+    let rows = savercfg_rows_for_style();
+    for (let i = 0; i < length(rows); i++) {
+        let b = savercfg_row(i);
+        let on = v[rows[i].key];
+        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+        lcd_rect(b.x, b.y, 4, b.h, on ? C.green : C.dim);
+        lcd_text(b.x + 12, b.y + 7, tr(rows[i].label), C.white, C.widget, 1);
+        lcd_text(b.x + b.w - 40, b.y + 7, on ? tr("on") : tr("off"),
+                 on ? C.green : C.gray, C.widget, 1);
+    }
+    if (saver_style() == "clock") {
+        let yb = 30 + length(rows) * 30;
+        lcd_text(10, yb + 7, tr("Clock size"), C.gray, C.bg, 1);
+        let names = [ "S", "M", "L" ], keys = [ "s", "m", "l" ];
+        for (let i = 0; i < 3; i++) {
+            let b = savercfg_size_btn(i), sel = fl.size == keys[i];
+            b.y = yb;
+            lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+            lcd_rect(b.x, b.y, 3, b.h, sel ? C.green : C.border);
+            lcd_text(b.x + int(b.w / 2) - 6, b.y + 5, names[i],
+                     sel ? C.white : C.gray, C.widget, 2);
+        }
+    }
+    draw_back();
+    lcd_flush();
+}
+
+
+function stascan_row(i) {
+    return { x: 10, y: 30 + i * 30, w: 300, h: 26 };
+}
+
+function draw_stascan_page() {
+    lcd_clear(C.bg);
+    draw_header(sprintf("%s %s", tr("Find network"), sta.band == 5 ? "5GHz" : "2.4GHz"));
+
+    let nets = sta.nets;
+    if (nets == null) {
+        lcd_text(20, 100, tr("Scanning..."), C.gray, C.bg, 2);
+        draw_back();
+        lcd_flush();
+        return;
+    }
+    if (length(nets) == 0) {
+        lcd_text(20, 100, tr("No networks found"), C.dim, C.bg, 2);
+        lcd_text(20, 124, tr("Tap BACK and retry"), C.dim, C.bg, 1);
+        draw_back();
+        lcd_flush();
+        return;
+    }
+    // До шести сетей на экран, самые сильные сверху.
+    for (let i = 0; i < length(nets) && i < 6; i++) {
+        let n = nets[i], b = stascan_row(i);
+        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+        let bars = n.signal > -55 ? 3 : (n.signal > -70 ? 2 : 1);
+        let bc = bars == 3 ? C.green : (bars == 2 ? C.yellow : C.red);
+        lcd_rect(b.x, b.y, 4, b.h, bc);
+        lcd_text(b.x + 12, b.y + 7, tcut(n.ssid, 22), C.white, C.widget, 1);
+        let tag = sprintf("%dG%s", n.band, n.enc ? " *" : "");
+        lcd_text(b.x + b.w - 12 - tlen(tag) * 6, b.y + 7, tag,
+                 n.enc ? C.gray : C.cyan, C.widget, 1);
+    }
+    draw_back();
+    lcd_flush();
+}
+
+// QWERTY: три слоя (буквы/цифры/символы), Shift для регистра. Пароли Wi-Fi
+// бывают любыми, поэтому нужен полный набор.
+let KBD = [
+    [ "qwertyuiop", "asdfghjkl", "zxcvbnm" ],
+    [ "1234567890", "-_.@!#%&*", "+=/:;,?~" ],
+];
+
+function kbd_key(r, c, cols) {
+    let kw = int((LCD_W - 8) / 10);
+    let x = 4 + c * kw;
+    let y = 92 + r * 28;
+    return { x: x, y: y, w: kw - 2, h: 26 };
+}
+
+function draw_kbd_page() {
+    lcd_clear(C.bg);
+    let n = sta.sel >= 0 ? sta.nets[sta.sel] : null;
+    draw_header(tcut(n ? n.ssid : tr("Password"), 24));
+
+    // Поле ввода: показываем пароль точками, последний символ открыт.
+    lcd_rect(10, 30, 300, 30, C.widget);
+    let shown = "";
+    let pl = length(sta.pass);
+    for (let i = 0; i < pl; i++)
+        shown += (i == pl - 1) ? substr(sta.pass, i, 1) : "*";
+    lcd_text(18, 38, shown != "" ? shown : tr("enter password"),
+             shown != "" ? C.white : C.dim, C.widget, 2);
+
+    let rows = KBD[sta.layer];
+    for (let r = 0; r < length(rows); r++) {
+        let chars = rows[r];
+        let ncols = length(chars);
+        let off = int((10 - ncols) / 2);
+        for (let c = 0; c < ncols; c++) {
+            let b = kbd_key(r, off + c, ncols);
+            let ch = substr(chars, c, 1);
+            if (sta.shift && sta.layer == 0) ch = uc(ch);
+            lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+            lcd_text(b.x + int(b.w / 2) - 3, b.y + 6, ch, C.white, C.widget, 2);
+        }
+    }
+    // Нижний ряд: Shift/слой, пробел, стереть, готово.
+    let by = 92 + 3 * 28;
+    let specs = [
+        { l: sta.layer == 0 ? "123" : "abc", k: "layer", w: 44, c: C.cyan },
+        { l: sta.shift ? "ABC" : "abc", k: "shift", w: 44, c: sta.shift ? C.green : C.gray },
+        { l: tr("space"), k: "space", w: 96, c: C.gray },
+        { l: "<-", k: "del", w: 44, c: C.yellow },
+        { l: "OK", k: "ok", w: 60, c: C.green },
+    ];
+    let sx = 4;
+    for (let i = 0; i < length(specs); i++) {
+        let sp = specs[i];
+        lcd_rect(sx, by, sp.w, 26, C.widget);
+        lcd_rect(sx, by, 3, 26, sp.c);
+        lcd_text(sx + 8, by + 6, sp.l, C.white, C.widget, 1);
+        sp.x = sx;
+        sx += sp.w + 2;
+    }
+    sta.specs = specs;
+    sta.spec_y = by;
+    lcd_flush();
+}
+
+function draw_battery_page() {
+    let bat = st.data?.battery ?? {};
+    lcd_clear(C.bg);
+    draw_header(tr("Battery"));
+
+    let cx = 10, cw = 300;
+    let pct = int(+(bat?.percent ?? -1));
+    let adc = int(+(bat?.adc ?? 0));
+    let chg = bat?.charging && !bat?.no_battery;
+    let full = chg && pct >= 100;
+    // Состояние: уровень крупно слева, статус и АЦП по правому краю.
+    let y1 = 28;
+    lcd_rect(cx, y1, cw, 50, C.widget);
+    let pcol = pct < 0 ? C.dim : (pct <= 5 && !chg ? C.red : (pct <= 25 ? C.yellow : C.green));
+    lcd_rect(cx, y1, 4, 50, pcol);
+    lcd_text(cx + 12, y1 + 10, pct < 0 ? "--" : sprintf("%d%%", pct), pcol, C.widget, 3);
+    let st_s = bat?.no_battery ? tr("Battery not installed")
+             : (full ? tr("Plugged in") : (chg ? tr("Charging") : tr("Battery")));
+    lcd_text(cx + cw - 12 - tlen(st_s) * 6, y1 + 10, st_s, C.white, C.widget, 1);
+    let adc_s = sprintf(tr("ADC %d"), adc);
+    lcd_text(cx + cw - 12 - tlen(adc_s) * 6, y1 + 26, adc_s, C.gray, C.widget, 1);
+
+    // Прогноз: слева подпись и время, справа расход.
+    let y2 = y1 + 56;
+    lcd_rect(cx, y2, cw, 40, C.widget);
+    lcd_rect(cx, y2, 4, 40, C.cyan);
+    let cap = full ? tr("charge complete")
+            : (chg ? tr("To full charge") : tr("Time left"));
+    let rmin = int(+(bat?.remain_min ?? -1));
+    let tstr = full ? "" : (rmin > 0 ? fmt_dur(rmin, false) : tr("estimating"));
+    lcd_text(cx + 12, y2 + 8, cap, C.white, C.widget, 1);
+    if (tstr != "")
+        lcd_text(cx + 12, y2 + 22, tstr, C.gray, C.widget, 1);
+    let drain = +(bat?.drain_rate ?? 0);
+    let d1 = tr("drain");
+    let d2 = drain > 0 ? sprintf("%.1f %s", drain, tr("ADC/min")) : tr("measuring");
+    lcd_text(cx + cw - 12 - tlen(d1) * 6, y2 + 8, d1, C.white, C.widget, 1);
+    lcd_text(cx + cw - 12 - tlen(d2) * 6, y2 + 22, d2, C.gray, C.widget, 1);
+
+    // Пределы этой платы, измеренные на живых циклах.
+    let y3 = y2 + 46;
+    lcd_rect(cx, y3, cw, 52, C.widget);
+    lcd_rect(cx, y3, 4, 52, C.gray);
+    lcd_text(cx + 12, y3 + 6, tr("MEASURED LIMITS"), C.gray, C.widget, 1);
+    lcd_text(cx + 12, y3 + 20, sprintf(tr("shutdown at %d ADC"), int(+(bat?.cutoff ?? 512))), C.white, C.widget, 1);
+    let f_s = sprintf(tr("full %d ADC"), 726);
+    lcd_text(cx + cw - 12 - tlen(f_s) * 6, y3 + 20, f_s, C.white, C.widget, 1);
+    lcd_text(cx + 12, y3 + 34, sprintf(tr("discharges in %s"), fmt_dur(263, true)), C.white, C.widget, 1);
+
+    lcd_text(cx + 2, y3 + 62, tr("Cycle stats will appear here"), C.dim, C.bg, 1);
+
+    draw_back();
+    lcd_flush();
+}
+
+function draw_zigbee_page() {
+    lcd_clear(C.bg);
+    draw_header("Zigbee");
+
+    let cx = 10, cw = 300;
+    let y1 = 28;
+    lcd_rect(cx, y1, cw, 50, C.widget);
+    lcd_rect(cx, y1, 4, 50, C.accent);
+    lcd_text(cx + 12, y1 + 6, "Silicon Labs EM357", C.white, C.widget, 1);
+    lcd_text(cx + 12, y1 + 20, "EZSP v4, EmberZNet 5.1.0", C.gray, C.widget, 1);
+    lcd_text(cx + 12, y1 + 34, "/dev/ttyS2, 57600 8N1", C.gray, C.widget, 1);
+
+    let y2 = y1 + 56;
+    lcd_rect(cx, y2, cw, 40, C.widget);
+    lcd_rect(cx, y2, 4, 40, C.yellow);
+    lcd_text(cx + 12, y2 + 8, tr("Not joined to any network"), C.white, C.widget, 1);
+    lcd_text(cx + 12, y2 + 22, tr("Modern software needs EZSP 8+"), C.gray, C.widget, 1);
+
+    let y3 = y2 + 46;
+    lcd_rect(cx, y3, cw, 52, C.widget);
+    lcd_rect(cx, y3, 4, 52, C.gray);
+    lcd_text(cx + 12, y3 + 6, tr("UPGRADE PATH"), C.gray, C.widget, 1);
+    lcd_text(cx + 12, y3 + 20, tr("Flash EmberZNet 6.7.10 over SWD"), C.white, C.widget, 1);
+    lcd_text(cx + 12, y3 + 34, tr("header J5705, see ZIGBEE.md"), C.gray, C.widget, 1);
+
     draw_back();
     lcd_flush();
 }
@@ -2667,8 +3225,9 @@ function draw_wifi_page() {
         let key_2g = ucur.get("wireless", "default_radio1", "key") ?? "N/A";
         let disabled_2g = wifi_is_disabled("radio1", "default_radio1");
         
-        lcd_text(cx + 10, y1 + 20, sprintf("SSID: %s", ssid_2g), C.white, C.widget, 2);
-        lcd_text(cx + 10, y1 + 38, sprintf(tr("Pass: %s"), key_2g), C.accent, C.widget, 2);
+        // Пароль на экране не показываем: длинный ключ не помещается, а
+        // для подключения есть QR - он и есть пароль.
+        lcd_text(cx + 10, y1 + 22, tcut(ssid_2g, 20), C.white, C.widget, 2);
         
         // Count clients on 2.4GHz
         let clients_2g = 0;
@@ -2678,11 +3237,11 @@ function draw_wifi_page() {
                 if (cl.band == "2G" || cl.band == "2.4G") clients_2g++;
             }
         }
-        lcd_text(cx + 10, y1 + 56, sprintf(tr("Clients: %d"), clients_2g), C.cyan, C.widget, 2);
+        lcd_text(cx + 10, y1 + 48, sprintf(tr("Clients: %d"), clients_2g), C.cyan, C.widget, 2);
         
-        let status_2g = disabled_2g ? "OFF" : "ON";
+        let status_2g = disabled_2g ? tr("OFF") : tr("ON");
         let status_c_2g = disabled_2g ? C.gray : C.green;
-        lcd_text(cx + 160, y1 + 56, status_2g, status_c_2g, C.widget, 2);
+        lcd_text(cx + 160, y1 + 48, status_2g, status_c_2g, C.widget, 2);
         if (!disabled_2g) {
             let qb = qr_box(y1);
             draw_qr(wifi_qr_rows(ssid_2g, key_2g), qb.x + 2, qb.y + 2, 2, "#000000", "#FFFFFF");
@@ -2701,8 +3260,7 @@ function draw_wifi_page() {
         let key_5g = ucur.get("wireless", "default_radio0", "key") ?? "N/A";
         let disabled_5g = wifi_is_disabled("radio0", "default_radio0");
         
-        lcd_text(cx + 10, y2 + 20, sprintf("SSID: %s", ssid_5g), C.white, C.widget, 2);
-        lcd_text(cx + 10, y2 + 38, sprintf(tr("Pass: %s"), key_5g), C.accent, C.widget, 2);
+        lcd_text(cx + 10, y2 + 22, tcut(ssid_5g, 20), C.white, C.widget, 2);
         
         // Count clients on 5GHz
         let clients_5g = 0;
@@ -2712,11 +3270,11 @@ function draw_wifi_page() {
                 if (cl.band == "5G" || cl.band == "5GHz") clients_5g++;
             }
         }
-        lcd_text(cx + 10, y2 + 56, sprintf(tr("Clients: %d"), clients_5g), C.cyan, C.widget, 2);
+        lcd_text(cx + 10, y2 + 48, sprintf(tr("Clients: %d"), clients_5g), C.cyan, C.widget, 2);
         
-        let status_5g = disabled_5g ? "OFF" : "ON";
+        let status_5g = disabled_5g ? tr("OFF") : tr("ON");
         let status_c_5g = disabled_5g ? C.gray : C.green;
-        lcd_text(cx + 160, y2 + 56, status_5g, status_c_5g, C.widget, 2);
+        lcd_text(cx + 160, y2 + 48, status_5g, status_c_5g, C.widget, 2);
         if (!disabled_5g) {
             let qb = qr_box(y2);
             draw_qr(wifi_qr_rows(ssid_5g, key_5g), qb.x + 2, qb.y + 2, 2, "#000000", "#FFFFFF");
@@ -2761,6 +3319,13 @@ function draw_info_page() {
     lcd_text(cx + 10, y1 + 6, tr("SYSTEM"), C.gray, C.widget, 1);
     let hw = uconn ? (uconn.call("system", "board", {})?.model ?? "") : "";
     lcd_text(cx + 10, y1 + 20, hw != "" ? hw : "?", C.white, C.widget, 1);
+    // Заряд одной строкой: подробности на странице «Батарея», но общий
+    // взгляд на роутер без процентов был бы слепым.
+    if (!bat?.no_battery && bpct >= 0) {
+        let b1 = sprintf("%d%%", bpct);   // зарядку выдаёт зелёный цвет: молнии в шрифте нет
+        let b1c = bpct <= 5 && !bat?.charging ? C.red : (bat?.charging ? C.green : C.white);
+        lcd_text(cx + cw - 10 - tlen(b1) * 6, y1 + 20, b1, b1c, C.widget, 1);
+    }
     lcd_text(cx + 10, y1 + 32, sprintf(tr("Uptime %s"), fmt_uptime(d?.uptime)), C.white, C.widget, 1);
 
     // Свободную память прижимаем к правому краю карточки: строка длинная,
@@ -2781,36 +3346,31 @@ function draw_info_page() {
     // Card 2: Power
     let y2 = y1 + 58;
     lcd_rect(cx, y2, cw, 52, C.widget);
-    lcd_rect(cx, y2, 4, 52, bat?.no_battery ? C.dim : (bat?.valid ? C.green : C.red));
-    lcd_text(cx + 10, y2 + 6, tr("POWER"), C.gray, C.widget, 1);
-    if (bat?.no_battery) {
-        lcd_text(cx + 10, y2 + 20, tr("Battery not installed"), C.dim, C.widget, 1);
-        lcd_text(cx + 10, y2 + 32, sprintf(tr("ADC %d"), badc), C.dim, C.widget, 1);
-    } else {
-        let bat_state = bat?.charging ? tr("Charging") : tr("Battery");
-        let bat_color = bat?.valid ? (bpct > 20 ? C.green : C.yellow) : C.red;
-        lcd_text(cx + 10, y2 + 20, sprintf("%s %d%%", bat_state, bpct), bat_color, C.widget, 1);
-        lcd_text(cx + 120, y2 + 20, sprintf(tr("ADC %d"), badc), C.white, C.widget, 1);
+    lcd_rect(cx, y2, 4, 52, C.cyan);
+    lcd_text(cx + 10, y2 + 6, tr("STORAGE AND NETWORK"), C.gray, C.widget, 1);
 
-        // Строка разряда: расход измеряется на месте, поэтому показываем и
-        // его, и остаток - по ним видно, врёт ли оценка.
-        let rmin = int(+(bat?.remain_min ?? -1));
-        let drain = +(bat?.drain_rate ?? 0);
-        let line = "";
-        if (bat?.charging)
-            line = rmin > 0 ? sprintf(tr("to full ~%dh %02dm"), int(rmin / 60), rmin % 60)
-                            : tr("charging");
-        else if (rmin > 0 && drain > 0)
-            line = sprintf(tr("left ~%dh %02dm, %.1f/min"), int(rmin / 60), rmin % 60, drain);
-        else if (drain > 0)
-            line = sprintf(tr("drain %.1f/min"), drain);
-        else
-            line = tr("measuring drain rate");
-        lcd_text(cx + 10, y2 + 32, line, C.white, C.widget, 1);
+    // Флеш: свободно из всего, с полосой занятости справа.
+    let so = d?.storage;
+    let s_free = int(+(so?.free_kb ?? 0)), s_tot = int(+(so?.total_kb ?? 0));
+    if (s_tot > 0) {
+        lcd_text(cx + 10, y2 + 20,
+                 sprintf(tr("Flash %.1f of %.1f MB free"), s_free / 1024.0, s_tot / 1024.0),
+                 C.white, C.widget, 1);
+        let bw = 56, bx = cx + cw - 10 - bw;
+        let used = int(bw * (s_tot - s_free) / s_tot);
+        lcd_rect(bx, y2 + 20, bw, 7, C.dim);
+        if (used > 0)
+            lcd_rect(bx, y2 + 20, used, 7,
+                     used > bw * 8 / 10 ? C.red : C.green);
+    } else {
+        lcd_text(cx + 10, y2 + 20, tr("Flash: no data"), C.dim, C.widget, 1);
     }
-    lcd_text(cx + 10, y2 + 44,
-             sprintf(tr("raw %s, cutoff %d"), braw, int(+(bat?.cutoff ?? 512))),
-             C.dim, C.widget, 1);
+
+    let lan = d?.lan;
+    lcd_text(cx + 10, y2 + 34, sprintf("LAN %s", lan?.ip ?? "?"), C.accent, C.widget, 1);
+    let mac_s = uc(lan?.mac ?? "");
+    if (mac_s != "")
+        lcd_text(cx + cw - 10 - tlen(mac_s) * 6, y2 + 34, mac_s, C.gray, C.widget, 1);
 
     // Card 3: Software
     let y3 = y2 + 58;
@@ -3088,7 +3648,7 @@ function draw_lte_page() {
 
     // Третья строка без подписей: слева оператор, справа номер симки. Обоим
     // подпись не нужна - и так понятно, что это.
-    let phone = phone_short(l.phone);
+    let phone = phone_fmt(l.phone);
     let oper = l.operator ?? "";
     if (oper != "" && oper != "-")
         lcd_text(LX1, y1 + 33, tcut(oper, 16), C.white, C.widget, 1);
@@ -3296,6 +3856,12 @@ function page_sig() {
         return base + sprintf("|%d|%d|%d", st.sms_pg, st.sms_i, st.sms_ts);
     case "netpri":
         return base + sprintf("|%J", netpri_list());
+    case "battery":
+        return base + sprintf("|%J|%d", st.data?.battery, anim_phase);
+    case "stascan":
+        return base + sprintf("|%d", sta.nets == null ? -1 : length(sta.nets));
+    case "kbd":
+        return base + sprintf("|%s|%d|%d", sta.pass, sta.layer, sta.shift ? 1 : 0);
     case "display":
     case "night":
         return base + sprintf("|%d|%s|%d|%d|%J", saver_cfg(), saver_style(),
@@ -3328,7 +3894,12 @@ function draw_current() {
     case "sms1":      draw_sms_one(); break;
     case "night":     draw_night_page(); break;
     case "led":       draw_led_page(); break;
+    case "battery":   draw_battery_page(); break;
+    case "savercfg":  draw_savercfg_page(); break;
+    case "zigbee":    draw_zigbee_page(); break;
     case "sound":     draw_sound_page(); break;
+    case "stascan":   draw_stascan_page(); break;
+    case "kbd":       draw_kbd_page(); break;
     }
 }
 
@@ -3354,13 +3925,17 @@ function draw_screensaver() {
     let bat = d?.battery;
     let bpct = int(+(bat?.percent ?? 0));
     let bchg = bat?.charging && !bat?.no_battery;
+    let fl = svflags();
+    let row_o = { bg: bg, mono: night ? primary : null,
+                  empty: night ? "#0A2A16" : C.dim,
+                  no_sig: !fl.sig, no_batt: !fl.batt, no_env: !fl.env };
 
     // Режим «строка»: та самая шапка, прижатая к верху экрана. Часы белые.
     if (style == "line") {
-        draw_status_row(3, { bg: bg, time: true, pct: true,
-                             time_color: primary,
-                             mono: night ? primary : null,
-                             empty: night ? "#0A2A16" : C.dim });
+        row_o.time = true;
+        row_o.pct = fl.batt;
+        row_o.time_color = primary;
+        draw_status_row(3, row_o);
         lcd_flush();
         return;
     }
@@ -3370,11 +3945,11 @@ function draw_screensaver() {
     // строку. Раньше часы стояли по центру верха, и ярлык технологии («4G+»)
     // упирался в них - теперь верхняя полоса свободна.
     if (style == "full") {
-        draw_status_row(3, { bg: bg, mono: night ? primary : null,
-                             empty: night ? "#0A2A16" : C.dim });
+        draw_status_row(3, row_o);
 
         lcd_text(14, 34, ts, primary, bg, 5);
-        lcd_text(14, 76, ds, secondary, bg, 2);
+        if (fl.date)
+            lcd_text(14, 76, ds, secondary, bg, 2);
 
         let w2 = d?.weather;
         if (w2) {
@@ -3402,7 +3977,8 @@ function draw_screensaver() {
 
     // В режиме «часы» экран занят только ими, поэтому вдвое крупнее.
     // Ширина знакоместа - ровно 6*масштаб, иначе центрирование врёт.
-    let clk_sz = (style == "clock") ? 8 : 5;
+    let clk_sz = (style == "clock")
+               ? (fl.size == "s" ? 6 : (fl.size == "l" ? 10 : 8)) : 5;
     let clk_w = tlen(ts) * 6 * clk_sz;
 
     // Дата не должна быть шире часов, иначе строка снизу перевешивает.
@@ -3421,19 +3997,34 @@ function draw_screensaver() {
     let date_gap = 10;
 
     // В режиме «часы» центрируем по вертикали пару целиком - часы и дату.
+    if (!fl.date) { date_sz = 0; date_gap = 0; }
     let blk_h = 7 * clk_sz + date_gap + 7 * date_sz;
     let clk_y = (style == "clock") ? int((LCD_H - blk_h) / 2) : 12;
     let clk_x = int((LCD_W - clk_w) / 2);
+
+    // Антивыгорание: раз в минуту часы встают в новое место. Псевдослучай
+    // от номера минуты - позиция стабильна внутри минуты и не требует
+    // датчика случайных чисел.
+    if (style == "clock" && fl.wander) {
+        let seed = (t ? t.hour * 60 + t.min : 0) * 2654435761;
+        let max_x = LCD_W - clk_w - 16;
+        let max_y = LCD_H - blk_h - 30 - 26;
+        if (max_x > 8)  clk_x = 8 + (seed % 100000) % max_x;
+        if (max_y > 0)  clk_y = 26 + int(seed / 7) % max_y;
+    }
     lcd_text(clk_x, clk_y, ts, primary, bg, clk_sz);
 
     // В полном режиме дата стоит на своём прежнем месте под часами.
-    let date_y = (style == "clock") ? clk_y + 7 * clk_sz + date_gap : 54;
-    lcd_text(int((LCD_W - date_w) / 2), date_y, ds, secondary, bg, date_sz);
+    if (fl.date) {
+        let date_y = (style == "clock") ? clk_y + 7 * clk_sz + date_gap : 54;
+        let dx = (style == "clock" && fl.wander)
+               ? clk_x + int((clk_w - date_w) / 2) : int((LCD_W - date_w) / 2);
+        lcd_text(dx, date_y, ds, secondary, bg, date_sz);
+    }
 
     // Та же статусная полоса, что и в шапке, но без времени и процентов:
     // часы тут и так во весь экран, а проценты дублировали бы значок.
-    draw_status_row(3, { bg: bg, mono: night ? primary : null,
-                         empty: night ? "#0A2A16" : C.dim });
+    draw_status_row(3, row_o);
 
     // Погоду рисуем только в полном режиме.
     if (style != "full") { lcd_flush(); return; }
@@ -3619,6 +4210,16 @@ function flash_btn(bx, by, bw, bh, label, nav) {
 }
 
 function handle_touch(tx, ty) {
+    // Кнопка скана Wi-Fi на «Сети» - раньше общих правил, иначе полоса «низ -
+    // назад» съедала её нижний край.
+    if (st.page == "dashboard" && fs.stat(NETPRI_SH) &&
+        in_rect(tx, ty, 10, BACK_Y - 36, 300, 30)) {
+        sta.band = tx < 160 ? 2 : 5;
+        sta.nets = null;
+        wifi_scan_start(sta.band);
+        go_page("stascan");
+        return;
+    }
 
     // У сервисов внизу две кнопки, поэтому общее правило «низ - назад» для
     // этой страницы не годится: левая половина запускает проверку.
@@ -3704,8 +4305,8 @@ function handle_touch(tx, ty) {
                     : (st.mpg == 2
                         ? [ tr("SMS"), tr("Services"), tr("Weather"),
                             tr("Display"), tr("LED"), tr("MORE >>>") ]
-                        : [ tr("Sound"), tr("Modem Reset"), tr("Reboot"),
-                            "", "", tr("<<< BACK") ]);
+                        : [ tr("Sound"), tr("Battery"), "Zigbee",
+                            tr("Modem Reset"), tr("Reboot"), tr("<<< BACK") ]);
                 flash_btn(b.x, b.y, b.w, b.h, labels[i - 1] ?? "", i == 6);
                 sock_poll(150);
 
@@ -3720,7 +4321,7 @@ function handle_touch(tx, ty) {
                     }
                 } else if (st.mpg == 3) {
                     switch (i) {
-                    case 2:
+                    case 4:
                         // Перезапуск модема. Своего скрипта у нас нет, а у
                         // 5gmodem есть отлаженная лестница: питание слота по
                         // GPIO (modem_power/modem_reset/4g/5g1/5g2), затем
@@ -3752,7 +4353,7 @@ function handle_touch(tx, ty) {
                               rsrp < 0 ? "#002000" : "#200000", 2);
                         draw_menu();
                         return;
-                    case 3:
+                    case 5:
                         // Reboot with confirmation dialog
                         lcd_clear("#200000");
                         lcd_rect(30, 60, 260, 120, "#300000");
@@ -3788,6 +4389,8 @@ function handle_touch(tx, ty) {
                         draw_menu();
                         return;
                     case 1: go_page("sound"); return;
+                    case 2: go_page("battery"); return;
+                    case 3: go_page("zigbee"); return;
                     case 6: st.mpg = 1; draw_menu(); return;
                     }
                 } else if (st.mpg == 2) {
@@ -3891,6 +4494,41 @@ function handle_touch(tx, ty) {
             for (let i = 0; i < length(l) && i < 4; i++) {
                 let b = netpri_btn(i);
                 if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
+                // Минус на Wi-Fi-карточке: забыть сеть, с подтверждением.
+                if ((l[i].type ?? "") == "wifi" && tx >= b.x + b.w - 34) {
+                    lcd_clear("#200000");
+                    lcd_rect(30, 60, 260, 120, "#300000");
+                    lcd_rect(30, 60, 260, 1, C.red);
+                    lcd_text(46, 75, tr("Forget network?"), C.red, "#300000", 2);
+                    lcd_text(46, 95, tcut(l[i].label ?? "", 20), C.white, "#300000", 2);
+                    lcd_rect(50, 125, 100, 35, C.red);
+                    lcd_text(72, 133, tr("YES"), C.white, C.red, 2);
+                    lcd_rect(170, 125, 100, 35, "#0841");
+                    lcd_text(196, 133, tr("NO"), C.white, "#0841", 2);
+                    lcd_flush();
+                    for (let sec = 8; sec > 0; sec--) {
+                        system("sleep 1");
+                        let ct = read_touch();
+                        if (!ct) continue;
+                        if (ct.x < 160 && ct.y > 110) {
+                            if (ucur) {
+                                // Убираем всё, что создавал мастер: и STA, и
+                                // netifd-интерфейс - иначе в LuCI остаётся
+                                // интерфейс-сирота со знаком вопроса.
+                                ucur.delete("wireless", STA_SECTION);
+                                ucur.commit("wireless");
+                                ucur.delete("network", "wwan");
+                                ucur.commit("network");
+                            }
+                            system("ubus call network reload >/dev/null 2>&1");
+                            netpri_refresh();
+                            sock_poll(2000);
+                        }
+                        break;
+                    }
+                    go_page("dashboard");
+                    return;
+                }
                 if (i == 0) return;          /* уже основной */
                 let ifn = l[i].iface ?? "";
                 if (ifn == "") return;
@@ -3902,6 +4540,9 @@ function handle_touch(tx, ty) {
                 return;
             }
         }
+        // Зону кнопки скана считаем так же, как в draw_dashboard, не полагаясь
+        // на st.stabtn: он мог не установиться, если аплинки в тот момент ещё
+        // читались.
         return;
     }
 
@@ -3913,6 +4554,101 @@ function handle_touch(tx, ty) {
             snd_play(i);
             draw_sound_page();
             return;
+        }
+        return;
+    }
+
+    if (st.page == "stascan") {
+        let nets = sta.nets;
+        if (type(nets) != "array") return;
+        for (let i = 0; i < length(nets) && i < 6; i++) {
+            let b = stascan_row(i);
+            if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
+            sta.sel = i;
+            if (nets[i].enc) {
+                // Защищённая сеть - вводим пароль.
+                sta.pass = ""; sta.layer = 0; sta.shift = false;
+                go_page("kbd");
+            } else {
+                // Открытая - подключаемся сразу.
+                action_splash(tr("Wi-Fi"), tr("Connecting..."), C.cyan);
+                sta_apply(nets[i].ssid, "", nets[i].band);
+                sta_pending = { ssid: nets[i].ssid, since: time() };
+                sock_poll(2500);
+                netpri_refresh();
+                go_page("dashboard");
+            }
+            return;
+        }
+        return;
+    }
+
+    if (st.page == "kbd") {
+        // спецкнопки нижнего ряда
+        if (type(sta.specs) == "array" && ty >= sta.spec_y && ty < sta.spec_y + 26) {
+            for (let sp in sta.specs) {
+                if (tx < sp.x || tx >= sp.x + sp.w) continue;
+                if (sp.k == "layer") sta.layer = (sta.layer + 1) % 2;
+                else if (sp.k == "shift") sta.shift = !sta.shift;
+                else if (sp.k == "space") sta.pass += " ";
+                else if (sp.k == "del") sta.pass = substr(sta.pass, 0, length(sta.pass) - 1);
+                else if (sp.k == "ok") {
+                    let n = sta.nets[sta.sel];
+                    action_splash(tr("Wi-Fi"), tr("Connecting..."), C.cyan);
+                    sta_apply(n.ssid, sta.pass, n.band);
+                    sta_pending = { ssid: n.ssid, since: time() };
+                    sock_poll(2500);
+                    netpri_refresh();
+                    go_page("dashboard");
+                    return;
+                }
+                draw_kbd_page();
+                return;
+            }
+        }
+        // символьные клавиши
+        let rows = KBD[sta.layer];
+        for (let r = 0; r < length(rows); r++) {
+            let chars = rows[r], ncols = length(chars);
+            let off = int((10 - ncols) / 2);
+            for (let c = 0; c < ncols; c++) {
+                let b = kbd_key(r, off + c, ncols);
+                if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
+                let ch = substr(chars, c, 1);
+                if (sta.shift && sta.layer == 0) ch = uc(ch);
+                sta.pass += ch;
+                draw_kbd_page();
+                return;
+            }
+        }
+        return;
+    }
+
+    if (st.page == "savercfg") {
+        let fl = svflags();
+        let v = { sv_date: fl.date, sv_signal: fl.sig, sv_batt: fl.batt,
+                  sv_env: fl.env, sv_wander: fl.wander };
+        let rows = savercfg_rows_for_style();
+        for (let i = 0; i < length(rows); i++) {
+            let b = savercfg_row(i);
+            if (in_rect(tx, ty, b.x, b.y, b.w, b.h)) {
+                svflag_set(rows[i].key, v[rows[i].key] ? "0" : "1");
+                draw_savercfg_page();
+                return;
+            }
+        }
+        if (saver_style() == "clock") {
+            let keys = [ "s", "m", "l" ];
+            let yb = 30 + length(rows) * 30;
+            for (let i = 0; i < 3; i++) {
+                let b = savercfg_size_btn(i);
+                b.y = yb;
+                if (in_rect(tx, ty, b.x, b.y, b.w, b.h)) {
+                    svflag_set("clock_size", keys[i]);
+                    draw_savercfg_page();
+                    return;
+                }
+            }
         }
         return;
     }
@@ -3996,8 +4732,13 @@ function handle_touch(tx, ty) {
         for (let i = 0; i < length(SAVER_STYLES); i++) {
             let sb = style_btn(i);
             if (in_rect(tx, ty, sb.x, sb.y, sb.w, sb.h)) {
-                saver_style_set(SAVER_STYLES[i]);
-                draw_display_page();
+                // Повторный тап по выбранному стилю открывает настройки
+                // заставки: что показывать и какого размера часы.
+                // Любой тап по стилю выбирает его и открывает настройки:
+                // так сразу видно, из чего этот стиль состоит.
+                if (SAVER_STYLES[i] != saver_style())
+                    saver_style_set(SAVER_STYLES[i]);
+                go_page("savercfg");
                 return;
             }
         }
@@ -4154,11 +4895,10 @@ function set_screen(s) {
     if (s == "active") {
         set_blank(false);
         backlight_write(true);   /* вернуть полный уровень после ночной заставки */
-        // Из заставки просыпаемся на страницу модема: на неё смотрят чаще
-        // всего, а «Сеть» доступна одним тапом из меню.
-        st.page = "lte";
-        st.mpg = 1;
+        // Просыпаемся на ту же страницу, с которой ушли в заставку:
+        // человек продолжает с места, где остановился.
         refresh_data();
+        st.page_sig = "";
         draw_current();
     } else if (s == "screensaver") {
         st.saver_frame = 0;
@@ -4169,6 +4909,25 @@ function set_screen(s) {
             draw_screensaver();
         }
     }
+}
+
+// Служебный переход на страницу по файлу-запросу: echo lte > /tmp/.lcd_goto.
+// Нужен для снятия экранов и отладки - тапать вслепую по живому интерфейсу
+// опасно: однажды такой тап попал в выключатель Wi-Fi.
+function goto_req() {
+    let r = fs.readfile("/tmp/.lcd_goto");
+    if (!r) return;
+    fs.unlink("/tmp/.lcd_goto");
+    r = trim(r);
+    if (r == "menu2") { st.page = "menu"; st.mpg = 2; }
+    else if (r == "menu3") { st.page = "menu"; st.mpg = 3; }
+    else if (r == "menu") { st.page = "menu"; st.mpg = 1; }
+    else if (r == "net") { st.page = "dashboard"; netpri_refresh(); }
+    else st.page = r;
+    st.ltch = time();
+    set_screen("active");
+    st.page_sig = "";
+    draw_current();
 }
 
 // Запрос от screen.sh (кнопка). Гасим не «на месте», а переводя экран в то же
@@ -4242,13 +5001,19 @@ function main() {
             } else {
                 bar_moving = false;
             }
+            // Пока открыта страница скана и результата ещё нет - опрашиваем.
+            if (st.screen == "active" && st.page == "stascan" && sta.nets == null) {
+                let r = wifi_scan_read();
+                if (r != null) { sta.nets = r; draw_current(); }
+            }
             bar_t.set(90);
         });
 
         let anim_t, anim_tick = 0;
         anim_t = uloop_mod.timer(700, function() {
             let bat = st.data?.battery;
-            if (bat?.charging && !bat?.no_battery) {
+            if (bat?.charging && !bat?.no_battery &&
+                int(+(bat?.percent ?? 0)) < 100) {
                 anim_tick++;
                 if (st.screen == "active") {
                     anim_phase++;
@@ -4268,6 +5033,18 @@ function main() {
         let data_t;
         data_t = uloop_mod.timer(T.data * 1000, function() {
             refresh_data();
+            // На открытой «Сети» список аплинков освежаем раз в три тика:
+            // подключение STA или смена метрик иначе не видны, пока не выйдешь
+            // и не зайдёшь через меню.
+            if (st.page == "dashboard" && st.screen == "active") {
+                st.np_tick = (st.np_tick ?? 0) + 1;
+                if (st.np_tick % 3 == 0) netpri_refresh();
+            }
+            // Результат скана Wi-Fi: подхватываем, как только готов.
+            if (st.page == "stascan" && sta.nets == null) {
+                let r = wifi_scan_read();
+                if (r != null) sta.nets = r;
+            }
             if (st.screen == "active") {
                 // Перерисовываем, только если на странице что-то изменилось.
                 let sig = page_sig();
@@ -4296,6 +5073,7 @@ function main() {
         let touch_t;
         touch_t = uloop_mod.timer(100, function() {
             screen_req();
+            goto_req();
             let t = read_touch();
             if (t) {
                 st.ltch = time();

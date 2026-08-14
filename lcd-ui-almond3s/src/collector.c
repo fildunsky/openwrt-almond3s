@@ -21,6 +21,10 @@
 #include <signal.h>
 #include <errno.h>
 #include <sys/sysinfo.h>
+#include <sys/statvfs.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -55,11 +59,55 @@ static int bat_last_charging = -1;
 static int bat_disp_percent = -1;
 static int bat_nobat_count = 0;
 static int bat_adc_filt = 0;   /* сглаженный АЦП, восьмикратно */
+/* Плато на зарядке. Потолок 726 - свойство конкретной батареи: у другой он
+ * может быть 728, у постаревшей - 720, и по одной лишь таблице такая батарея
+ * заряжалась бы «вечно». Поэтому завершение определяем ещё и по факту: если
+ * под кабелем значение долго не растёт и мы уже в верхней части шкалы -
+ * батарея взяла всё, что может. */
+#define BAT_PLATEAU_TICKS 300  /* ~10 мин без роста при опросе раз в 2 с */
+#define BAT_PLATEAU_MIN   690  /* плато ниже - неисправность, а не полный заряд */
+static int bat_plateau_max = 0;
+static int bat_plateau_ticks = 0;
 static struct battery_info bat_last_good;
 static int bat_have_good = 0;
 
 /* Загрузка процессора считается по приращению /proc/stat между замерами:
  * мгновенного значения там нет, только счётчики от загрузки. */
+/* Оверлей и LAN: статичные вещи, но именно их негде было увидеть. */
+static void get_overlay(long *free_kb, long *total_kb)
+{
+    struct statvfs v;
+    *free_kb = 0; *total_kb = 0;
+    if (statvfs("/overlay", &v) == 0) {
+        *free_kb  = (long)((long long)v.f_bavail * v.f_frsize / 1024);
+        *total_kb = (long)((long long)v.f_blocks * v.f_frsize / 1024);
+    }
+}
+
+static void get_lan(char *ip, size_t ip_sz, char *mac, size_t mac_sz)
+{
+    struct ifaddrs *ifa0 = NULL, *ifa;
+    ip[0] = 0; mac[0] = 0;
+    if (getifaddrs(&ifa0) == 0) {
+        for (ifa = ifa0; ifa; ifa = ifa->ifa_next) {
+            if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
+            if (strcmp(ifa->ifa_name, "br-lan") != 0) continue;
+            inet_ntop(AF_INET, &((struct sockaddr_in *)ifa->ifa_addr)->sin_addr,
+                      ip, ip_sz);
+            break;
+        }
+        freeifaddrs(ifa0);
+    }
+    FILE *f = fopen("/sys/class/net/br-lan/address", "r");
+    if (f) {
+        if (fgets(mac, mac_sz, f)) {
+            char *nl = strchr(mac, 0x0a);
+            if (nl) *nl = 0;
+        }
+        fclose(f);
+    }
+}
+
 static int cpu_busy_pct(void)
 {
     static unsigned long long prev_idle, prev_total;
@@ -138,6 +186,23 @@ static void get_battery(struct battery_info *bi) {
 
         int adc_eff = adc_sm - (bi->charging ? bat_charge_bump : 0);
 
+        int plateau_full = 0;
+        if (bi->charging) {
+            /* Считаем тики, а не время: у роутера нет RTC, и настенные часы
+             * после загрузки скачут. Рост АЦП обнуляет счётчик. */
+            if (adc_sm > bat_plateau_max) {
+                bat_plateau_max = adc_sm;
+                bat_plateau_ticks = 0;
+            } else {
+                bat_plateau_ticks++;
+                if (adc_sm >= BAT_PLATEAU_MIN && bat_plateau_ticks > BAT_PLATEAU_TICKS)
+                    plateau_full = 1;
+            }
+        } else {
+            bat_plateau_max = 0;
+            bat_plateau_ticks = 0;
+        }
+
         /* При зарядке считаем по таблице заряда: она снята на живой зарядке,
          * а таблица разряда там врёт - напряжение на клеммах поднято током. */
         int target;
@@ -147,6 +212,7 @@ static void get_battery(struct battery_info *bi) {
         } else {
             target = bat_table_lookup(adc_eff) * 100 / 262;
         }
+        if (plateau_full) target = 100;
         if (target > 100) target = 100;
         if (target < 0) target = 0;
 
@@ -319,20 +385,22 @@ static void bat_estimate(struct bat_estimator *e, int cur_adc) {
     if (e->remain_min < 0) e->remain_min = 0;
 }
 
-/* ADC → минуты до полного заряда. Ось растянута на реальный диапазон
- * 512..714; форма прежняя - полного цикла зарядки мы пока не измеряли,
- * это следующий опыт. */
+/* ADC → минуты до полного заряда. Потолок 726 измерен: под кабелем
+ * напряжение выше, чем на разряде, и рост останавливается на этом
+ * значении (наблюдение 13.08.2026, двадцать минут без изменений).
+ * Форма кривой пока унаследованная - честную снимет регистратор на
+ * первом же полном цикле зарядки. */
 static const struct { int adc; int min; } charge_table[] = {
-    { 512, 124}, { 525, 119}, { 538, 113}, { 550, 104}, { 563,  94},
-    { 576,  86}, { 588,  77}, { 601,  69}, { 614,  61}, { 626,  52},
-    { 639,  44}, { 651,  37}, { 664,  29}, { 677,  22}, { 689,  15},
-    { 702,   7}, { 714,   0},
+    { 512, 124}, { 526, 119}, { 540, 113}, { 552, 104}, { 566,  94},
+    { 580,  86}, { 593,  77}, { 606,  69}, { 620,  61}, { 633,  52},
+    { 647,  44}, { 659,  37}, { 673,  29}, { 687,  22}, { 700,  15},
+    { 713,   7}, { 726,   0},
 };
 #define CHARGE_TABLE_SIZE 17
 
 static int charge_table_lookup(int adc) {
     if (adc <= 512) return 124;
-    if (adc >= 714) return 0;
+    if (adc >= 726) return 0;
     for (int i = 0; i < CHARGE_TABLE_SIZE - 1; i++) {
         if (adc < charge_table[i + 1].adc) {
             int da = charge_table[i + 1].adc - charge_table[i].adc;
@@ -361,7 +429,7 @@ static void bat_charge_estimate(struct bat_estimator *e, int cur_adc) {
     }
 
     if (cur_adc <= 512) { e->remain_min = -1; return; }  /* CC phase, unpredictable */
-    if (cur_adc >= 712) { e->remain_min = 0; return; }   /* almost full */
+    if (cur_adc >= 724) { e->remain_min = 0; return; }   /* almost full */
 
     e->remain_min = tab_min * bat_cal_factor / 100;
 }
@@ -846,6 +914,10 @@ int main(void) {
         struct lte_info li;
         int vpn_active=0, vpn_ping=0;
         char ext_ip[32]="", vpn_type[8]="", wifi_json[2048]="[]";
+        long ovl_free, ovl_total;
+        char lan_ip[46], lan_mac[20];
+        get_overlay(&ovl_free, &ovl_total);
+        get_lan(lan_ip, sizeof(lan_ip), lan_mac, sizeof(lan_mac));
         struct sysinfo si;
         struct battery_info bat;
         char ping_buf[32]="";
@@ -889,6 +961,8 @@ int main(void) {
             "\"battery\":{\"adc\":%d,\"percent\":%d,\"charging\":%s,\"valid\":%s,"
             "\"no_battery\":%s,\"remain_min\":%d,\"drain_rate\":%d.%d,\"cutoff\":%d,"
             "\"raw_hex\":\"%02x %02x\"},"
+            "\"storage\":{\"free_kb\":%ld,\"total_kb\":%ld},"
+            "\"lan\":{\"ip\":\"%s\",\"mac\":\"%s\"},"
             "\"uptime\":%ld,\"mem_free_mb\":%ld,\"mem_total_mb\":%ld,"
             "\"cpu_load\":%.2f,\"cpu_busy\":%d,\"cpu_cores\":%d}\n",
             (long)time(NULL),
@@ -909,6 +983,7 @@ int main(void) {
             bat_est.remain_min, bat_est.drain_rate/100, abs(bat_est.drain_rate)%100,
             bat_cal_cutoff,
             bat.raw1, bat.raw2,
+            ovl_free, ovl_total, lan_ip, lan_mac,
             si.uptime, (si.freeram + si.bufferram)/1024/1024,
             si.totalram/1024/1024, si.loads[0]/65536.0,
             cpu_busy_pct(), cpu_core_count());
