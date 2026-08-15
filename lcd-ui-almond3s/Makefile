@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=lcd-ui-almond3s
-PKG_RELEASE:=188
+PKG_RELEASE:=220
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -49,6 +49,9 @@ define Package/lcd-ui-almond3s/install
 	$(INSTALL_BIN) ./files/weather_fetch.sh $(1)/etc/almond3s/scripts/weather_fetch.sh
 	$(INSTALL_BIN) ./files/svcping.sh $(1)/etc/almond3s/scripts/svcping.sh
 	$(INSTALL_BIN) ./files/screen.sh $(1)/etc/almond3s/scripts/screen.sh
+	$(INSTALL_BIN) ./files/reboot.sh $(1)/etc/almond3s/scripts/reboot.sh
+	$(INSTALL_BIN) ./files/poweroff.sh $(1)/etc/almond3s/scripts/poweroff.sh
+	$(INSTALL_BIN) ./files/lte_reset.sh $(1)/etc/almond3s/scripts/lte_reset.sh
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./files/almond3s.config $(1)/etc/config/almond3s
 endef

@@ -198,14 +198,14 @@ int main(int argc, char **argv)
     if (fd < 0) { perror("/dev/lcd"); return 1; }
 
     /* almond3s-lcd bl <0|1|2> — backlight control */
-    if (argc >= 3 && argv[1][0] == 'b') {
+    if (argc >= 3 && strcmp(argv[1], "bl") == 0) {
         int ret = ioctl(fd, 4, (unsigned long)atoi(argv[2]));
         close(fd);
         return ret < 0 ? 1 : 0;
     }
 
     /* almond3s-lcd version — read lcd_drv version */
-    if (argc >= 2 && argv[1][0] == 'v') {
+    if (argc >= 2 && strcmp(argv[1], "version") == 0) {
         char ver[64] = {0};
         if (ioctl(fd, 7, ver) == 0)
             printf("%s\n", ver);
@@ -217,7 +217,7 @@ int main(int argc, char **argv)
 
     /* almond3s-lcd dim <0..255> — яркость подсветки программным ШИМ (ioctl 16).
      * 0 - погашено, 255 - полный накал, между ними драйвер крутит пин. */
-    if (argc >= 3 && argv[1][0] == 'd') {
+    if (argc >= 3 && strcmp(argv[1], "dim") == 0) {
         int ret = ioctl(fd, 16, (unsigned long)atoi(argv[2]));
         close(fd);
         return ret < 0 ? 1 : 0;
@@ -247,6 +247,103 @@ int main(int argc, char **argv)
     /* almond3s-lcd rotate 0|1 — разворот экрана на 180 (ioctl 22). */
     if (argc >= 3 && strcmp(argv[1], "rotate") == 0) {
         int ret = ioctl(fd, 22, (unsigned long)(atoi(argv[2]) ? 1 : 0));
+        close(fd);
+        return ret < 0 ? 1 : 0;
+    }
+
+    /* almond3s-lcd sxsel <байт> — SELECT-чтение тач-чипа координатным
+     * циклом (ioctl 31): печатает тег канала и значение. Идентификация:
+     * SELECT(RX)=0x85 при прижатом пере вернёт тег 5 только у SX8651.
+     * almond3s-lcd sxw <регистр> <значение> — запись регистра чипа. */
+    if (argc >= 3 && strcmp(argv[1], "sxsel") == 0) {
+        int sb = (int)strtol(argv[2], NULL, 0) & 0xFF;
+        int ret = ioctl(fd, 31, (unsigned long)sb);
+        if (ret < 0)
+            printf("sel 0x%02x: err\n", sb);
+        else
+            printf("sel 0x%02x -> raw 0x%04x (ch=%d val=%d)\n",
+                   sb, ret, (ret >> 12) & 7, ret & 0x0FFF);
+        close(fd);
+        return ret < 0 ? 1 : 0;
+    }
+    if (argc >= 4 && strcmp(argv[1], "sxw") == 0) {
+        int reg = (int)strtol(argv[2], NULL, 0) & 0x1F;
+        int val = (int)strtol(argv[3], NULL, 0) & 0xFF;
+        int ret = ioctl(fd, 31,
+                        (unsigned long)(0x10000 | (reg << 8) | val));
+        close(fd);
+        return ret < 0 ? 1 : 0;
+    }
+
+    /* almond3s-lcd touchmode pentrg|manual — режим опроса SX8650 (ioctl 29):
+     * pentrg = чип сам меряет по касанию, пачка X,Y,Z1,Z2 (по даташиту);
+     * manual = легаси-опрос SELECT/CONVERT (страховка). */
+    if (argc >= 3 && strcmp(argv[1], "touchmode") == 0) {
+        int ret = ioctl(fd, 29,
+                        (unsigned long)(strcmp(argv[2], "manual") != 0));
+        close(fd);
+        return ret < 0 ? 1 : 0;
+    }
+
+    /* almond3s-lcd gpiowatch <сек> — печатать перемены GPIO DATA-регистров
+     * (ioctl 28), шумные пины дисплея и ШИМ замаскированы. Поиск кнопки. */
+    if (argc >= 3 && strcmp(argv[1], "gpiowatch") == 0) {
+        int secs = atoi(argv[2]);
+        unsigned int p[3] = { 0, 0, 0 };
+        int first = 1, t;
+        if (secs < 1) secs = 60;
+        if (secs > 900) secs = 900;
+        for (t = 0; t < secs * 100; t++) {
+            unsigned int d[3];
+            if (ioctl(fd, 28, d) == 0) {
+                d[0] &= ~0x8FC7E000u;
+                if (first || d[0] != p[0] || d[1] != p[1] || d[2] != p[2]) {
+                    printf("%8d  %08x %08x %08x\n", t, d[0], d[1], d[2]);
+                    fflush(stdout);
+                    p[0] = d[0]; p[1] = d[1]; p[2] = d[2];
+                    first = 0;
+                }
+            }
+            usleep(10000);
+        }
+        close(fd);
+        return 0;
+    }
+
+    /* almond3s-lcd waittouch <мс> — ждать НОВОЕ нажатие (фронт отпущено→
+     * нажато) до таймаута; координаты в stdout. Нужен модальным диалогам:
+     * ucode не умеет спать долями секунды, а событийные файлы демона несут
+     * хвосты от прошлых нажатий. */
+    if (argc >= 3 && strcmp(argv[1], "waittouch") == 0) {
+        int ms = atoi(argv[2]);
+        int d[3], was = 1, first = 1, t;
+        if (ms < 30) ms = 30;
+        if (ms > 60000) ms = 60000;
+        for (t = 0; t < ms; t += 30) {
+            if (ioctl(fd, 1, d) == 0) {
+                if (first) { was = d[2]; first = 0; }
+                else if (d[2] && !was) {
+                    printf("%d %d\n", d[0], d[1]);
+                    close(fd);
+                    return 0;
+                }
+                was = d[2];
+            }
+            usleep(30000);
+        }
+        close(fd);
+        return 1;
+    }
+
+    /* almond3s-lcd reinit [kernel|boot] — полный reset+init панели (ioctl 26):
+     * лечилка при слетевшем контроллере. С аргументом заодно меняет таблицу
+     * инициализации: kernel - вторая заводская (гамма из стокового ядра),
+     * boot - таблица загрузчика (наш дефолт). */
+    if (argc >= 2 && strcmp(argv[1], "reinit") == 0) {
+        unsigned long v = 0;
+        if (argc >= 3 && strcmp(argv[2], "kernel") == 0) v = 1;
+        else if (argc >= 3 && strcmp(argv[2], "boot") == 0) v = 2;
+        int ret = ioctl(fd, 26, v);
         close(fd);
         return ret < 0 ? 1 : 0;
     }
@@ -524,7 +621,7 @@ int main(int argc, char **argv)
     }
 
     /* almond3s-lcd level — текущая яркость (ioctl 17). */
-    if (argc >= 2 && argv[1][0] == 'l') {
+    if (argc >= 2 && strcmp(argv[1], "level") == 0) {
         int lvl[2] = { -1, -1 };
         if (ioctl(fd, 17, lvl) == 0)
             printf("подсветка %d, картинка %d\n", lvl[0], lvl[1]);
@@ -533,14 +630,14 @@ int main(int argc, char **argv)
     }
 
     /* almond3s-lcd gray <0..255> — цифровое затемнение картинки (ioctl 19). */
-    if (argc >= 3 && argv[1][0] == 'g') {
+    if (argc >= 3 && strcmp(argv[1], "gray") == 0) {
         int ret = ioctl(fd, 19, (unsigned long)atoi(argv[2]));
         close(fd);
         return ret < 0 ? 1 : 0;
     }
 
     /* almond3s-lcd stat — сколько строк ушло на панель в последнем кадре. */
-    if (argc >= 2 && argv[1][0] == 's') {
+    if (argc >= 2 && strcmp(argv[1], "stat") == 0) {
         int d[3] = { -1, -1, -1 };
         if (ioctl(fd, 18, d) == 0)
             printf("строк %d, время %d мкс, кадров %d\n", d[0], d[1], d[2]);
@@ -551,7 +648,7 @@ int main(int argc, char **argv)
     /* almond3s-lcd pic — сырые 17 байт статуса PIC (ioctl 3).
      * Нужно, чтобы ловить, докладывает ли PIC о нажатиях кнопки питания:
      * до ядра она не доходит, вся надежда на эти байты. */
-    if (argc >= 2 && argv[1][0] == 'p') {
+    if (argc >= 2 && strcmp(argv[1], "pic") == 0) {
         unsigned char buf[17] = {0};
         int i;
         /* ioctl 2 - последний периодический снимок, который делает поток тача.

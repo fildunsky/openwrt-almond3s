@@ -13,9 +13,14 @@
 #   /etc/almond3s/scripts/weather_fetch.sh
 
 # Город берётся из UCI, чтобы менять его не правкой скрипта:
-#   uci set almond3s.weather.city='Saint Petersburg'; uci commit lcd
+#   uci set almond3s.weather.city='Saint Petersburg'; uci commit almond3s
 # Значение из конфига перекрывается переменной окружения CITY (для проверок).
-CITY="${CITY:-$(uci -q get lcd.weather.city)}"
+# ВАЖНО: конфиг давно переехал lcd -> almond3s, а скрипт остался на старом
+# имени - город всегда выходил пустым, и фолбэк показывал Москву, какой
+# город ни выбирай (пойман 16.08 на Воронеже). Старое имя оставлено вторым
+# шансом для непереехавших систем.
+CITY="${CITY:-$(uci -q get almond3s.weather.city)}"
+[ -n "$CITY" ] || CITY="$(uci -q get lcd.weather.city)"
 [ -n "$CITY" ] || CITY="Moscow"
 OUT="/tmp/lcd_weather.txt"
 TMP="/tmp/lcd_weather.txt.tmp"
@@ -32,7 +37,8 @@ CITY_URL=$(printf '%s' "$CITY" | tr ' ' '+')
 # описание погоды можно брать по-русски («Небольшой дождь» вместо
 # «Light rain shower»).
 # Язык описания берём тот же, что у интерфейса на экране.
-LANG_UI=$(uci -q get lcd.display.lang)
+LANG_UI=$(uci -q get almond3s.display.lang)
+[ -n "$LANG_UI" ] || LANG_UI=$(uci -q get lcd.display.lang)
 [ "$LANG_UI" = en ] && WLANG="" || WLANG="&lang=ru"
 URL="https://wttr.in/${CITY_URL}?format=%C|%t|%f|%h|%w&m${WLANG}"
 

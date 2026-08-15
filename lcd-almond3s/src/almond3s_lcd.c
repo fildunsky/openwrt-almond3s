@@ -26,6 +26,8 @@
 #include <linux/kmsg_dump.h>
 #include <linux/hrtimer.h>
 #include <linux/mutex.h>
+#include <linux/reboot.h>
+#include <linux/pm.h>
 
 
 #define DEVICE_NAME  "lcd"
@@ -84,6 +86,7 @@ static struct task_struct *render_thread;
 static int __maybe_unused target_fps = 0;  /* manual flush only */
 static int fb_dirty = 1;
 static int fb_writing = 0;  /* 1 while userspace write() in progress */
+static struct file *fb_writer;  /* чей write() взвёл fb_writing */
 static int splash_active = 1; /* demoscene animation until userspace takes over */
 
 /*
@@ -383,8 +386,69 @@ static void lcd_hw_reset(void)
     shadow_dir &= ~BIT_CSX; gw_dir(shadow_dir);
 }
 
+static int lcd_rot;         /* 1 = экран перевёрнут на 180 */
+static int lcd_rot_pending;
+static int panel_reinit_pending; /* полный reset+init панели из потока отрисовки */
+static int panel_init_alt;       /* 1 = таблица из заводского ядра, 0 = из загрузчика */
+
+/*
+ * Очередь сырых команд панели (ioctl 23). Раньше ioctl слал команду сразу,
+ * из своего контекста - и она могла врезаться в передачу кадра потоком
+ * отрисовки: контроллер панели глотал байты кадра как команды. Живой случай
+ * 16.08: три экземпляра UI на старте наперегонки слали inv/гамму/CABC -
+ * панель ушла в ровный белый до полного ре-инита. Теперь ioctl только
+ * ставит в очередь, а исполняет её поток отрисовки между кадрами.
+ * Один писатель (ioctl под fb_lock), один читатель (поток) - индексов int
+ * достаточно.
+ */
+static u32 pcmd_q[16];
+static int pcmd_head, pcmd_tail;
+
+/*
+ * У завода ДВЕ инициализации этой панели: загрузчик (на ней сток и работал -
+ * ядро панель при буте не переинициализировало) и таблица за ioctl 0 в
+ * заводском ядре - другая гамма, VCOM и питание. Держим обе: панели одной
+ * модели различаются партиями, и вторая калибровка может оказаться честнее.
+ * MADCTL в обеих шлём свой - поворот наш, а не заводской.
+ */
 static void lcd_init_ili9341(void)
 {
+    if (panel_init_alt) {
+        lcd_cmd(0xCF); lcd_dat(0x00); lcd_dat(0x83); lcd_dat(0x30);
+        lcd_cmd(0xED); lcd_dat(0x64); lcd_dat(0x03); lcd_dat(0x12); lcd_dat(0x81);
+        lcd_cmd(0xE8); lcd_dat(0x85); lcd_dat(0x01); lcd_dat(0x79);
+        lcd_cmd(0xCB); lcd_dat(0x39); lcd_dat(0x2C); lcd_dat(0x00); lcd_dat(0x34); lcd_dat(0x02);
+        lcd_cmd(0xF7); lcd_dat(0x20);
+        lcd_cmd(0xEA); lcd_dat(0x00); lcd_dat(0x00);
+        lcd_cmd(0xC0); lcd_dat(0x26);
+        lcd_cmd(0xC1); lcd_dat(0x11);
+        lcd_cmd(0xC5); lcd_dat(0x35); lcd_dat(0x3E);
+        lcd_cmd(0xC7); lcd_dat(0xBE);
+        lcd_cmd(0x36); lcd_dat(lcd_rot ? 0x68 : 0xA8);
+        lcd_cmd(0x3A); lcd_dat(0x55);
+        lcd_cmd(0xB1); lcd_dat(0x00); lcd_dat(0x1B);
+        lcd_cmd(0xB7); lcd_dat(0x07);
+        /* Второй байт B6 несёт бит SS (направление развёртки истоков).
+         * Заводское ядро слало 0x82 и компенсировало это MADCTL=0xE8; у нас
+         * MADCTL свой, поэтому и здесь оставляем свой 0xA2 - иначе картинка
+         * зеркалится, как будто смотришь с обратной стороны стекла. */
+        lcd_cmd(0xB6); lcd_dat(0x0A); lcd_dat(0xA2); lcd_dat(0x27); lcd_dat(0x00);
+        lcd_cmd(0xF2); lcd_dat(0x08);
+        lcd_cmd(0x26); lcd_dat(0x01);
+        lcd_cmd(0xE0);
+        lcd_dat(0x1F); lcd_dat(0x1A); lcd_dat(0x18); lcd_dat(0x0A);
+        lcd_dat(0x0F); lcd_dat(0x06); lcd_dat(0x45); lcd_dat(0x87);
+        lcd_dat(0x32); lcd_dat(0x0A); lcd_dat(0x07); lcd_dat(0x02);
+        lcd_dat(0x07); lcd_dat(0x05); lcd_dat(0x00);
+        lcd_cmd(0xE1);
+        lcd_dat(0x00); lcd_dat(0x25); lcd_dat(0x27); lcd_dat(0x05);
+        lcd_dat(0x10); lcd_dat(0x09); lcd_dat(0x3A); lcd_dat(0x78);
+        lcd_dat(0x4D); lcd_dat(0x05); lcd_dat(0x18); lcd_dat(0x0D);
+        lcd_dat(0x38); lcd_dat(0x3A); lcd_dat(0x1F);
+        lcd_cmd(0x11); mdelay(120);
+        lcd_cmd(0x29);
+        return;
+    }
     lcd_cmd(0xCF); lcd_dat(0x00); lcd_dat(0xC1); lcd_dat(0x30);
     lcd_cmd(0xED); lcd_dat(0x64); lcd_dat(0x03); lcd_dat(0x12); lcd_dat(0x81);
     lcd_cmd(0xE8); lcd_dat(0x85); lcd_dat(0x00); lcd_dat(0x78);
@@ -395,7 +459,7 @@ static void lcd_init_ili9341(void)
     lcd_cmd(0xC1); lcd_dat(0x11);
     lcd_cmd(0xC5); lcd_dat(0x3F); lcd_dat(0x3C);
     lcd_cmd(0xC7); lcd_dat(0x8E);
-    lcd_cmd(0x36); lcd_dat(0xA8);
+    lcd_cmd(0x36); lcd_dat(lcd_rot ? 0x68 : 0xA8);
     lcd_cmd(0x3A); lcd_dat(0x55);
     lcd_cmd(0xB1); lcd_dat(0x00); lcd_dat(0x15);
     lcd_cmd(0xB6); lcd_dat(0x0A); lcd_dat(0xA2);
@@ -451,8 +515,6 @@ static inline u16 dig_pixel(u16 p)
 
 static u16 *prev_snap;
 static bool prev_valid;
-static int lcd_rot;         /* 1 = экран перевёрнут на 180 */
-static int lcd_rot_pending;
 static int  stat_rows;      /* строк в последнем кадре */
 static int  stat_us;        /* сколько он занял, мкс */
 static int  stat_frames;    /* кадров всего */
@@ -1229,6 +1291,29 @@ static int render_fn(void *data)
             prev_valid = false;
             fb_dirty = 1;
         }
+        /* Полный reset+init панели - лечилка на случай слетевшего контроллера
+         * и рычаг для смены таблицы инициализации. Делается здесь же, потому
+         * что шина у потока отрисовки одна; таймер ШИМ на это время замирает,
+         * иначе его прерывание порвёт такты reset-последовательности. */
+        if (panel_reinit_pending) {
+            panel_reinit_pending = 0;
+            bl_bus_busy = true;
+            lcd_hw_reset();
+            lcd_init_ili9341();
+            bl_bus_busy = false;
+            prev_valid = false;
+            fb_dirty = 1;
+        }
+        while (pcmd_tail != pcmd_head) {
+            u32 pc = pcmd_q[pcmd_tail];
+            u8 c = (pc >> 16) & 0xFF, dt = (pc >> 8) & 0xFF, n = pc & 0xFF;
+            bl_bus_busy = true;
+            lcd_cmd(c);
+            if (n) lcd_dat(dt);
+            lcd_cs_deselect();
+            bl_bus_busy = false;
+            pcmd_tail = (pcmd_tail + 1) & 15;
+        }
         if (splash_active) {
             /* Splash runs until userspace writes to /dev/lcd. Live kmsg tail
              * is overlaid inside the matrix scene itself, so no separate
@@ -1242,6 +1327,17 @@ static int render_fn(void *data)
             lcd_flush_fb();
             fb_dirty = 0;
         } else {
+            /* Страховка от застрявших строк панели: гонки снимка изредка
+             * оставляют на стекле полосу прошлого кадра, которую дифф
+             * строк никогда не перерисует (ловили чёрную полосу 15.08 и
+             * зелёную 16.08). Раз в ~10 минут просим полный кадр - при
+             * работающем ШИМе одна полная протяжка глазу не видна. */
+            static int repaint_tick;
+            if (++repaint_tick >= 12000) {
+                repaint_tick = 0;
+                prev_valid = false;
+                fb_dirty = 1;
+            }
             msleep_interruptible(50);
         }
     }
@@ -1262,8 +1358,10 @@ static ssize_t lcd_fb_write(struct file *f, const char __user *buf,
     if (pos >= FB_SIZE) return 0;
     if (pos + cnt > FB_SIZE) cnt = FB_SIZE - pos;
 
-    if (pos == 0)
+    if (pos == 0) {
         fb_writing = 1;  /* block render thread from flushing */
+        fb_writer = f;
+    }
 
     /* Ждём мьютекс ПРЕРЫВАЕМО. С обычным mutex_lock процесс, которому в этот
      * момент прилетел SIGTERM (procd при перезапуске службы), уходил в
@@ -1275,11 +1373,13 @@ static ssize_t lcd_fb_write(struct file *f, const char __user *buf,
          * отрисовки ждёт его снятия и без этого больше не выводит НИЧЕГО -
          * экран замирает до перезагрузки модуля. */
         fb_writing = 0;
+        fb_writer = NULL;
         return -ERESTARTSYS;
     }
     if (copy_from_user(framebuffer + pos, buf, cnt)) {
         mutex_unlock(&fb_lock);
         fb_writing = 0;
+        fb_writer = NULL;
         return -EFAULT;
     }
     mutex_unlock(&fb_lock);
@@ -1304,12 +1404,29 @@ static ssize_t lcd_fb_write(struct file *f, const char __user *buf,
         while (flush_busy && wait++ < 200)
             msleep_interruptible(2);
 
-        if (mutex_lock_interruptible(&fb_lock))
+        if (mutex_lock_interruptible(&fb_lock)) {
+            /* Кадр дописан, но снимок не снят. Флаг обязан упасть и здесь,
+             * иначе поток отрисовки ждёт его снятия вечно и экран замирает -
+             * та же ловушка, что и у первой точки ожидания выше. */
+            fb_writing = 0;
+            fb_writer = NULL;
             return -ERESTARTSYS;
+        }
         memcpy(flush_snap, framebuffer, FB_SIZE);
         mutex_unlock(&fb_lock);
+        /* Ожидание выше могло НЕ дождаться: msleep_interruptible при висящем
+         * сигнале возвращается мгновенно, и цикл пролетает за микросекунды.
+         * Тогда снимок переписан ПОД уходящим кадром: поток отрисовки дошлёт
+         * панели уже новые пиксели, а пропущенные как «не изменившиеся»
+         * строки останутся на ней от старого кадра - навсегда, потому что в
+         * prev_snap они помечены свежими. Раньше это самолечилось побочным
+         * эффектом бага с fb_writing (лишние пересылки), теперь честно
+         * просим полный кадр. */
+        if (flush_busy)
+            prev_valid = false;
         snap_ready = 1;
         fb_writing = 0;
+        fb_writer = NULL;
         fb_dirty = 1;
     }
 
@@ -1391,43 +1508,77 @@ static void i2c_raw_stop(void)
     udelay(150);
 }
 
-static void sx8650_hw_init(void)
+/*
+ * По даташиту SX8650 (V2.19) наша унаследованная инициализация была ручным
+ * режимом с двумя странностями: регистра 0x03 у чипа нет (наследие SX8651),
+ * а «PenTrg» на деле был SELECT(X)+CONVERT(X). Настоящий PENTRG - команда
+ * 0xE0: чип сам ждёт перо, сам меряет каналы из маски и отдаёт их пачкой
+ * за одну транзакцию. Плюс POWDLY: 0.5 мкс на устоявание канала для панели
+ * с LCD прямо под тачем - это ничто, отсюда потерянные короткие тапы.
+ * touch_mode: 1 = PENTRG (экспериментальный), 0 = ручной (рабочий дефолт).
+ * РАЗГАДКА (ночь 15-16.08, архив iSublimity/TOUCH.md): на этом кремнии
+ * CONVERT-команды возвращают 0xFF - работают ТОЛЬКО SELECT(X)/SELECT(Y).
+ * А «0x91» легаси-цикла - не команда, а read-адрес чипа (0x48<<1|1).
+ * То есть заводской цикл - единственно правильный протокол; PENTRG(0xE0)
+ * дал поток одного канала Y, CONVERT(SEQ,0x97) - вечное 0xFF, оба тупика
+ * аппаратные. Экспериментальная ветка оставлена как памятник с дампером.
+ */
+static int touch_mode = 0;
+static int touch_mode_req = -1;  /* смена режима: применяет тач-поток, шина его */
+static int sx_reg_req = -1;      /* адрес регистра на чтение (0x40|RA внутри) */
+static int sx_reg_val = -2;      /* результат: >=0 байт, -2 не готов */
+
+static void sx8650_config(int pentrg)
 {
     u32 saved_ctl1 = gr(SM0_CTL1);
 
+    gw(SM0_CTL1, 0x90644042);
+    gw(0x928, 1);
+
+    i2c_raw_start(); i2c_raw_write(0x1F); i2c_raw_write(0xDE); i2c_raw_stop();
+    mdelay(50);
+
+    /* Ctrl0: RATE=0 (по запросу), POWDLY - в эксперименте даём устояться */
+    i2c_raw_start(); i2c_raw_write(0x00); i2c_raw_write(pentrg ? 0x06 : 0x00); i2c_raw_stop(); udelay(150);
+    /* Ctrl1: CONDIRQ=1, RPDNT=200к, фильтр 7 выборок (заводское, оптимум) */
+    i2c_raw_start(); i2c_raw_write(0x01); i2c_raw_write(0x27); i2c_raw_stop(); udelay(150);
+    i2c_raw_start(); i2c_raw_write(0x02); i2c_raw_write(0x00); i2c_raw_stop(); udelay(150);
+    /* 0x03=0x2D: у SX8650 такого регистра по даташиту нет, но заводская
+     * прошивка его писала, и на плате может стоять пин-совместимый SX8651,
+     * у которого 0x03 существует. Пишем как завод - хуже не будет. */
+    i2c_raw_start(); i2c_raw_write(0x03); i2c_raw_write(0x2D); i2c_raw_stop(); udelay(150);
+    /* ChanMsk: в эксперименте меряем X,Y,Z1,Z2 - давление отсеивает помехи */
+    i2c_raw_start(); i2c_raw_write(0x04); i2c_raw_write(pentrg ? 0xF0 : 0xC0); i2c_raw_stop(); udelay(150);
+
+    if (pentrg) {
+        /* Никакой команды режима: остаёмся в ручном (RATE=0). Живой тест
+         * PENTRG (0xE0) на этом кремнии дал поток из ОДНОГО канала Y -
+         * маску он не уважает. Вместо этого каждый опрос шлёт
+         * CONVERT(SEQ)=0x97: одна команда конвертирует все каналы маски,
+         * и пакет приходит в гарантированном порядке X,Y,Z1,Z2. */
+        ;
+    } else {
+        i2c_raw_start();
+        gw(SM0_DATAOUT, 0x80); gw(SM0_STATUS, 2); udelay(150);
+        gw(SM0_START, 0); udelay(150);
+        i2c_raw_start();
+        gw(SM0_DATAOUT, 0x90); gw(SM0_STATUS, 2); udelay(150);
+    }
+
+    gw(SM0_CFG, 0xFA);
+    gw(SM0_CTL1, saved_ctl1); udelay(10);
+}
+
+static void sx8650_hw_init(void)
+{
     /* Get I2C adapter for PIC battery (Linux I2C) */
     touch_i2c_adap = i2c_get_adapter(0);
     if (!touch_i2c_adap)
         pr_warn("cannot get I2C adapter 0 (PIC battery won't work)\n");
 
-    /* SX8650 init via palmbus (needs SM0_CTL1=0x90644042) */
-    gw(SM0_CTL1, 0x90644042);
-    gw(0x928, 1);
-
-    /* 1. Soft Reset */
-    i2c_raw_start(); i2c_raw_write(0x1F); i2c_raw_write(0xDE); i2c_raw_stop();
-    mdelay(50);
-
-    /* 2. Registers from stock firmware */
-    i2c_raw_start(); i2c_raw_write(0x00); i2c_raw_write(0x00); i2c_raw_stop(); udelay(150);
-    i2c_raw_start(); i2c_raw_write(0x01); i2c_raw_write(0x27); i2c_raw_stop(); udelay(150);
-    i2c_raw_start(); i2c_raw_write(0x02); i2c_raw_write(0x00); i2c_raw_stop(); udelay(150);
-    i2c_raw_start(); i2c_raw_write(0x03); i2c_raw_write(0x2D); i2c_raw_stop(); udelay(150);
-    i2c_raw_start(); i2c_raw_write(0x04); i2c_raw_write(0xC0); i2c_raw_stop(); udelay(150);
-
-    /* 3. PenTrg mode */
-    i2c_raw_start();
-    gw(SM0_DATAOUT, 0x80); gw(SM0_STATUS, 2); udelay(150);
-    gw(SM0_START, 0); udelay(150);
-    i2c_raw_start();
-    gw(SM0_DATAOUT, 0x90); gw(SM0_STATUS, 2); udelay(150);
-
-    gw(SM0_CFG, 0xFA);
-
-    /* Restore SM0_CTL1 for Linux I2C driver */
-    gw(SM0_CTL1, saved_ctl1); udelay(10);
-
-    pr_info("SX8650 init done (palmbus + SM0 save/restore)\n");
+    sx8650_config(touch_mode);
+    pr_info("SX8650 init done (%s, palmbus + SM0 save/restore)\n",
+            touch_mode ? "PENTRG" : "manual");
 }
 
 /*
@@ -1663,6 +1814,19 @@ static void pic_read_battery_palmbus(void)
          * полубайта байта 3. Прежняя проверка resp[3]==0x02 отбрасывала
          * все выборки вне окна 512..767, и показания замирали. */
         int adc = ((resp[3] & 0x0F) << 8) | resp[1];
+        /* Статус-байт по заводскому разбору: bit0 - зарядка, bit5+bit6 -
+         * батареи нет, bit6 без bit5 - tamper. Какой-то из оставшихся бит
+         * должен отражать кнопку питания (сток по ней запускал handshake
+         * выключения 0x38) - логируем каждую перемену, чтобы поймать его
+         * живым нажатием. */
+        {
+            static u8 last_stat = 0xFF;
+            if (resp[4] == 0x04 && resp[5] != last_stat) {
+                pr_info("PIC статус 0x%02x -> 0x%02x (adc=%d)\n",
+                        last_stat, resp[5], adc);
+                last_stat = resp[5];
+            }
+        }
         if (resp[4] == 0x04 && adc < 1023) {
             pic_battery_raw[0] = resp[0];
             pic_battery_raw[1] = resp[1];
@@ -1676,15 +1840,176 @@ static void pic_read_battery_palmbus(void)
     }
 }
 
+/*
+ * PENTRG-чтение: чип сам сконвертировал X,Y,Z1,Z2 по касанию - забираем
+ * пачку одной транзакцией (порядок каналов фиксирован, от старшего бита
+ * маски). Нет пера - чип отдаёт 0xFFFF («Invalid Qualified Data»), это
+ * штатный маркер, а не ошибка шины. Пары Z1/Z2 - готовый критерий помехи
+ * из даташита: Z1<10 при Z2>4070 = мусор от ESD/наводки.
+ */
+static int sx8650_read_pentrg(int *rx, int *ry)
+{
+    u8 b[8];
+    int i, p, ch, got = 0, val[4] = {0, 0, 0, 0};
+    u32 saved_ctl1 = gr(SM0_CTL1);
+
+    gw(SM0_CTL1, 0x90644042); udelay(10);
+    gw(SM0_CFG, 0xFA);
+
+    /* CONVERT(SEQ): один запрос - все каналы маски (X,Y,Z1,Z2). */
+    gw(SM0_DATA, SX8650_ADDR);
+    gw(SM0_START, 1);
+    gw(SM0_DATAOUT, 0x97);
+    gw(SM0_STATUS, 0);
+    for (p = 0; p < 500; p++) { if (gr(0x918) & 0x01) break; udelay(10); }
+
+    /* Tconv для 4 каналов с POWDLY~36мкс и фильтром 7 выборок - сотни
+     * микросекунд; ждём с запасом, потом забираем пакет. */
+    usleep_range(800, 1000);
+
+    gw(SM0_DATA, SX8650_ADDR);
+    gw(SM0_START, 7);
+    gw(SM0_STATUS, 1);
+    for (i = 0; i < 8; i++) {
+        for (p = 0; p < 1500; p++) {
+            if (gr(0x918) & 0x04) break;
+            udelay(2);
+        }
+        if (p >= 1500) {
+            gw(SM0_CTL1, saved_ctl1); udelay(10);
+            return 0;          /* нет данных - не ошибка */
+        }
+        udelay(5);
+        b[i] = gr(SM0_DATAIN) & 0xFF;
+    }
+    gw(SM0_CTL1, saved_ctl1); udelay(10);
+
+    if (b[0] == 0xFF)
+        return 0;              /* 0xFFFF = пера нет, штатный маркер */
+
+    /* Мы сами запросили конверсию - порядок пакета детерминирован:
+     * X, Y, Z1, Z2, каждый с тегом канала в старшем полубайте. */
+    for (i = 0; i < 4; i++) {
+        u8 hi = b[i * 2];
+        if (hi == 0xFF)
+            break;             /* хвост не сконвертирован - X/Y уже есть */
+        ch = (hi >> 4) & 7;
+        if (ch > 3 || (hi & 0x80)) {
+            static int dump_left = 12;
+            if (dump_left > 0) {
+                dump_left--;
+                pr_info("SEQ raw: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+            }
+            touch_bad_ch++;
+            return 0;
+        }
+        val[ch] = ((hi & 0x0F) << 8) | b[i * 2 + 1];
+        got |= 1 << ch;
+    }
+    if ((got & 3) != 3) {
+        /* Кадр с данными, но без полной пары X+Y - показать, что пришло. */
+        static int pdump_left = 20;
+        if (pdump_left > 0) {
+            pdump_left--;
+            pr_info("SEQ part(got=%x): %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                    got, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+        }
+        touch_drop_cnt++;
+        return 0;
+    }
+
+    /* Отбраковку по давлению ВЫКЛЮЧИЛИ: пороги из даташита (Z1<10 &&
+     * Z2>4070) на живом стекле резали 92% настоящих касаний. Сначала
+     * калибруем по дампам реальные диапазоны, потом вернём порог. */
+    {
+        static int zdump_left = 20;
+        if ((got & 0x0C) == 0x0C && zdump_left > 0) {
+            zdump_left--;
+            pr_info("SEQ z: x=%d y=%d z1=%d z2=%d\n",
+                    val[0], val[1], val[2], val[3]);
+        }
+    }
+
+    {
+        int px = (4096 - val[1]) * TOUCH_SCALE_X / 4096 - TOUCH_OFF_X;
+        int py = val[0] * TOUCH_SCALE_Y / 4096 - TOUCH_OFF_Y;
+        *rx = px < 0 ? 0 : (px > LCD_W - 1 ? LCD_W - 1 : px);
+        *ry = py < 0 ? 0 : (py > LCD_H - 1 ? LCD_H - 1 : py);
+        if (lcd_rot) {
+            *rx = LCD_W - 1 - *rx;
+            *ry = LCD_H - 1 - *ry;
+        }
+    }
+    touch_ok_cnt++;
+    return 1;
+}
+
+/*
+ * Чтение конфигурационного регистра SX865x: та же рабочая SM0-
+ * последовательность, что и чтение координаты, только первым байтом идёт
+ * команда «прочитай регистр» (0x40|RA) вместо SELECT. Нужно для
+ * идентификации чипа: у SX8651 существует регистр 0x03 (CTRL3, заводское
+ * значение 0x2D), у SX8650 его нет.
+ */
+/*
+ * Регистры чипа НЕ ЧИТАЮТСЯ никаким из трёх способов (старый движок со
+ * стопом и без - FF; NEW-движок и ядерный i2c - NACK на адресе: чип
+ * отвечает только старому движку под CTL0=0x90644042). Идентификацию
+ * делаем ПОВЕДЕНЧЕСКИ: SELECT произвольного канала + чтение проверенным
+ * координатным циклом. У SX8651 есть каналы RX(5)/RY(6) - SX8650 их не
+ * имеет. arg = байт SELECT (0x80|канал); возврат = сырые (h<<8)|l.
+ */
+static int sx8650_select_read(int selbyte)
+{
+    u8 h, l;
+    u32 saved_ctl1 = gr(SM0_CTL1);
+
+    gw(SM0_CTL1, 0x90644042); udelay(10);
+    gw(SM0_DATA, SX8650_ADDR);
+    gw(SM0_START, 0); udelay(10);
+    gw(SM0_DATAOUT, selbyte & 0xFF);
+    gw(SM0_STATUS, 2); udelay(150);
+    gw(SM0_START, 0); udelay(10);
+    gw(SM0_DATAOUT, 0x91);
+    gw(SM0_STATUS, 2); udelay(150);
+    gw(SM0_CFG, 0xFA);
+    gw(SM0_START, 0); udelay(10);
+    gw(SM0_START, 1); gw(SM0_START, 1); udelay(10);
+    gw(SM0_STATUS, 1); udelay(150);
+    h = gr(SM0_DATAIN) & 0xFF; udelay(150);
+    l = gr(SM0_DATAIN) & 0xFF; udelay(150);
+    gw(SM0_START, 0); udelay(10);
+    gw(SM0_START, 1);
+    gw(SM0_CTL1, saved_ctl1); udelay(10);
+    return ((int)h << 8) | l;
+}
+
+/* Одиночная запись регистра чипа проверенным путём (как init). */
+static void sx8650_write_reg(int reg, int val)
+{
+    u32 saved_ctl1 = gr(SM0_CTL1);
+
+    gw(SM0_CTL1, 0x90644042);
+    i2c_raw_start();
+    i2c_raw_write(reg & 0x1F);
+    i2c_raw_write(val & 0xFF);
+    i2c_raw_stop();
+    gw(SM0_CFG, 0xFA);
+    gw(SM0_CTL1, saved_ctl1); udelay(10);
+}
+
 static int touch_fn(void *data)
 {
     int x, y, was_pressed = 0;
     int no_touch_count = 0;
     int battery_counter = 0;
+    int cfg_counter = 0;
 
     while (!kthread_should_stop()) {
         /* Touch read (palmbus direct, SM0_CTL1 saved/restored) */
-        if (sx8650_read_xy(&x, &y)) {
+        if (touch_mode ? sx8650_read_pentrg(&x, &y)
+                       : sx8650_read_xy(&x, &y)) {
             touch_x = x;
             touch_y = y;
             touch_pressed = 1;
@@ -1699,6 +2024,32 @@ static int touch_fn(void *data)
                 was_pressed = 0;
                 pr_debug("touch UP\n");
             }
+        }
+
+        if (touch_mode_req >= 0) {
+            touch_mode = touch_mode_req;
+            touch_mode_req = -1;
+            sx8650_config(touch_mode);
+            pr_info("тач: режим %s\n", touch_mode ? "PENTRG" : "ручной");
+        }
+
+        if (sx_reg_req >= 0) {
+            if (sx_reg_req & 0x10000)
+                sx8650_write_reg((sx_reg_req >> 8) & 0x1F,
+                                 sx_reg_req & 0xFF), sx_reg_val = 0;
+            else
+                sx_reg_val = sx8650_select_read(sx_reg_req & 0xFF);
+            sx_reg_req = -1;
+        }
+
+        /* ESD может молча ресетнуть SX8650 - регистры волатильные и
+         * вернутся в дефолт (даташит, разд. 7.6). Раз в минуту, в паузе
+         * между касаниями, перезаписываем конфигурацию заново - дешёвая
+         * страховка вместо сверки регистров. */
+        if (++cfg_counter >= 2000) {
+            cfg_counter = 0;
+            if (!touch_pressed && no_touch_count > 150)
+                sx8650_config(touch_mode);
         }
 
         /* Battery read every ~10 sec (200 * 50ms) */
@@ -1871,6 +2222,63 @@ beep_done:
     return 0;
 }
 
+/*
+ * Выключение по-заводски: PIC по команде 0x38 опускает PORTE.5 и физически
+ * рубит питание платы (с воткнутым зарядником чип команду игнорирует - тогда
+ * плата остаётся стоять в halt). Слать надо в самом конце штатного
+ * выключения, когда всё уже размонтировано, - это pm_power_off. Тач-поток к
+ * тому моменту останавливаем через reboot_notifier: он ходит по той же шине
+ * SM0, и столкнуться с ним посреди транзакции - подвесить PIC вместо
+ * выключения.
+ */
+static int pic_reboot_prep(struct notifier_block *nb, unsigned long action,
+                           void *v)
+{
+    if (touch_thread) {
+        kthread_stop(touch_thread);
+        touch_thread = NULL;
+    }
+    return NOTIFY_DONE;
+}
+static struct notifier_block pic_reboot_nb = {
+    .notifier_call = pic_reboot_prep,
+};
+
+static void (*old_pm_power_off)(void);
+
+static void pic_power_off(void)
+{
+    int try, w;
+
+    /* Как и везде при общении с PIC: сначала 0x39 - его I2C-движок после
+     * чужого трафика на шине стоит клином и молча глотает первый пакет.
+     * Именно так потерялся 0x38 при первой живой проверке выключения.
+     * Несколько попыток: если питание упало - до следующей просто не
+     * доживём, а если PIC опять не услышал - добьём повтором. */
+    for (try = 0; try < 3; try++) {
+        gw(SM0_CTL1, 0x90644042); udelay(10);
+        gw(SM0_CFG, 0xFA);
+        gw(SM0_DATA, PIC_ADDR);
+        gw(SM0_START, 1);
+        gw(SM0_DATAOUT, 0x39);
+        gw(SM0_STATUS, 0);
+        for (w = 0; w < 500; w++) { if (gr(0x918) & 0x01) break; udelay(10); }
+        mdelay(10);
+
+        gw(SM0_CTL1, 0x90644042); udelay(10);
+        gw(SM0_CFG, 0xFA);
+        gw(SM0_DATA, PIC_ADDR);
+        gw(SM0_START, 1);
+        gw(SM0_DATAOUT, 0x38);
+        gw(SM0_STATUS, 0);
+        for (w = 0; w < 500; w++) { if (gr(0x918) & 0x01) break; udelay(10); }
+        pr_info("PIC 0x38: просим отключить питание (попытка %d)\n", try + 1);
+        mdelay(300);
+    }
+    if (old_pm_power_off)
+        old_pm_power_off();
+}
+
 /* ioctl: 0=flush, 1=read touch, 2=read battery, 3=raw PIC read, 4=backlight */
 static long lcd_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
@@ -1965,19 +2373,65 @@ static long lcd_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
     if (cmd == 23) {
         /* Сырая команда панели: arg = 0xCCDDNN, где CC - команда,
          * DD - байт данных, NN - сколько байт данных (0 или 1).
-         * Нужно, чтобы проверить аппаратную яркость ILI9341 (0x51/0x53). */
-        u8 c = (arg >> 16) & 0xFF, d = (arg >> 8) & 0xFF, n = arg & 0xFF;
+         * В очередь потока отрисовки: немедленная отправка из ioctl
+         * врезалась в передачу кадра и портила состояние контроллера
+         * (белый экран 16.08). fb_lock сериализует писателей. */
         if (mutex_lock_interruptible(&fb_lock))
             return -ERESTARTSYS;
-        lcd_cmd(c);
-        if (n) lcd_dat(d);
+        if (((pcmd_head + 1) & 15) == pcmd_tail) {
+            mutex_unlock(&fb_lock);
+            return -EBUSY;
+        }
+        pcmd_q[pcmd_head] = (u32)arg;
+        pcmd_head = (pcmd_head + 1) & 15;
         mutex_unlock(&fb_lock);
-        pr_debug("панель: команда 0x%02x данные 0x%02x (%u байт)\n", c, d, n);
         return 0;
     }
     if (cmd == 22) {
         lcd_rot = arg ? 1 : 0;
         lcd_rot_pending = 1;
+        return 0;
+    }
+    if (cmd == 31) {
+        /* Тач-чип: SELECT-чтение (arg = байт SELECT, возврат (h<<8)|l)
+         * или запись регистра (arg = 0x10000|(reg<<8)|val, возврат 0).
+         * Выполняет тач-поток (шина его), ждём до ~700 мс. */
+        int t;
+        sx_reg_val = -2;
+        sx_reg_req = (int)(arg & 0x1FFFF);
+        for (t = 0; t < 70; t++) {
+            if (sx_reg_req < 0 && sx_reg_val != -2)
+                return sx_reg_val;
+            msleep(10);
+        }
+        return -EIO;
+    }
+    if (cmd == 29) {
+        /* Режим тача: 1 = PENTRG (по даташиту), 0 = ручной (легаси).
+         * Страховка на случай, если PENTRG на живом стекле поведёт себя
+         * не так, как обещает документация. */
+        touch_mode_req = arg ? 1 : 0;
+        return 0;
+    }
+    if (cmd == 28) {
+        /* Сырые DATA-регистры трёх GPIO-банков - искать, на каком пине
+         * живёт кнопка питания (devmem в этом ядре выключен). ВАЖНО: в
+         * MT7621 0x600 - это НАПРАВЛЕНИЯ (наши макросы названы наоборот,
+         * битбангу всё равно), настоящие данные - 0x620/0x624/0x628.
+         * Первая версия читала 0x600 и входов не видела в принципе. */
+        u32 d[3] = { gr(0x620), gr(0x624), gr(0x628) };
+        if (copy_to_user((void __user *)arg, d, sizeof(d)))
+            return -EFAULT;
+        return 0;
+    }
+    if (cmd == 26) {
+        /* Переинициализация панели: 0 - текущей таблицей, 1 - таблицей из
+         * заводского ядра, 2 - таблицей загрузчика (наш дефолт). */
+        if (arg == 1) panel_init_alt = 1;
+        else if (arg == 2) panel_init_alt = 0;
+        panel_reinit_pending = 1;
+        pr_info("панель: переинициализация, таблица %s\n",
+                panel_init_alt ? "заводского ядра" : "загрузчика");
         return 0;
     }
     if (cmd == 21) {
@@ -2116,11 +2570,17 @@ static int lcd_mmap(struct file *f, struct vm_area_struct *vma)
 }
 
 /* Процесс мог умереть посреди кадра - тогда флаг записи остался бы
- * взведённым, и вывод на панель встал бы навсегда. Снимаем его при
- * закрытии устройства. */
+ * взведённым, и вывод на панель встал бы навсегда. Но снимать его можно
+ * только закрытием ТОГО файла, чей write() его взвёл: /dev/lcd открывают
+ * и короткоживущие клиенты (collector за батареей каждые пару секунд),
+ * и их close посреди чужого кадра отпускал поток отрисовки раньше
+ * времени - на панель уезжал наполовину записанный кадр. */
 static int lcd_release(struct inode *inode, struct file *f)
 {
-    fb_writing = 0;
+    if (f == fb_writer) {
+        fb_writing = 0;
+        fb_writer = NULL;
+    }
     return 0;
 }
 
@@ -2398,6 +2858,10 @@ static int __init lcd_drv_init(void)
     /* Start touch thread */
     touch_thread = kthread_run(touch_fn, NULL, "lcd_touch");
 
+    register_reboot_notifier(&pic_reboot_nb);
+    old_pm_power_off = pm_power_off;
+    pm_power_off = pic_power_off;
+
     pr_info("%s by Sublimity — START (fb=%dx%d, %d bytes)\n",
             LCD_DRV_BUILD, LCD_W, LCD_H, FB_SIZE);
     return 0;
@@ -2405,13 +2869,19 @@ static int __init lcd_drv_init(void)
 
 static void __exit lcd_drv_exit(void)
 {
-    if (bl_timer_on) hrtimer_cancel(&bl_timer);
-    if (prev_snap) { vfree(prev_snap); prev_snap = NULL; }
+    pm_power_off = old_pm_power_off;
+    unregister_reboot_notifier(&pic_reboot_nb);
+    /* Сначала гасим потоки: они читают prev_snap и framebuffer, освобождать
+     * память раньше них - use-after-free в момент rmmod. Таймер отменяем
+     * безусловно: на неактивном hrtimer_cancel безвреден, а проверка
+     * bl_timer_on могла разминуться с bl_set_level. */
     if (touch_thread) kthread_stop(touch_thread);
     if (render_thread) kthread_stop(render_thread);
-    if (touch_i2c_adap) i2c_put_adapter(touch_i2c_adap);
-    led_classdev_unregister(&almond_led);
+    hrtimer_cancel(&bl_timer);
     misc_deregister(&lcd_dev);
+    led_classdev_unregister(&almond_led);
+    if (touch_i2c_adap) i2c_put_adapter(touch_i2c_adap);
+    if (prev_snap) { vfree(prev_snap); prev_snap = NULL; }
     vfree(framebuffer);
     kfree(fb_pages);
     if (gpio_base) iounmap(gpio_base);

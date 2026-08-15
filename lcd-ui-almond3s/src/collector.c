@@ -47,7 +47,7 @@ static int charge_table_lookup(int adc);   /* то же для таблицы з
 
 /* ======== PIC Battery ======== */
 struct battery_info {
-    int adc, percent, charging, valid, no_battery;
+    int adc, percent, charging, valid, no_battery, full;
     unsigned char raw1, raw2;  /* buf[1], buf[2] for hex display */
 };
 
@@ -68,6 +68,14 @@ static int bat_adc_filt = 0;   /* сглаженный АЦП, восьмикр�
 #define BAT_PLATEAU_MIN   690  /* плато ниже - неисправность, а не полный заряд */
 static int bat_plateau_max = 0;
 static int bat_plateau_ticks = 0;
+/* Защёлка «заряд завершён» по семантике BQ24133: у полной батареи STAT
+ * гаснет, а короткие включения после - recharge-подкачки у порога 8.2В
+ * (~709 АЦП), не новый цикл заряда. Дебаунс минутные качели не победит
+ * принципиально - только защёлка. */
+static int bat_full_latch = 0;
+static int bat_full_low = 0;
+static int bat_full_quiet = 0;  /* тики без recharge-импульсов под защёлкой */
+static int bat_cycle_cd = 0;    /* тики до права на новую запись в журнал циклов */
 static struct battery_info bat_last_good;
 static int bat_have_good = 0;
 
@@ -151,7 +159,7 @@ static int cpu_core_count(void)
 
 static void get_battery(struct battery_info *bi) {
     unsigned char raw[17] = {0};
-    bi->adc = 0; bi->percent = 0; bi->charging = 0; bi->valid = 0; bi->no_battery = 0; bi->raw1 = 0; bi->raw2 = 0;
+    bi->adc = 0; bi->percent = 0; bi->charging = 0; bi->valid = 0; bi->no_battery = 0; bi->full = 0; bi->raw1 = 0; bi->raw2 = 0;
     int fd = open("/dev/lcd", O_RDWR);
     if (fd < 0) return;
     int ret = ioctl(fd, 2, raw);
@@ -209,6 +217,43 @@ static void get_battery(struct battery_info *bi) {
 
         int adc_eff = adc_sm - (bi->charging ? bat_charge_bump : 0);
 
+        /* Отдельного бита «адаптер воткнут» у PIC нет (бит 3 оказался
+         * событийным снимком - живой замер 15.08: 0x01 при воткнутом
+         * кабеле), а по напряжению отдыхающая полная батарея (~709) и
+         * полная под адаптером неразличимы. Поэтому:
+         *  - ставим защёлку по ПЕРЕХОДУ заряд->стоп на высоком АЦП
+         *    (терминация BQ24133);
+         *  - каждый recharge-импульс её продлевает - под адаптером они
+         *    идут с периодом в минуты;
+         *  - их исчезновение на 20 минут = кабель выдернут (эти 20 минут
+         *    отдохнувшая батарея и правда ~100%, ошибка ограничена);
+         *  - просадка АЦП ниже 700 снимает защёлку немедленно. */
+        {
+            if (bat_last_charging == 1 && !bi->charging && adc_sm >= 706) {
+                bat_full_latch = 1;
+                bat_full_low = 0;
+                bat_full_quiet = 0;
+            }
+            if (bat_full_latch) {
+                if (bi->charging)
+                    bat_full_quiet = 0;
+                else if (++bat_full_quiet >= 600) {
+                    bat_full_latch = 0;
+                    bat_full_quiet = 0;
+                }
+                if (adc_sm < 700) {
+                    if (++bat_full_low >= 5) {
+                        bat_full_latch = 0;
+                        bat_full_low = 0;
+                    }
+                } else {
+                    bat_full_low = 0;
+                }
+                if (bi->no_battery)
+                    bat_full_latch = 0;
+            }
+        }
+
         int plateau_full = 0;
         if (bi->charging) {
             /* Считаем тики, а не время: у роутера нет RTC, и настенные часы
@@ -258,12 +303,32 @@ static void get_battery(struct battery_info *bi) {
         bi->percent = bat_disp_percent;
 
         /* Начало зарядки - строка в журнал циклов: страница «Батарея»
-         * показывает их счёт, а со временем по журналу посчитаем износ. */
-        if (bat_last_charging == 0 && bi->charging) {
+         * показывает их счёт, а со временем по журналу посчитаем износ.
+         * ЦИКЛ - это не любой подъём флага (журнал за 14.08 набрал 30
+         * строк из ОДНОЙ реальной зарядки на дребезге и подкачках), а
+         * старт заряда заметно разряженной батареи: АЦП ниже ~700 (≈90%),
+         * не под защёлкой FULL и не раньше получаса от прошлой записи
+         * (кулдаун тиками - настенным часам без RTC веры нет). */
+        if (bat_cycle_cd > 0) bat_cycle_cd--;
+        if (bat_last_charging == 0 && bi->charging && !bat_full_latch
+            && adc_sm < 700 && bat_cycle_cd == 0) {
             FILE *cf = fopen("/etc/almond3s/charge_events", "a");
             if (cf) { fprintf(cf, "%ld\n", (long)time(NULL)); fclose(cf); }
+            bat_cycle_cd = 900;
         }
         bat_last_charging = bi->charging;
+
+        /* Публикация поверх защёлки: процент 100 намертво, подкачки
+         * наружу не показываем - именно их мигание анимацией зарядки и
+         * скачки процентов раздражали на почти полной батарее. Внутренняя
+         * механика (bump, журнал, фильтр) выше работала с настоящим
+         * флагом. */
+        if (bat_full_latch) {
+            bat_disp_percent = 100;
+            bi->percent = 100;
+            bi->charging = 0;
+            bi->full = 1;
+        }
 
         /* История для графиков страницы «Батарея»: точка в минуту в файл,
          * последние два часа. Живёт в /tmp у КОЛЛЕКТОРА, а не в памяти
@@ -359,7 +424,7 @@ static void bat_cal_load(void) {
         int val = atoi(eq + 1);
         if (strcmp(line, "cutoff_adc") == 0)   bat_cal_cutoff = val;
         else if (strcmp(line, "time_factor") == 0)  bat_cal_factor = val;
-        else if (strcmp(line, "hist_size") == 0)    { bat_cal_hist_size = val; if (val > BAT_HIST_MAX) bat_cal_hist_size = BAT_HIST_MAX; }
+        else if (strcmp(line, "hist_size") == 0)    { bat_cal_hist_size = val; if (val > BAT_HIST_MAX) bat_cal_hist_size = BAT_HIST_MAX; if (bat_cal_hist_size < 1) bat_cal_hist_size = 1; }
         else if (strcmp(line, "min_interval") == 0) bat_cal_interval = val;
     }
     fclose(fp);
@@ -505,6 +570,10 @@ static void bat_charge_estimate(struct bat_estimator *e, int cur_adc) {
 
 static void bat_update(struct bat_estimator *e, struct battery_info *bi) {
     if (!bi->valid) { e->remain_min = -1; return; }
+
+    /* Полная под адаптером: ни «до полного», ни «разрядится за» не имеют
+     * смысла - и копить псевдоразрядную историю по подкачкам не надо. */
+    if (bi->full) { e->remain_min = 0; return; }
 
     if (bi->charging) {
         /* Charging: collect points and estimate time to full */
@@ -853,6 +922,25 @@ static void lte_poll(struct lte_info *li) {
 }
 
 /* ======== WiFi ======== */
+/* Экранирование строки для JSON: имя хоста задаёт само LAN-устройство,
+ * и кавычка или бэкслеш в нём иначе рвут весь снапшот - интерфейс
+ * остаётся вообще без данных. Заодно режем управляющие символы. */
+static void json_escape(const char *in, char *out, int outsz) {
+    int o = 0;
+    for (int i = 0; in[i] && o < outsz - 2; i++) {
+        unsigned char c = in[i];
+        if (c == '"' || c == '\\') {
+            if (o >= outsz - 3) break;
+            out[o++] = '\\'; out[o++] = c;
+        } else if (c < 0x20) {
+            continue;
+        } else {
+            out[o++] = c;
+        }
+    }
+    out[o] = 0;
+}
+
 static int get_wifi_clients(char *json_array, int bufsz) {
     char buf[4096];
     int n = 0;
@@ -876,12 +964,17 @@ static int get_wifi_clients(char *json_array, int bufsz) {
                     if (name[0]==0||name[0]=='*') strcpy(name,"unknown");
                     snprintf(lcmd,sizeof(lcmd),"grep -i '%s' /tmp/dhcp.leases | awk '{print $3}'",mac);
                     run_cmd(lcmd,ip,sizeof(ip));
+                    char nesc[128]; json_escape(name, nesc, sizeof(nesc));
                     char *band = (phy==0) ? "5G" : "2G";
+                    /* Оставляем место под запятую и закрывающую скобку; если
+                     * буфер на исходе - прекращаем, а не пишем в отрицательный
+                     * остаток (на musl bufsz-n<0 превращается в огромный size_t). */
+                    if (bufsz - n < 200) { line = strtok(NULL, "\n"); continue; }
                     if (n>2) n += snprintf(json_array+n, bufsz-n, ",");
                     n += snprintf(json_array+n, bufsz-n,
                         "{\"mac\":\"%s\",\"name\":\"%s\",\"ip\":\"%s\","
                         "\"band\":\"%s\",\"signal\":%d,\"rx_bytes\":%lld,\"tx_bytes\":%lld}",
-                        mac,name,ip,band,sig,rx,tx);
+                        mac,nesc,ip,band,sig,rx,tx);
                 }
                 line = strtok(NULL, "\n");
             }
@@ -1027,7 +1120,7 @@ int main(void) {
             "\"vpn\":{\"active\":%s,\"type\":\"%s\",\"ping_ms\":%d,\"external_ip\":\"%s\"},"
             "\"wifi\":{\"clients\":%s},"
             "\"ping\":{\"google_ms\":%d},"
-            "\"battery\":{\"adc\":%d,\"percent\":%d,\"charging\":%s,\"valid\":%s,"
+            "\"battery\":{\"adc\":%d,\"percent\":%d,\"charging\":%s,\"full\":%s,\"valid\":%s,"
             "\"no_battery\":%s,\"remain_min\":%d,\"drain_rate\":%d.%d,\"cutoff\":%d,"
             "\"raw_hex\":\"%02x %02x\"},"
             "\"storage\":{\"free_kb\":%ld,\"total_kb\":%ld},"
@@ -1047,7 +1140,7 @@ int main(void) {
             li.neighbors[0] ? li.neighbors : "[]",
             vpn_active?"true":"false",vpn_type,vpn_ping,ext_ip,
             wifi_json, google_ping,
-            bat.adc,bat.percent,bat.charging?"true":"false",bat.valid?"true":"false",
+            bat.adc,bat.percent,bat.charging?"true":"false",bat.full?"true":"false",bat.valid?"true":"false",
             bat.no_battery?"true":"false",
             bat_est.remain_min, bat_est.drain_rate/100, abs(bat_est.drain_rate)%100,
             bat_cal_cutoff,

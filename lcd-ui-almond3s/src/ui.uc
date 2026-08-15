@@ -189,6 +189,8 @@ let st = {
     sms_i:  -1,        // открытое сообщение
     sms_tp: 0,         // страница текста открытого сообщения
     sms_wait: false,   // ждём фоновое чтение из модема
+    sms_wait_since: 0, // когда началось ожидание (для таймаута)
+    sms_nobridge: false, // 5gmodem/мост не установлен
     saver_sig: "",     // что нарисовано на заставке (чтобы не перерисовывать зря)
     page_sig:  "",     // то же для обычных страниц
 };
@@ -339,6 +341,15 @@ let TR_RU = {
     "REBOOT?": "ПЕРЕЗАГРУЗКА?",
     "YES": "ДА",
     "NO": "НЕТ",
+    "OFF": "ВЫКЛ",
+    "POWER": "ПИТАНИЕ",
+    "Restart": "Перезагрузка",
+    "Shut down": "Выключение",
+    "Cancel": "Отмена",
+    "Power": "Питание",
+    "Unplug charger first": "Сначала отключите зарядку",
+    "Power off": "Выключение",
+    "Powering off...": "Выключаю питание...",
     "Rebooting...": "Перезагружаюсь...",
     "Cancelled": "Отменено",
     "Cancelled (timeout)": "Отменено (таймаут)",
@@ -355,6 +366,13 @@ let TR_RU = {
     "Wind %s": "Ветер %s",
     "City %d/%d": "Город %d/%d",
     "City": "Город",
+    "Enabling...": "Включаю...",
+    "Disabling...": "Выключаю...",
+    "2.4GHz on": "2.4ГГц вкл",
+    "2.4GHz off": "2.4ГГц выкл",
+    "5GHz on": "5ГГц вкл",
+    "5GHz off": "5ГГц выкл",
+    "SIM %d": "SIM %d",
     "Fetching %s...": "Загружаю %s...",
     "Display": "Экран",
     "SCREENSAVER AFTER": "ЗАСТАВКА ЧЕРЕЗ",
@@ -383,10 +401,16 @@ let TR_RU = {
     "Switching...": "Переключаю...",
     "VIEW": "ВИД",
     "Saver": "Заставка",
+    "Connecting...": "Подключение...",
     "Menu icons": "Иконки меню",
     "Debug": "Дебаг",
     "CHARGE %": "ЗАРЯД %",
     "ADC RAW": "АЦП",
+    "V": "В",
+    "%/h": "%/ч",
+    "VOLTAGE": "НАПРЯЖЕНИЕ",
+    "Charge cycles: %d  range %.1f-8.4V": "Циклов заряда: %d • %.1f-8.4 В",
+    "range %.1f-8.4V, discharges in %s": "%.1f-8.4 В, разряд за %s",
     "Charge cycles: %d  ADC %d..726": "Циклов заряда: %d • АЦП %d..726",
     "ADC %d..726, discharges in %s": "АЦП %d..726, разряд за %s",
     "Editor": "Редактор",
@@ -402,6 +426,10 @@ let TR_RU = {
     "Saved": "Сохранено",
     "panel tuning": "настройки панели",
     "Invert colors": "Инверсия цветов",
+    "Invert": "Инверсия",
+    "Panel": "Панель",
+    "kernel": "ядро",
+    "boot": "бут",
     "GAMMA CURVE": "ГАММА-КРИВАЯ",
     "COLOR ENHANCE": "ЦВЕТОУСИЛЕНИЕ",
     "BACKLIGHT PWM, HZ": "ШИМ ПОДСВЕТКИ, ГЦ",
@@ -433,6 +461,8 @@ let TR_RU = {
     "inbox": "входящие",
     "%d new": "новых: %d",
     "Reading inbox...": "Читаю ящик...",
+    "Modem tool not installed": "Модем-утилита не установлена",
+    "Failed to read inbox": "Не удалось прочитать ящик",
     "No messages": "Сообщений нет",
     "BACK": "НАЗАД",
     "Blank": "Погасить",
@@ -501,10 +531,34 @@ function lcd_rect(x, y, w, h, c) {
     Q(sprintf('{"cmd":"rect","x":%d,"y":%d,"w":%d,"h":%d,"color":"%s"}', x, y, w, h, c));
 }
 
+// Срезаем сырые контрол-байты (<0x20): регекс /[\x00-\x1f]/ в ucode
+// компилируется только в рантайме и там БРОСАЕТ - уронил бы демон при первом
+// же тексте. Кириллица (многобайтный UTF-8, все байты >=0x80) не затрагивается.
+// Посимвольный цикл на КАЖДЫЙ вывод текста заметно тормозил реакцию на тач,
+// поэтому сначала быстрый путь: три поиска на C-скорости. Реальные источники
+// грязи - \r из SMS, табы и ESC из чужих данных; совсем экзотический байт
+// (\x00-\x08) проскочит, но он лишь уронит одну команду в парсере render
+// (текст молча не нарисуется) - это не крэш, ради него не стоит платить
+// циклом на каждой перерисовке. Настоящий \n к этому моменту уже экранирован.
+const CTRL_ESC = chr(27);
+function strip_ctrl(str) {
+    if (index(str, "\r") < 0 && index(str, "\t") < 0 && index(str, CTRL_ESC) < 0)
+        return str;
+    let out = "";
+    for (let i = 0; i < length(str); i++)
+        if (ord(str, i) >= 32) out += substr(str, i, 1);
+    return out;
+}
+
 function lcd_text(x, y, text, color, bg, sz) {
-    // Экранируем для JSON. Перевод строки обязателен: команды разделяются
-    // именно \n, и живой перевод строки в тексте разрезал бы команду пополам.
-    text = replace(replace(replace(text ?? "", '\\', '\\\\'), '"', '\\"'), "\n", "\\n");
+    // Экранируем для JSON и УБИРАЕМ все сырые контрол-символы. Команды к render.c
+    // разделяются живым \n, поэтому \n в тексте превращаем в литеральный \\n
+    // (иначе перевод строки разрезал бы команду пополам). Остальные контрол-байты
+    // (\r, \t, \x00-\x1f) внутри строки - незаконный JSON: парсер render.c роняет
+    // команду ЦЕЛИКОМ, и текст молча не рисуется (ловили на SMS с сырым CR - ровно
+    // тот же класс, что баг SMS-списка в 5gmodem). Срезаем их ПОСЛЕ эскейпа: к
+    // этому моменту настоящий \n уже стал двумя печатными символами \\n.
+    text = strip_ctrl(replace(replace(replace(text ?? "", '\\', '\\\\'), '"', '\\"'), "\n", "\\n"));
     Q(sprintf('{"cmd":"text","x":%d,"y":%d,"text":"%s","color":"%s","bg":"%s","size":%d}',
         x, y, text, color ?? C.white, bg ?? C.bg, sz ?? 2));
 }
@@ -883,12 +937,16 @@ function sms_seen_set(path) {
 function refresh_data() {
     // Основной источник: JSON от сборщика
     let raw = fs.readfile(DATA_PATH);
-    let d = raw ? json(raw) : {};
+    // Битый/рваный снапшот не должен ронять весь демон: json() бросает
+    // исключение внутри 2-секундного таймера, procd крутил бы рестарт-цикл.
+    let d = {};
+    if (raw) { try { d = json(raw) ?? {}; } catch(e) { d = {}; } }
 
     // EC21: uqmi script JSON
     let uqmi_raw = fs.readfile("/tmp/lte_uqmi.json");
     if (uqmi_raw) {
-        d.uqmi = json(uqmi_raw);
+        try { d.uqmi = json(uqmi_raw); } catch(e) {}
+        if (d.uqmi == null && d?.lte) d.uqmi = {};
     } else if (d?.lte) {
         // Модем опрашивает 5gmodem, uqmi_status.sh не ставим: два опросчика
         // дерутся за AT-порт. Собираем d.uqmi из d.lte, чтобы страницы,
@@ -1134,9 +1192,9 @@ function draw_signal_bars(n, color, bg) {
 
 function fmt_bytes(b) {
     b = +(b ?? 0);
-    if (b >= 1073741824) return sprintf("%.1fG", b / 1073741824);
-    if (b >= 1048576) return sprintf("%.1fM", b / 1048576);
-    if (b >= 1024) return sprintf("%.0fK", b / 1024);
+    if (b >= 1073741824) return sprintf("%.1fG", b / 1073741824.0);
+    if (b >= 1048576) return sprintf("%.1fM", b / 1048576.0);
+    if (b >= 1024) return sprintf("%.0fK", b / 1024.0);
     return sprintf("%d", b);
 }
 
@@ -1398,6 +1456,12 @@ function burnin_set(on) {
     if (!on) { st.ox = 0; st.oy = 0; }
 }
 
+// Страницы активного ввода не должны засыпать посреди работы: набор пароля
+// на клавиатуре и рисование иконки в редакторе.
+function screen_keep_awake() {
+    return st.page == "kbd" || st.page == "iconedit";
+}
+
 function saver_timeout() {
     let v = saver_cfg();
     return v > 0 ? v : 999999999;
@@ -1411,7 +1475,7 @@ function style_label(v) {
 }
 
 function saver_label(v) {
-    if (v == 0) return "Never";
+    if (v == 0) return tr("Never");
     if (v < 60) return sprintf(tr("%d sec"), v);
     return sprintf(tr("%d min"), int(v / 60));
 }
@@ -1588,7 +1652,9 @@ function draw_status_row(y, o) {
         lcd_text(t_x, y + 1, tstr, o?.time_color ?? C.white, bg, 2);
 
     let bat = d?.battery;
-    let bchg = bat?.charging && !bat?.no_battery;
+    // full = защёлка «заряд завершён» от коллектора: иконке это «полная
+    // под адаптером» - зелёная рамка, мигать нечему (pct уже 100).
+    let bchg = (bat?.charging || bat?.full) && !bat?.no_battery;
     let bpct = int(+(bat?.percent ?? 0));
     let b_w = 32, b_h = 16;
     let bat_x = LCD_W - 4 - b_w;
@@ -2667,8 +2733,18 @@ function sms_mark_read(m) {
 }
 
 function sms_refresh() {
-    if (st.sms_wait) return;
+    // Нет 5gmodem/моста - не залипаем в ожидании навсегда.
+    if (!fs.stat("/usr/share/5gmodem/smsbridge.sh")) {
+        st.sms_nobridge = true;
+        st.sms_wait = false;
+        return;
+    }
+    st.sms_nobridge = false;
+    // Ждём, но не вечно: если чтение не принесло кэш за 15 с (AT-порт занят,
+    // recv упал), разрешаем повтор вместо вечного «Читаю ящик...».
+    if (st.sms_wait && (time() - st.sms_wait_since) < 15) return;
     st.sms_wait = true;
+    st.sms_wait_since = time();
     // Перенаправление вешаем на подоболочку целиком, иначе фоновый процесс
     // держит наши дескрипторы и ucode ждёт его завершения.
     system("(/usr/share/5gmodem/smsbridge.sh recv > " + SMS_CACHE + ".new 2>/dev/null" +
@@ -2806,7 +2882,11 @@ function draw_sms_page() {
 
     let list = sms_list();
     if (list == null) {
-        lcd_text(20, 100, tr("Reading inbox..."), C.gray, C.bg, 2);
+        let msg = st.sms_nobridge ? tr("Modem tool not installed")
+                : ((st.sms_wait && (time() - st.sms_wait_since) >= 15)
+                   ? tr("Failed to read inbox")
+                   : tr("Reading inbox..."));
+        lcd_text(20, 100, msg, C.gray, C.bg, 1);
         draw_back();
         lcd_flush();
         return;
@@ -2959,7 +3039,7 @@ function draw_menu() {
             "#6B4A0F", null, "reset", "#E8C27A");
         let mb = btn_pos(1);
         lcd_rect(mb.x, mb.y, mb.w, 2, C.yellow);
-        draw_btn(2, tr("Reboot"), tr("System"), C.white, "#F0B0B8", C.back,
+        draw_btn(2, tr("Power"), tr("System"), C.white, "#F0B0B8", C.back,
             null, "reboot", "#F0B0B8");
         let rb = btn_pos(2);
         lcd_rect(rb.x, rb.y, rb.w, 2, "#D32F2F");
@@ -3060,11 +3140,13 @@ function pancfg() {
     let gam = ucur ? ucur.get("almond3s", "display", "pgamma") : null;
     let cab = ucur ? ucur.get("almond3s", "display", "pcabc") : null;
     let hz  = ucur ? ucur.get("almond3s", "display", "pwmhz") : null;
+    let ini = ucur ? ucur.get("almond3s", "display", "pinit") : null;
     return {
         inv:   inv == "1",
         gamma: clampi(int(+(gam ?? 1)), 1, 4),
         cabc:  clampi(int(+(cab ?? 0)), 0, 3),
         hz:    clampi(int(+((hz == null || hz == "") ? 250 : hz)), 50, 20000),
+        init:  ini == "kernel" ? "kernel" : "boot",
     };
 }
 
@@ -3082,7 +3164,8 @@ function panel_apply() {
     system(sprintf("almond3s-lcd pwm %d >/dev/null 2>&1", c.hz));
 }
 
-function dbg_inv_btn()   { return { x: 10, y: 30, w: 300, h: 28 }; }
+function dbg_inv_btn()   { return { x: 10, y: 30, w: 146, h: 28 }; }
+function dbg_pinit_btn() { return { x: 164, y: 30, w: 146, h: 28 }; }
 function dbg_gamma_btn(i){ return { x: 10 + i * 76, y: 78, w: 72, h: 28 }; }
 function dbg_cabc_btn(i) { return { x: 10 + i * 76, y: 126, w: 72, h: 28 }; }
 function dbg_pwm_btn(i)  { return { x: 10 + i * 60, y: 174, w: 56, h: 28 }; }
@@ -3095,10 +3178,19 @@ function draw_debug_page() {
     let ib = dbg_inv_btn();
     lcd_rect(ib.x, ib.y, ib.w, ib.h, C.widget);
     lcd_rect(ib.x, ib.y, 4, ib.h, c.inv ? C.green : C.dim);
-    let it = tr("Invert colors");
-    lcd_text(ib.x + 12, ib.y + 8, it, C.white, C.widget, 1);
+    lcd_text(ib.x + 12, ib.y + 8, tr("Invert"), C.white, C.widget, 1);
     lcd_text(ib.x + ib.w - 44, ib.y + 8, c.inv ? tr("on") : tr("off"),
              c.inv ? C.green : C.gray, C.widget, 1);
+
+    // Таблица инициализации панели: загрузчик (наш дефолт) или вторая
+    // заводская из стокового ядра. Смена = полный reset+init панели.
+    let pb = dbg_pinit_btn();
+    lcd_rect(pb.x, pb.y, pb.w, pb.h, C.widget);
+    lcd_rect(pb.x, pb.y, 4, pb.h, c.init == "kernel" ? C.yellow : C.dim);
+    lcd_text(pb.x + 12, pb.y + 8, tr("Panel"), C.white, C.widget, 1);
+    lcd_text(pb.x + pb.w - 44, pb.y + 8,
+             c.init == "kernel" ? tr("kernel") : tr("boot"),
+             c.init == "kernel" ? C.yellow : C.gray, C.widget, 1);
 
     lcd_text(12, 66, tr("GAMMA CURVE"), C.gray, C.bg, 1);
     for (let i = 0; i < 4; i++) {
@@ -3453,9 +3545,12 @@ let SOUNDS = [
     // Длительности в тиках PIC (полмиллисекунды), темп 125.
     { label: "бумер",   name: "tone",
       args: "660 240 784 720 0 400 784 240 660 720 0 400 880 240 784 240 880 240 784 240 880 240 784 240 880 240 784 240 880 240 988 720" },
-    { label: "гр 1",    name: "vol", args: "1" },
-    { label: "гр 2",    name: "vol", args: "2" },
-    { label: "гр 3",    name: "vol", args: "3" },
+    // Громкость подтверждена на живом бипере 16.08: 1 - нормально,
+    // 2 - громко, 3 - очень громко (у PIC это выбор драйв-пина PORTA,
+    // не затухание). Раньше подписи «гр 1/2/3» ничего не говорили.
+    { label: "тихо",    name: "vol", args: "1" },
+    { label: "громко",  name: "vol", args: "2" },
+    { label: "макс",    name: "vol", args: "3" },
     { label: "стоп",    name: "stop", args: "" },
 ];
 
@@ -3671,6 +3766,7 @@ function draw_kbd_page() {
     }
     sta.specs = specs;
     sta.spec_y = by;
+    draw_back();   // полоса «назад» = отмена ввода (спецряд её не задевает)
     lcd_flush();
 }
 
@@ -3683,7 +3779,7 @@ function draw_battery_page() {
     let pct = int(+(bat?.percent ?? -1));
     let adc = int(+(bat?.adc ?? 0));
     let chg = bat?.charging && !bat?.no_battery;
-    let full = chg && pct >= 100;
+    let full = (bat?.full && !bat?.no_battery) || (chg && pct >= 100);
     // Состояние: уровень крупно слева, статус и АЦП по правому краю.
     let y1 = 28;
     lcd_rect(cx, y1, cw, 50, C.widget);
@@ -3693,7 +3789,9 @@ function draw_battery_page() {
     let st_s = bat?.no_battery ? tr("Battery not installed")
              : (full ? tr("Plugged in") : (chg ? tr("Charging") : tr("Battery")));
     lcd_text(cx + cw - 12 - tlen(st_s) * 6, y1 + 10, st_s, C.white, C.widget, 1);
-    let adc_s = sprintf(tr("ADC %d"), adc);
+    // Вольты вместо сырого АЦП: шкала откалибрована (726 ед = 8.4 В на
+    // пике заряда 2S-пачки), а вольты понятны без пояснений.
+    let adc_s = adc > 0 ? sprintf("%.2f %s", adc * 8.4 / 726, tr("V")) : "";
     lcd_text(cx + cw - 12 - tlen(adc_s) * 6, y1 + 26, adc_s, C.gray, C.widget, 1);
 
     // Прогноз: слева подпись и время, справа расход.
@@ -3709,7 +3807,9 @@ function draw_battery_page() {
         lcd_text(cx + 12, y2 + 22, tstr, C.gray, C.widget, 1);
     let drain = +(bat?.drain_rate ?? 0);
     let d1 = tr("drain");
-    let d2 = drain > 0 ? sprintf("%.1f %s", drain, tr("ADC/min")) : tr("measuring");
+    // Скорость разряда в процентах в час: сырые «АЦП/мин» человеку ни о
+    // чём (пересчёт линейный по рабочему диапазону 512..726 ~= 0..100%).
+    let d2 = drain > 0 ? sprintf("%d%s", int(drain * 6000 / 214), tr("%/h")) : tr("measuring");
     lcd_text(cx + cw - 12 - tlen(d1) * 6, y2 + 8, d1, C.white, C.widget, 1);
     lcd_text(cx + cw - 12 - tlen(d2) * 6, y2 + 22, d2, C.gray, C.widget, 1);
 
@@ -3718,7 +3818,7 @@ function draw_battery_page() {
     lcd_rect(cx, y3, cw, 56, C.widget);
     lcd_rect(cx, y3, 4, 56, chg ? C.green : C.yellow);
     lcd_text(cx + 12, y3 + 4, tr("CHARGE %"), C.gray, C.widget, 1);
-    lcd_text(cx + 158, y3 + 4, tr("ADC RAW"), C.gray, C.widget, 1);
+    lcd_text(cx + 158, y3 + 4, tr("VOLTAGE"), C.gray, C.widget, 1);
     // Историю ведёт collector в файле (двухчасовое окно, точка в минуту):
     // страница показывает кривые сразу, рестарты UI их не стирают.
     let bh_pct = [], bh_adc = [];
@@ -3747,9 +3847,10 @@ function draw_battery_page() {
         for (let ch in split(ce, "\n"))
             if (ch != "") cyc++;
     }
+    let cofv = int(+(bat?.cutoff ?? 512)) * 8.4 / 726;
     let foot = cyc > 0
-        ? sprintf(tr("Charge cycles: %d  ADC %d..726"), cyc, int(+(bat?.cutoff ?? 512)))
-        : sprintf(tr("ADC %d..726, discharges in %s"), int(+(bat?.cutoff ?? 512)), fmt_dur(263, true));
+        ? sprintf(tr("Charge cycles: %d  range %.1f-8.4V"), cyc, cofv)
+        : sprintf(tr("range %.1f-8.4V, discharges in %s"), cofv, fmt_dur(263, true));
     lcd_text(cx + 2, y3 + 62, foot, C.dim, C.bg, 1);
 
     draw_back();
@@ -4284,13 +4385,8 @@ function draw_info_page() {
     lcd_text(cx + 10, y1 + 6, tr("SYSTEM"), C.gray, C.widget, 1);
     let hw = uconn ? (uconn.call("system", "board", {})?.model ?? "") : "";
     lcd_text(cx + 10, y1 + 20, hw != "" ? hw : "?", C.white, C.widget, 1);
-    // Заряд одной строкой: подробности на странице «Батарея», но общий
-    // взгляд на роутер без процентов был бы слепым.
-    if (!bat?.no_battery && bpct >= 0) {
-        let b1 = sprintf("%d%%", bpct);   // зарядку выдаёт зелёный цвет: молнии в шрифте нет
-        let b1c = bpct <= 5 && !bat?.charging ? C.red : (bat?.charging ? C.green : C.white);
-        lcd_text(cx + cw - 10 - tlen(b1) * 6, y1 + 20, b1, b1c, C.widget, 1);
-    }
+    // Заряд отсюда убран: он и так виден в шапке каждой страницы, а
+    // подробности живут на «Батарее» - дубль на карточке только шумел.
     lcd_text(cx + 10, y1 + 32, sprintf(tr("Uptime %s"), fmt_uptime(d?.uptime)), C.white, C.widget, 1);
 
     // Свободную память прижимаем к правому краю карточки: строка длинная,
@@ -4430,7 +4526,7 @@ function draw_wcity_page() {
     lcd_clear(C.bg);
     let pages = wcity_pages();
     if (st.wpage == null || st.wpage >= pages) st.wpage = 0;
-    draw_header(pages > 1 ? sprintf(tr("City %d/%d"), st.wpage + 1, pages) : "City");
+    draw_header(pages > 1 ? sprintf(tr("City %d/%d"), st.wpage + 1, pages) : tr("City"));
 
     let cur = wcity_current();
     let list = wcity_list();
@@ -4867,14 +4963,21 @@ function page_sig() {
     case "wifi":
         return base + sprintf("|%d|%J", nc, d.wifi?.ssid);
     case "traffic":
-        return base + sprintf("|%J|%J", hist.rx, hist.tx);
+        return base + sprintf("|%J|%J|%J|%J", hist.rx, hist.tx, hist.wan_rx, hist.wan_tx);
     case "weather":
         return base + sprintf("|%J", d.weather);
     case "services":
         return base + sprintf("|%J", d.services);
     case "sms":
-    case "sms1":
-        return base + sprintf("|%d|%d|%d", st.sms_pg, st.sms_i, st.sms_ts);
+    case "sms1": {
+        // mtime кэша читаем прямо из ФС, а не из st.sms_ts: иначе появление
+        // файла после фонового recv не триггерило перерисовку (st.sms_ts
+        // обновляется только внутри отрисовки - замкнутый круг, страница
+        // вечно висела на «Читаю ящик...»).
+        let cs = fs.stat(SMS_CACHE);
+        return base + sprintf("|%d|%d|%d|%d", st.sms_pg, st.sms_i,
+                              cs ? cs.mtime : 0, st.sms_nobridge ? 1 : 0);
+    }
     case "netpri":
         return base + sprintf("|%J", netpri_list());
     case "battery":
@@ -4948,7 +5051,7 @@ function draw_screensaver() {
     let style = saver_style();
     let bat = d?.battery;
     let bpct = int(+(bat?.percent ?? 0));
-    let bchg = bat?.charging && !bat?.no_battery;
+    let bchg = (bat?.charging || bat?.full) && !bat?.no_battery;
     let fl = svflags();
     let row_o = { bg: bg, mono: night ? primary : null,
                   empty: night ? "#0A2A16" : C.dim,
@@ -5233,11 +5336,15 @@ function action_splash(title, subtitle, color) {
 // чего у «ЕЩЁ >>>» и «<<< НАЗАД» он подпрыгивал и менялся - выглядело как сбой.
 
 // Вдавленная полоса «Назад»: голубой фон, текст +2 пикселя.
+// Паузы «вдавливания» урезаны 120-150 -> 50 мс: замер 16.08 показал, что
+// они были главным вором отзывчивости (тап -> страница доходил до 450 мс).
+// Вдавленное состояние всё равно остаётся на экране, пока рисуется и
+// уезжает кадр новой страницы, - глазу хватает.
 function back_press_fx() {
     lcd_rect(0, BACK_Y, LCD_W, 32, C.back_press);
     lcd_text(122, BACK_Y + 11, tr("< BACK"), C.white, C.back_press, 2);
     lcd_flush();
-    sock_poll(120);
+    sock_poll(50);
 }
 
 // Нажатая плитка меню: перерисовать меню с вдавленной кнопкой её же кодом.
@@ -5245,7 +5352,7 @@ function menu_press_fx(idx) {
     menu_pressed = idx;
     draw_menu();
     menu_pressed = null;
-    sock_poll(150);
+    sock_poll(50);
 }
 
 function handle_touch(tx, ty, tmove) {
@@ -5262,7 +5369,9 @@ function handle_touch(tx, ty, tmove) {
 
     // У сервисов внизу две кнопки, поэтому общее правило «низ - назад» для
     // этой страницы не годится: левая половина запускает проверку.
-    if (st.page == "services" && ty >= SVC_BAR_Y - 6) {
+    // Порог по видимой полосе, без 6px запаса выше: 3-й ряд карточек
+    // (5-6 хостов) кончается на 168, а SVC_BAR_Y-6=166 съедал их низ.
+    if (st.page == "services" && ty >= SVC_BAR_Y) {
         if (tx >= svc_back_btn().x) {
             go_page("menu");
             return;
@@ -5275,15 +5384,39 @@ function handle_touch(tx, ty, tmove) {
         return;
     }
 
-    // Конвертик в шапке - быстрый вход в SMS с любой страницы.
-    if (ty < HDR_H && int(st.data?.sms_new ?? 0) > 0 &&
-        st.page != "sms" && st.page != "sms1") {
-        let ex = 4 + tlen(clock_str()) * 12 + 10 + 5 * 8 + 8;
-        if (in_rect(tx, ty, ex - 4, 0, ENV_W + 8, HDR_H)) {
-            st.sms_pg = 0;
-            st.sms_i = -1;
-            sms_refresh();
-            go_page("sms");
+    // Строка состояния - быстрые переходы с любой страницы: конвертик ->
+    // Входящие, батарейка (правый край) -> Батарея, часы (центр) ->
+    // Заставка, сигнал (левый край) -> Модем. Клавиатура и редактор
+    // исключены: там тап по верху - часть их собственной вёрстки, и
+    // случайный уход со страницы терял бы несохранённый ввод.
+    if (ty < HDR_H && st.page != "kbd" && st.page != "iconedit" && !tmove) {
+        // Конвертик: зона считается ТОЙ ЖЕ формулой, что и отрисовка
+        // (раньше зона жила у часов, а рисовался он за ярлыком технологии).
+        if (int(st.data?.sms_new ?? 0) > 0 &&
+            st.page != "sms" && st.page != "sms1") {
+            let rat = tcut(rat_label(st.data?.lte?.mode ?? ""), 4);
+            let t_x = int((LCD_W - tlen(clock_str()) * 12) / 2);
+            let ex = 50 + (rat == "" || rat == "-" ? 0 : tlen(rat) * 12 + 8);
+            if (ex + ENV_W + 8 > t_x) ex = t_x - ENV_W - 8;
+            if (in_rect(tx, ty, ex - 4, 0, ENV_W + 8, HDR_H)) {
+                st.sms_pg = 0;
+                st.sms_i = -1;
+                sms_refresh();
+                go_page("sms");
+                return;
+            }
+        }
+        if (tx >= 235 && st.page != "battery") {
+            go_page("battery");
+            return;
+        }
+        if (tx >= 120 && tx < 200 && st.page != "saver") {
+            // Часы -> страница настроек «Заставка».
+            go_page("saver");
+            return;
+        }
+        if (tx < 110 && st.page != "lte") {
+            go_page("lte");
             return;
         }
     }
@@ -5291,8 +5424,13 @@ function handle_touch(tx, ty, tmove) {
     // Back button (all sub-pages except menu). Страницы со своей листалкой сюда
     // не попадают: у них нижняя полоса поделена на стрелки и «назад», а общее
     // правило «низ - это назад» съедало нажатия по стрелкам целиком.
+    // Порог ровно по видимой полосе «Назад» (BACK_Y=208, бар 32px), без
+    // прежних 10px запаса выше неё: этот запас (198..208) съедал нижние
+    // пиксели кнопок всех страниц со своим нижним рядом - стрелки листания
+    // «Соты»/«Города», размер часов, ШИМ, ночная яркость, 6-я строка сетей.
     if (st.page != "menu" && st.page != "sms" && st.page != "sms1" &&
-        ty >= BACK_Y - 10) {
+        st.page != "kbd" &&
+        ty >= BACK_Y) {
         // Из развёрнутой карточки «назад» ведёт к списку карточек, а не
         // сразу в меню: разворот - это подстраница.
         if (st.page == "info" && st.izoom != null) {
@@ -5381,10 +5519,11 @@ function handle_touch(tx, ty, tmove) {
                         // деавторизация USB-порта, затем unbind/bind драйвера.
                         // Дублировать её незачем - зовём её же.
                         action_splash("LTE", tr("Resetting modem..."), C.yellow);
-                        if (fs.stat("/usr/share/5gmodem/reboot_modem.sh"))
-                            system("/usr/share/5gmodem/reboot_modem.sh power >/dev/null 2>&1 &");
-                        else
-                            run_script("lte_reset.sh");
+                        // Всегда через наш скрипт: GPIO33 здесь - #PERST,
+                        // который LM960 на горячую игнорирует, поэтому
+                        // скрипт гасит USB-порт (метод disable), а «power»
+                        // оставляет фолбэком для плат с настоящим резетом.
+                        run_script("lte_reset.sh", true);
                         // Wait for script completion (~14 sec)
                         for (let step = 0; step < 7; step++) {
                             system("sleep 2");
@@ -5406,41 +5545,70 @@ function handle_touch(tx, ty, tmove) {
                               rsrp < 0 ? "#002000" : "#200000", 2);
                         draw_menu();
                         return;
-                    case 2:
-                        // Reboot with confirmation dialog
-                        lcd_clear("#200000");
-                        lcd_rect(30, 60, 260, 120, "#300000");
-                        lcd_rect(30, 60, 260, 1, C.red);
-                        lcd_text(80, 75, tr("REBOOT?"), C.red, "#300000", 3);
-                        lcd_rect(50, 120, 100, 35, C.red);
-                        lcd_text(62, 128, tr("YES"), C.white, C.red, 2);
-                        lcd_rect(170, 120, 100, 35, "#0841");
-                        lcd_text(190, 128, tr("NO"), C.white, "#0841", 2);
-                        // Countdown
-                        for (let sec = 5; sec > 0; sec--) {
-                            lcd_rect(120, 165, 80, 16, "#200000");
-                            lcd_text(120, 165, sprintf("(%ds)", sec), C.gray, "#200000", 2);
-                            lcd_flush();
-                            system("sleep 1");
-                            let ct = read_touch();
-                            if (ct) {
-                                if (ct.x < 160) {
-                                    // YES
-                                    action_splash(tr("Reboot"), tr("Rebooting..."), C.red);
-                                    lcd_flush();
-                                    run_script("reboot.sh");
-                                    return;
-                                } else {
-                                    // NO
-                                    toast(tr("Cancelled"), C.gray, "#1082", 1);
+                    case 2: {
+                        // Питание: модальное окно в цвет красной кнопки
+                        // «Питание», три обычные серые кнопки вертикально.
+                        // Без таймера - живёт до явного выбора (по просьбе
+                        // владельца 16.08). Хвосты прошлого нажатия сливаем,
+                        // кнопки ловим waittouch'ем - он реагирует только
+                        // на НОВОЕ нажатие (фронт).
+                        for (let d = 0; d < 5 && read_touch(); d++);
+                        let wx = 24, wy = 36, ww = 272;
+                        lcd_rect(wx, wy, ww, 168, C.back);
+                        let tt = tr("POWER");
+                        lcd_text(int((LCD_W - tlen(tt) * 18) / 2), wy + 12,
+                                 tt, C.white, C.back, 3);
+                        let bl = [ tr("Restart"), tr("Shut down"), tr("Cancel") ];
+                        for (let i = 0; i < 3; i++) {
+                            let by = wy + 44 + i * 40;
+                            lcd_rect(40, by, 240, 34, C.btn);
+                            lcd_rect(40, by + 31, 240, 3, C.border);
+                            lcd_text(40 + int((240 - tlen(bl[i]) * 12) / 2),
+                                     by + 9, bl[i], C.white, C.btn, 2);
+                        }
+                        lcd_flush();
+                        while (true) {
+                            let p = fs.popen("/usr/bin/almond3s-lcd waittouch 2000", "r");
+                            let line = p ? p.read("line") : null;
+                            if (p) p.close();
+                            let m = line ? match(trim(line), /^(\d+)\s+(\d+)/) : null;
+                            if (!m) continue;
+                            let cx = +m[1], cy = +m[2];
+                            for (let d = 0; d < 5 && read_touch(); d++);
+                            if (cx < 40 || cx > 280) continue;
+                            let bi = -1;
+                            for (let i = 0; i < 3; i++) {
+                                let by = wy + 44 + i * 40;
+                                if (cy >= by && cy < by + 34) { bi = i; break; }
+                            }
+                            if (bi == 0) {
+                                action_splash(tr("Reboot"), tr("Rebooting..."), C.red);
+                                lcd_flush();
+                                run_script("reboot.sh");
+                                return;
+                            }
+                            if (bi == 1) {
+                                // poweroff: в конце драйвер шлёт PIC 0x38 и
+                                // тот рубит питание. Под зарядкой PIC
+                                // откажет, а Linux уже остановлен - плата
+                                // зависла бы в halt; поэтому не выключаем.
+                                let pbat = st.data?.battery;
+                                if (pbat?.charging && !pbat?.no_battery) {
+                                    toast(tr("Unplug charger first"), C.yellow, "#201800", 2);
                                     draw_menu();
                                     return;
                                 }
+                                action_splash(tr("Power off"), tr("Powering off..."), C.red);
+                                lcd_flush();
+                                run_script("poweroff.sh");
+                                return;
+                            }
+                            if (bi == 2) {
+                                draw_menu();
+                                return;
                             }
                         }
-                        toast(tr("Cancelled (timeout)"), C.gray, "#1082", 1);
-                        draw_menu();
-                        return;
+                    }
                     case 6: st.mpg = 1; draw_menu(); return;
                     }
                 } else if (st.mpg == 2) {
@@ -5458,9 +5626,9 @@ function handle_touch(tx, ty, tmove) {
 
                     case 3:
                         // Weather: fetch fresh data synchronously, then show the weather page
-                        action_splash(tr("Weather"), tr("Updating forecast..."), C.cyan);
-                        run_script("weather_fetch.sh");
-                        refresh_data();
+                        // Кэш на экран сразу, свежее - фоном: синхронный
+                        // запрос к wttr.in держал вход на страницу 1.5-15с.
+                        run_script("weather_fetch.sh", true);
                         go_page("weather");
                         return;
 
@@ -5541,7 +5709,7 @@ function handle_touch(tx, ty, tmove) {
     if (st.page == "dashboard") {
         let l = netpri_list();
         if (type(l) == "array") {
-            for (let i = 0; i < length(l) && i < 4; i++) {
+            for (let i = 0; i < length(l) && i < 3; i++) {
                 let b = netpri_btn(i);
                 if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
                 // Минус на Wi-Fi-карточке: забыть сеть, с подтверждением.
@@ -5637,6 +5805,9 @@ function handle_touch(tx, ty, tmove) {
     }
 
     if (st.page == "kbd") {
+        // Полоса «назад» внизу = отмена, возврат к списку сетей. Спецряд
+        // заканчивается на 202, бар нарисован с BACK_Y(208) - не пересекаются.
+        if (ty >= BACK_Y) { go_page("stascan"); return; }
         // спецкнопки нижнего ряда
         if (type(sta.specs) == "array" && ty >= sta.spec_y && ty < sta.spec_y + 26) {
             for (let sp in sta.specs) {
@@ -5744,6 +5915,18 @@ function handle_touch(tx, ty, tmove) {
         let ib = dbg_inv_btn();
         if (in_rect(tx, ty, ib.x, ib.y, ib.w, ib.h)) {
             pancfg_set("pinv", pancfg().inv ? "0" : "1");
+            panel_apply();
+            draw_debug_page();
+            return;
+        }
+        let pnb = dbg_pinit_btn();
+        if (in_rect(tx, ty, pnb.x, pnb.y, pnb.w, pnb.h)) {
+            let nv = pancfg().init == "kernel" ? "boot" : "kernel";
+            pancfg_set("pinit", nv);
+            // Ре-инит выполняет поток отрисовки с задержкой до сотни мс и
+            // сбрасывает панельные регистры к дефолтам таблицы - ждём его
+            // и накатываем инверсию/гамму/CABC заново.
+            system(sprintf("almond3s-lcd reinit %s >/dev/null 2>&1; sleep 1", nv));
             panel_apply();
             draw_debug_page();
             return;
@@ -5895,11 +6078,13 @@ function handle_touch(tx, ty, tmove) {
             }
             // Свободный рисунок: новый нумерованный файл, ничего не затирает.
             system("mkdir -p /etc/almond3s/art");
-            let n = 1;
+            let n = 0;
             let names = fs.lsdir("/etc/almond3s/art") ?? [];
-            for (let f in names)
-                if (match(f, /^art_[0-9]+\.txt$/)) n++;
-            ed_saved = sprintf("art_%03d.txt", n);
+            for (let f in names) {
+                let mm = match(f, /^art_([0-9]+)\.txt$/);
+                if (mm && int(mm[1]) > n) n = int(mm[1]);
+            }
+            ed_saved = sprintf("art_%03d.txt", n + 1);
             fs.writefile("/etc/almond3s/art/" + ed_saved, out);
             toast(ed_saved, C.green, "#002000", 1);
             draw_iconedit_page();
@@ -6118,14 +6303,14 @@ function handle_touch(tx, ty, tmove) {
                 let disabled = wifi_is_disabled("radio1", "default_radio1");
                 let new_state = disabled ? "0" : "1";
                 
-                action_splash("WiFi 2.4GHz", new_state == "0" ? "Enabling..." : "Disabling...", C.green);
+                action_splash("Wi-Fi 2.4GHz", tr(new_state == "0" ? "Enabling..." : "Disabling..."), C.green);
                 ucur.set("wireless", "radio1", "disabled", new_state);
                 ucur.set("wireless", "default_radio1", "disabled", new_state);
                 ucur.commit("wireless");
                 system("wifi reload");
                 system("sleep 3");
                 refresh_data();
-                toast(new_state == "0" ? "2.4GHz ON" : "2.4GHz OFF", 
+                toast(tr(new_state == "0" ? "2.4GHz on" : "2.4GHz off"), 
                       new_state == "0" ? C.green : C.red,
                       new_state == "0" ? "#002000" : "#200000", 2);
                 draw_wifi_page();
@@ -6147,14 +6332,14 @@ function handle_touch(tx, ty, tmove) {
                 let disabled = wifi_is_disabled("radio0", "default_radio0");
                 let new_state = disabled ? "0" : "1";
                 
-                action_splash("WiFi 5GHz", new_state == "0" ? "Enabling..." : "Disabling...", C.cyan);
+                action_splash("Wi-Fi 5GHz", tr(new_state == "0" ? "Enabling..." : "Disabling..."), C.cyan);
                 ucur.set("wireless", "radio0", "disabled", new_state);
                 ucur.set("wireless", "default_radio0", "disabled", new_state);
                 ucur.commit("wireless");
                 system("wifi reload");
                 system("sleep 3");
                 refresh_data();
-                toast(new_state == "0" ? "5GHz ON" : "5GHz OFF", 
+                toast(tr(new_state == "0" ? "5GHz on" : "5GHz off"), 
                       new_state == "0" ? C.green : C.red,
                       new_state == "0" ? "#002000" : "#200000", 2);
                 draw_wifi_page();
@@ -6255,6 +6440,13 @@ function main() {
     backlight_write(true);   /* внутри уже уровень из настроек */
     led_apply();             /* диод в состояние из настроек */
     rot_apply();             /* ориентация экрана из настроек */
+
+    // Настройки панели из uci - раньше комментарий у страницы «Дебаг»
+    // обещал «накатываются при старте», но вызова здесь не было, и после
+    // перезапуска службы инверсия/гамма/CABC/ШИМ молча слетали в дефолт.
+    if (pancfg().init == "kernel")
+        system("almond3s-lcd reinit kernel >/dev/null 2>&1; sleep 1");
+    panel_apply();
 
     // Stop splash: ioctl(0) via flush
     system("printf '\\0' > /dev/lcd 2>/dev/null");
@@ -6373,7 +6565,8 @@ function main() {
         let idle_t;
         idle_t = uloop_mod.timer(1000, function() {
             let idle = time() - st.ltch;
-            if (st.screen == "active" && idle >= saver_timeout())
+            if (st.screen == "active" && idle >= saver_timeout()
+                && !screen_keep_awake())
                 set_screen("screensaver");
             idle_t.set(1000);
         });
@@ -6421,7 +6614,8 @@ function main() {
 
             // Idle
             let idle = now - st.ltch;
-            if (st.screen == "active" && idle >= saver_timeout())
+            if (st.screen == "active" && idle >= saver_timeout()
+                && !screen_keep_awake())
                 set_screen("screensaver");
 
             // Burn-in

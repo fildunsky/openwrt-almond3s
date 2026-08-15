@@ -37,14 +37,14 @@ static uint16_t parse_color(const char *s)
     if (!s) return 0xFFFF;
     if (s[0] == '#') {
         int len = strlen(s + 1);
-        unsigned int v;
+        unsigned int v = 0;
         if (len >= 6) {
             /* #RRGGBB → RGB888 → RGB565 */
-            sscanf(s + 1, "%06x", &v);
+            if (sscanf(s + 1, "%06x", &v) != 1) return 0;
             return rgb((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
         }
         /* #XXXX or #XXX → raw RGB565 */
-        sscanf(s + 1, "%x", &v);
+        if (sscanf(s + 1, "%x", &v) != 1) return 0;
         return (uint16_t)v;
     }
     if (!strcmp(s, "red"))    return 0xF800;
@@ -72,9 +72,17 @@ static void fb_fill(uint16_t c)
 static void fb_rect(int x, int y, int w, int h, uint16_t c)
 {
     int i, j;
-    for (j = y; j < y + h && j < LCD_H; j++)
-        for (i = x; i < x + w && i < LCD_W; i++)
-            if (i >= 0 && j >= 0) fb[j * LCD_W + i] = c;
+    /* Клип к экрану ДО цикла: огромные w/h из внешней команды иначе
+     * крутили бы миллиарды итераций (запись отсекается, но время - нет). */
+    int x1 = x + w, y1 = y + h;
+    if (w < 0 || h < 0) return;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x1 > LCD_W) x1 = LCD_W;
+    if (y1 > LCD_H) y1 = LCD_H;
+    for (j = y; j < y1; j++)
+        for (i = x; i < x1; i++)
+            fb[j * LCD_W + i] = c;
 }
 
 /* Встроенный шрифт 5x7 ASCII */
@@ -419,6 +427,8 @@ static void handle_cmd(const char *json)
         int x = json_int(json, "x", 0);
         int y = json_int(json, "y", 0);
         int size = json_int(json, "size", 1);
+        if (size < 1) size = 1;
+        if (size > 8) size = 8;
         json_str(json, "color", color, sizeof(color));
         char bg_color[32];
         json_str(json, "bg", bg_color, sizeof(bg_color));
