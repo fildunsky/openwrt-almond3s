@@ -1,0 +1,1 @@
+libvterm 0.3.3 (git 934bc2f), MIT. Vendored: src/*.c + include, pre-generated .inc tables. Upstream: https://github.com/neovim/libvterm

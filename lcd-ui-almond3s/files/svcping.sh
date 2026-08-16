@@ -21,7 +21,11 @@ NETPRI=/usr/share/5gmodem/netpri.sh
 
 mkdir -p "$DIR" 2>/dev/null
 
-hosts=$(uci -q get lcd.services.host)
+# Конфиг давно переехал lcd -> almond3s; читаем новое имя, старое оставляем
+# вторым шансом для непереехавших систем (иначе список выходил пустым и
+# фолбэк ниже терял ozon.ru/max.ru - пойман 16.08).
+hosts=$(uci -q get almond3s.services.host)
+[ -n "$hosts" ] || hosts=$(uci -q get lcd.services.host)
 [ -n "$hosts" ] || hosts="ya.ru api.telegram.org youtube.com github.com"
 
 # Имя файла из хоста: точки и прочее в имени файла ни к чему.

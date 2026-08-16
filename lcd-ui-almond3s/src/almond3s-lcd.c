@@ -223,6 +223,52 @@ int main(int argc, char **argv)
         return ret < 0 ? 1 : 0;
     }
 
+    /* almond3s-lcd scene <n|stop> — запустить сцену-заставку n (ioctl 5):
+     * 0..6 - конкретная (6 = матрица «Wake up Neo»), 99 - случайная,
+     * stop/100 - остановить анимацию и вернуть управление интерфейсу. */
+    if (argc >= 3 && strcmp(argv[1], "scene") == 0) {
+        int n = strcmp(argv[2], "stop") == 0 ? 100 : atoi(argv[2]);
+        int ret = ioctl(fd, 5, (unsigned long)n);
+        close(fd);
+        return ret < 0 ? 1 : 0;
+    }
+
+    /* almond3s-lcd matrixline <текст> — строка статуса матрицы-заставки
+     * (ioctl 32): живой logread снизу вместо молчащего kmsg. */
+    if (argc >= 3 && strcmp(argv[1], "matrixline") == 0) {
+        char buf[128];
+        strncpy(buf, argv[2], sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = 0;
+        int ret = ioctl(fd, 32, buf);
+        close(fd);
+        return ret < 0 ? 1 : 0;
+    }
+
+    /* almond3s-lcd stats — строк/мкс/кадров в последней перерисовке (ioctl 18). */
+    if (argc >= 2 && strcmp(argv[1], "stats") == 0) {
+        int d[3] = {0, 0, 0};
+        if (ioctl(fd, 18, d) == 0)
+            printf("rows=%d us=%d frames=%d\n", d[0], d[1], d[2]);
+        else
+            printf("stats unavailable\n");
+        close(fd);
+        return 0;
+    }
+
+    /* almond3s-lcd bench [N] — N полных перерисовок, печатает среднее мкс/кадр
+     * (ioctl 30). Экран мигнёт мусором. По умолчанию 30 кадров. */
+    if (argc >= 2 && strcmp(argv[1], "bench") == 0) {
+        int iters = argc > 2 ? atoi(argv[2]) : 30;
+        if (iters < 1) iters = 1;
+        int us = ioctl(fd, 30, (unsigned long)iters);
+        if (us > 0)
+            printf("frames=%d total_us=%d avg_us=%d\n", iters, us, us / iters);
+        else
+            printf("bench failed\n");
+        close(fd);
+        return 0;
+    }
+
     /* almond3s-lcd pwm <Гц> — частота ШИМ подсветки (ioctl 24). */
     if (argc >= 3 && strcmp(argv[1], "pwm") == 0) {
         int hz = atoi(argv[2]);
@@ -406,6 +452,7 @@ int main(int argc, char **argv)
     if (argc >= 2 && (strcmp(argv[1], "tone") == 0 ||
                       strcmp(argv[1], "melody") == 0 ||
                       strcmp(argv[1], "march") == 0 ||
+                      strcmp(argv[1], "mario") == 0 ||
                       strcmp(argv[1], "bell") == 0 ||
                       strcmp(argv[1], "ambulance") == 0 ||
                       strcmp(argv[1], "police") == 0 ||
@@ -428,6 +475,17 @@ int main(int argc, char **argv)
         static const int mar_d[] = {
             500,60, 500,60, 500,60, 375,30, 125,30, 500,60, 375,30, 125,30, 650,120,
             500,60, 500,60, 500,60, 375,30, 125,30, 500,30, 375,30, 125,30, 650,120 };
+        /* Тема Super Mario Bros (надземный уровень), узнаваемое первое колено.
+         * Всего 11 нот: пакет 1+11*2=23 байта. Длиннее нельзя - счётчик байт
+         * palmbus (SM0_START) обрезает большой пакет, и хвост таблицы в PIC
+         * остаётся от прошлой мелодии (issue: «Марио переходил в конец бумера»).
+         * Безопасный потолок ~ как у «бумера» (16 нот, 33 байта). 0 - пауза
+         * (драйвер заменит на ультразвук). Частоты проверены: ни один байт не
+         * даёт 0xB7/0x8B (те вешают PIC, issue #5) и не совпадает с опкодами. */
+        static const int mario_f[] = {
+            659,0, 659,0, 659,0, 523,659, 0,784, 0 };
+        static const int mario_d[] = {
+            120,80, 120,150, 120,150, 120,120, 150,240, 300 };
         int f[64], d[64], n = 1;
         int vol = 0, base = 2;
         if (argc > 3 && strcmp(argv[2], "-v") == 0) { vol = atoi(argv[3]); base = 4; }
@@ -444,6 +502,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[1], "march") == 0) {
             n = (int)(sizeof(mar_f) / sizeof(mar_f[0]));
             for (int i = 0; i < n; i++) { f[i] = mar_f[i]; d[i] = mar_d[i]; }
+        } else if (strcmp(argv[1], "mario") == 0) {
+            n = (int)(sizeof(mario_f) / sizeof(mario_f[0]));
+            for (int i = 0; i < n; i++) { f[i] = mario_f[i]; d[i] = mario_d[i]; }
         } else if (argv[1][0] == 'm') {
             n = 10;
             for (int i = 0; i < n; i++) { f[i] = mel_f[i]; d[i] = mel_d[i]; }
@@ -455,6 +516,11 @@ int main(int argc, char **argv)
             for (int i = base; i + 1 < argc && n < 64; i += 2) {
                 f[n] = atoi(argv[i]);
                 d[n] = atoi(argv[i + 1]);
+                /* Клампим CLI-ввод: отрицательная/огромная длительность иначе
+                 * даёт отрицательный total и (unsigned) в usleep -> зависание на
+                 * часы; кривая частота ломает pwm_compute. */
+                if (f[n] < 0) f[n] = 0; else if (f[n] > 20000) f[n] = 20000;
+                if (d[n] < 0) d[n] = 0; else if (d[n] > 2000)  d[n] = 2000;
                 n++;
             }
             if (n == 0) { f[0] = 1174; d[0] = 150; n = 1; }
@@ -487,8 +553,10 @@ int main(int argc, char **argv)
          * несколько экземпляров дерутся за очередь пакетов, и в PIC уезжает
          * мешанина из двух мелодий. */
         int lock = open("/tmp/.lcd_tone.lock", O_CREAT | O_RDWR, 0600);
-        if (lock >= 0 && flock(lock, LOCK_EX | LOCK_NB) < 0) {
-            close(lock);
+        /* Не смогли создать/взять замок - выходим, а не играем без него: иначе
+         * теряется вся защита «один звук за раз» (гонка -> мешанина в PIC). */
+        if (lock < 0 || flock(lock, LOCK_EX | LOCK_NB) < 0) {
+            if (lock >= 0) close(lock);
             close(fd);
             return 0;
         }
@@ -569,8 +637,11 @@ int main(int argc, char **argv)
         if (ret == 0) {
             int total = 0;
             for (int i = 0; i < n; i++) total += d[i];
+            if (total < 0) total = 0;
             sigprocmask(SIG_UNBLOCK, &sig_term, NULL);
-            usleep((unsigned)total * 500 + 150000);
+            unsigned wait_us = (unsigned)total * 500 + 150000;
+            if (wait_us > 20000000) wait_us = 20000000;   /* потолок 20с */
+            usleep(wait_us);
             send_pkt(stop, 3);
         }
         led_restore();

@@ -57,6 +57,10 @@ static int bat_adc_before_charge = 0;
 static int bat_charge_bump = 0;
 static int bat_last_charging = -1;
 static int bat_disp_percent = -1;
+/* Сглаживание стыка разряд->заряд: запомненный разрыв таблиц в момент
+ * подключения и процент старта заряда, по которому разрыв сводится к нулю. */
+static int bat_charge_offset = 0;
+static int bat_charge_start_pct = 0;
 static int bat_nobat_count = 0;
 static int bat_adc_filt = 0;   /* сглаженный АЦП, восьмикратно */
 /* Плато на зарядке. Потолок 726 - свойство конкретной батареи: у другой он
@@ -203,6 +207,7 @@ static void get_battery(struct battery_info *bi) {
             }
         }
 
+
         /* Сглаживаем сам АЦП: шкала такая, что одна единица это около
          * процента, а показания дрожат на единицу-две - отсюда скачки
          * «26 -> 25 -> 27» на ровном месте. Но через смену режима фильтр
@@ -271,14 +276,33 @@ static void get_battery(struct battery_info *bi) {
             bat_plateau_ticks = 0;
         }
 
-        /* При зарядке считаем по таблице заряда: она снята на живой зарядке,
-         * а таблица разряда там врёт - напряжение на клеммах поднято током. */
+        /* При зарядке считаем по таблице заряда: она снята на живой зарядке
+         * (полными циклами двух банок), а таблица разряда там врёт - напряжение
+         * на клеммах поднято током.
+         *
+         * На самом СТЫКЕ обе таблицы честны, но расходятся (зарядное приподняло
+         * напряжение), и процент прыгал. Не фейк-рамп, а сведение реального
+         * разрыва: в момент подключения запоминаем разницу «заряд минус то, что
+         * показывали» (offset) и вычитаем её из кривой заряда, ЛИНЕЙНО сводя к
+         * нулю по мере зарядки. Показания стартуют с последнего процента разряда
+         * и идут ФОРМОЙ реальной кривой заряда, сходясь к 100. */
         int target;
         if (bi->charging) {
-            int to_full = charge_table_lookup(adc_eff);
-            target = 100 - to_full * 100 / 155;
+            int raw = 100 - charge_table_lookup(adc_eff) * 100 / 155;
+            if (raw < 0) raw = 0;
+            if (raw > 100) raw = 100;
+            if (bat_last_charging == 0) {          /* первый тик зарядки */
+                bat_charge_start_pct = raw;
+                bat_charge_offset = (bat_disp_percent >= 0) ? (raw - bat_disp_percent) : 0;
+                if (bat_charge_offset > 25) bat_charge_offset = 25;
+                if (bat_charge_offset < -25) bat_charge_offset = -25;
+            }
+            int span = 100 - bat_charge_start_pct;
+            int off = (span > 0) ? bat_charge_offset * (100 - raw) / span : 0;
+            target = raw - off;
         } else {
             target = bat_table_lookup(adc_eff) * 100 / 262;
+            bat_charge_offset = 0;
         }
         if (plateau_full) target = 100;
         if (target > 100) target = 100;
@@ -943,8 +967,14 @@ static void json_escape(const char *in, char *out, int outsz) {
 
 static int get_wifi_clients(char *json_array, int bufsz) {
     char buf[4096];
-    int n = 0;
-    n += snprintf(json_array+n, bufsz-n, "[");
+    int n = 0, first = 1;
+    /* Копим JSON вручную: snprintf возвращает «сколько БЫ записал», и если
+     * трактовать это как «записано», при усечении n уезжает за буфер, а
+     * следующий bufsz-n на musl превращается в огромный size_t -> запись за
+     * пределами стека (порча). Поэтому каждый объект строим во временный буфер
+     * и добавляем целиком, только если помещается (запятая+объект+"]"+NUL). */
+    if (bufsz < 3) { if (bufsz > 0) json_array[0] = 0; return 0; }
+    json_array[n++] = '[';
     for (int phy = 0; phy <= 1; phy++) {
         char cmd[256];
         snprintf(cmd, sizeof(cmd),
@@ -966,21 +996,25 @@ static int get_wifi_clients(char *json_array, int bufsz) {
                     run_cmd(lcmd,ip,sizeof(ip));
                     char nesc[128]; json_escape(name, nesc, sizeof(nesc));
                     char *band = (phy==0) ? "5G" : "2G";
-                    /* Оставляем место под запятую и закрывающую скобку; если
-                     * буфер на исходе - прекращаем, а не пишем в отрицательный
-                     * остаток (на musl bufsz-n<0 превращается в огромный size_t). */
-                    if (bufsz - n < 200) { line = strtok(NULL, "\n"); continue; }
-                    if (n>2) n += snprintf(json_array+n, bufsz-n, ",");
-                    n += snprintf(json_array+n, bufsz-n,
+                    char obj[320];
+                    int ol = snprintf(obj, sizeof(obj),
                         "{\"mac\":\"%s\",\"name\":\"%s\",\"ip\":\"%s\","
                         "\"band\":\"%s\",\"signal\":%d,\"rx_bytes\":%lld,\"tx_bytes\":%lld}",
                         mac,nesc,ip,band,sig,rx,tx);
+                    if (ol < 0) ol = 0;
+                    if (ol >= (int)sizeof(obj)) ol = (int)sizeof(obj) - 1;
+                    /* нужно: [запятая] + объект + "]" + NUL */
+                    if (n + (first ? 0 : 1) + ol + 2 > bufsz) { line = NULL; break; }
+                    if (!first) json_array[n++] = ',';
+                    memcpy(json_array + n, obj, ol); n += ol;
+                    first = 0;
                 }
                 line = strtok(NULL, "\n");
             }
         }
     }
-    n += snprintf(json_array+n, bufsz-n, "]");
+    json_array[n++] = ']';
+    json_array[n] = 0;
     return n;
 }
 
@@ -1043,7 +1077,7 @@ static void accept_clients(int srv) {
 
 /* ======== Main ======== */
 int main(void) {
-    fprintf(stderr, MODNAME " " VERSION " by Sublimity — START\n");
+    fprintf(stderr, MODNAME " " VERSION " by a43 — START\n");
 
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
@@ -1094,6 +1128,13 @@ int main(void) {
         sysinfo(&si);
         get_battery(&bat);
         bat_update(&bat_est, &bat);
+        /* Время работы от батареи: засекаем момент, когда сняли зарядку, и
+         * отдаём прошедшие секунды. Живёт в памяти демона (сброс на его
+         * перезапуск - это редко и не критично). */
+        static time_t bat_unplug_ts = 0;
+        if (bat.no_battery || bat.charging) bat_unplug_ts = 0;
+        else if (bat_unplug_ts == 0)       bat_unplug_ts = time(NULL);
+        int on_bat_sec = bat_unplug_ts ? (int)(time(NULL) - bat_unplug_ts) : 0;
         run_cmd("ping -c1 -W2 " PING_HOST " 2>/dev/null | grep 'time=' | sed 's/.*time=//;s/ .*//'", ping_buf, sizeof(ping_buf));
         google_ping = (ping_buf[0] && atof(ping_buf)>0) ? (int)atof(ping_buf) : -1;
 
@@ -1122,7 +1163,7 @@ int main(void) {
             "\"ping\":{\"google_ms\":%d},"
             "\"battery\":{\"adc\":%d,\"percent\":%d,\"charging\":%s,\"full\":%s,\"valid\":%s,"
             "\"no_battery\":%s,\"remain_min\":%d,\"drain_rate\":%d.%d,\"cutoff\":%d,"
-            "\"raw_hex\":\"%02x %02x\"},"
+            "\"on_bat_sec\":%d,\"raw_hex\":\"%02x %02x\"},"
             "\"storage\":{\"free_kb\":%ld,\"total_kb\":%ld},"
             "\"lan\":{\"ip\":\"%s\",\"mac\":\"%s\"},"
             "\"uptime\":%ld,\"mem_free_mb\":%ld,\"mem_total_mb\":%ld,"
@@ -1144,11 +1185,19 @@ int main(void) {
             bat.no_battery?"true":"false",
             bat_est.remain_min, bat_est.drain_rate/100, abs(bat_est.drain_rate)%100,
             bat_cal_cutoff,
+            on_bat_sec,
             bat.raw1, bat.raw2,
             ovl_free, ovl_total, lan_ip, lan_mac,
             si.uptime, (si.freeram + si.bufferram)/1024/1024,
             si.totalram/1024/1024, si.loads[0]/65536.0,
             cpu_busy_pct(), cpu_core_count());
+
+        /* snprintf возвращает «сколько БЫ записал»: если JSON перерастёт буфер,
+         * len окажется больше реального содержимого, и write()/fwrite() ниже
+         * прочитают за пределами json[] (утечка соседней памяти клиентам и в
+         * файл). Клампим к фактическому размеру. */
+        if (len < 0) len = 0;
+        if (len >= (int)sizeof(json)) len = (int)sizeof(json) - 1;
 
         /* Push to socket clients */
         accept_clients(srv);

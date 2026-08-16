@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=lcd-ui-almond3s
-PKG_RELEASE:=220
+PKG_RELEASE:=332
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -31,6 +31,11 @@ define Build/Compile
 		-o $(PKG_BUILD_DIR)/collector $(PKG_BUILD_DIR)/collector.c
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
 		-o $(PKG_BUILD_DIR)/lcdshot $(PKG_BUILD_DIR)/lcdshot.c
+	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
+		-std=c99 -I$(PKG_BUILD_DIR)/vterm/include \
+		-o $(PKG_BUILD_DIR)/almond3s-term \
+		$(PKG_BUILD_DIR)/almond3s-term.c $(PKG_BUILD_DIR)/vterm/src/*.c \
+		-lutil
 endef
 
 define Package/lcd-ui-almond3s/install
@@ -42,6 +47,7 @@ define Package/lcd-ui-almond3s/install
 	$(INSTALL_DIR) $(1)/usr/libexec/almond3s
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/render $(1)/usr/libexec/almond3s/render
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/collector $(1)/usr/libexec/almond3s/collector
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/almond3s-term $(1)/usr/libexec/almond3s/almond3s-term
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/ui.uc $(1)/usr/libexec/almond3s/ui.uc
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/almond3s-lcd.init $(1)/etc/init.d/almond3s-lcd
@@ -52,12 +58,25 @@ define Package/lcd-ui-almond3s/install
 	$(INSTALL_BIN) ./files/reboot.sh $(1)/etc/almond3s/scripts/reboot.sh
 	$(INSTALL_BIN) ./files/poweroff.sh $(1)/etc/almond3s/scripts/poweroff.sh
 	$(INSTALL_BIN) ./files/lte_reset.sh $(1)/etc/almond3s/scripts/lte_reset.sh
+	$(INSTALL_BIN) ./files/alarm_set.sh $(1)/etc/almond3s/scripts/alarm_set.sh
+	$(INSTALL_BIN) ./files/alarm_play.sh $(1)/etc/almond3s/scripts/alarm_play.sh
+	$(INSTALL_BIN) ./files/alarm_stop.sh $(1)/etc/almond3s/scripts/alarm_stop.sh
+	$(INSTALL_BIN) ./files/vpn_clash.sh $(1)/etc/almond3s/scripts/vpn_clash.sh
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./files/almond3s.config $(1)/etc/config/almond3s
+	# Нарисованные в редакторе иконки: кладём в /etc/almond3s/icons, откуда
+	# micon_load_custom их подхватывает и перекрывает вшитый пиксель-арт. Как
+	# conffiles - переживают апгрейд и правки пользователя.
+	$(INSTALL_DIR) $(1)/etc/almond3s/icons
+	$(INSTALL_CONF) ./icons-user/*.txt $(1)/etc/almond3s/icons/
 endef
 
 define Package/lcd-ui-almond3s/conffiles
 /etc/config/almond3s
+/etc/almond3s/icons/editor.txt
+/etc/almond3s/icons/display.txt
+/etc/almond3s/icons/traffic.txt
+/etc/almond3s/icons/wifi.txt
 endef
 
 define Package/lcd-ui-almond3s/postinst
@@ -81,6 +100,25 @@ grep -q svcping /etc/crontabs/root 2>/dev/null || \
 	echo "*/10 * * * * /etc/almond3s/scripts/svcping.sh" >> /etc/crontabs/root
 /etc/init.d/cron reload >/dev/null 2>&1
 /etc/almond3s/scripts/weather_fetch.sh >/dev/null 2>&1 &
+# Заводим секцию будильника, если её нет: config - conffile, при апгрейде новая
+# секция не подмешивается в существующий пользовательский конфиг (уходит в
+# .apk-new), поэтому создаём её здесь с дефолтами.
+if ! uci -q get almond3s.alarm >/dev/null 2>&1; then
+	uci set almond3s.alarm=alarm
+	uci set almond3s.alarm.enabled='0'
+	uci set almond3s.alarm.hour='7'
+	uci set almond3s.alarm.minute='0'
+	uci set almond3s.alarm.sound='tone'
+	uci set almond3s.alarm.sound_args='988 130 988 267 838 130 838 535'
+	uci set almond3s.alarm.sound_label='звонок'
+	uci set almond3s.alarm.volume='1'
+	uci set almond3s.alarm.mode='once'
+	uci set almond3s.alarm.repeat='0'
+	uci commit almond3s
+fi
+# Синхронизируем cron-запись будильника с сохранённым конфигом (ставит запись,
+# если он включён; убирает - если нет). Так настройка переживает апгрейд.
+[ -x /etc/almond3s/scripts/alarm_set.sh ] && /etc/almond3s/scripts/alarm_set.sh >/dev/null 2>&1
 # Перезапускаем службу: без этого в памяти остаётся старая, файлы уже
 # новые, а на экране прежнее поведение - выглядит как «обновление не приехало».
 [ -x /etc/init.d/almond3s-lcd ] && /etc/init.d/almond3s-lcd restart >/dev/null 2>&1

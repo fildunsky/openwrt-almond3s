@@ -85,6 +85,29 @@ static void fb_rect(int x, int y, int w, int h, uint16_t c)
             fb[j * LCD_W + i] = c;
 }
 
+/* Вертикальный градиент: цвет c0 сверху -> c1 снизу, интерполяция по строкам.
+ * Считаем в компонентах RGB565 - для мягкой подложки точности хватает, а строка
+ * заливается одним цветом, так что стоимость почти как у fb_rect. */
+static void fb_vgrad(int x, int y, int w, int h, uint16_t c0, uint16_t c1)
+{
+    int x1 = x + w, y1 = y + h;
+    if (w <= 0 || h <= 0) return;
+    int r0 = (c0 >> 11) & 0x1F, g0 = (c0 >> 5) & 0x3F, b0 = c0 & 0x1F;
+    int r1 = (c1 >> 11) & 0x1F, g1 = (c1 >> 5) & 0x3F, b1 = c1 & 0x1F;
+    int cx0 = x < 0 ? 0 : x, cy0 = y < 0 ? 0 : y;
+    int cx1 = x1 > LCD_W ? LCD_W : x1, cy1 = y1 > LCD_H ? LCD_H : y1;
+    int denom = h > 1 ? h - 1 : 1;
+    for (int j = cy0; j < cy1; j++) {
+        int t = j - y;
+        int r = r0 + (r1 - r0) * t / denom;
+        int g = g0 + (g1 - g0) * t / denom;
+        int b = b0 + (b1 - b0) * t / denom;
+        uint16_t c = (uint16_t)((r << 11) | (g << 5) | b);
+        for (int i = cx0; i < cx1; i++)
+            fb[j * LCD_W + i] = c;
+    }
+}
+
 /* Встроенный шрифт 5x7 ASCII */
 static const uint8_t font5x7[96][5] = {
     {0x00,0x00,0x00,0x00,0x00},{0x00,0x00,0x5F,0x00,0x00},
@@ -250,12 +273,12 @@ static int fz_char_mono(int x, int y, unsigned cp, uint16_t fg, uint16_t bg, int
 /* cp - код символа Unicode. Латиница берётся из font5x7, кириллица - из
    font5x7_cyr (порядок юникодный, индекс - арифметика), остальное ищем в
    font5x7_sym. */
-static void fb_char(int x, int y, unsigned cp, uint16_t fg, uint16_t bg, int scale)
+static void fb_char(int x, int y, unsigned cp, uint16_t fg, uint16_t bg, int scale, int transp)
 {
     const uint8_t *g;
     int col, row, sx, sy;
 
-    if (font_mode == 1 && fz_char_mono(x, y, cp, fg, bg, scale, 1))
+    if (font_mode == 1 && fz_char_mono(x, y, cp, fg, bg, scale, !transp))
         return;
 
     if (cp >= 0x0410 && cp <= 0x042F)      g = font5x7_cyr[cp - 0x0410];
@@ -277,18 +300,22 @@ static void fb_char(int x, int y, unsigned cp, uint16_t fg, uint16_t bg, int sca
     for (row = 0; row < 7; row++)
         for (sy = 0; sy < scale; sy++)
             for (col = 0; col < 5; col++)
-                for (sx = 0; sx < scale; sx++)
-                    fb_pixel(x + col*scale + sx, y + row*scale + sy,
-                             (g[col] & (1 << row)) ? fg : bg);
-    /* space between chars */
-    for (row = 0; row < 7*scale; row++)
-        for (sx = 0; sx < scale; sx++)
-            fb_pixel(x + 5*scale + sx, y + row, bg);
+                for (sx = 0; sx < scale; sx++) {
+                    if (g[col] & (1 << row))
+                        fb_pixel(x + col*scale + sx, y + row*scale + sy, fg);
+                    else if (!transp)
+                        fb_pixel(x + col*scale + sx, y + row*scale + sy, bg);
+                }
+    /* space between chars - прозрачный текст его не закрашивает */
+    if (!transp)
+        for (row = 0; row < 7*scale; row++)
+            for (sx = 0; sx < scale; sx++)
+                fb_pixel(x + 5*scale + sx, y + row, bg);
 }
 
 /* Текст приходит в UTF-8: кириллица это два байта (0xD0/0xD1 + продолжение).
    Разбираем двухбайтовые последовательности, остальное считаем ASCII. */
-static void fb_text(int x, int y, const char *s, uint16_t fg, uint16_t bg, int scale)
+static void fb_text(int x, int y, const char *s, uint16_t fg, uint16_t bg, int scale, int transp)
 {
     int x0 = x;
     unsigned cps[256];
@@ -323,20 +350,22 @@ static void fb_text(int x, int y, const char *s, uint16_t fg, uint16_t bg, int s
 
     if (font_mode == 1) {
         /* Два прохода: сперва фон всех клеток, затем глифы. Иначе широкий
-           глиф (W, Ж, Щ) срезается фоном соседней клетки. */
+           глиф (W, Ж, Щ) срезается фоном соседней клетки. Прозрачный текст
+           фоновый проход пропускает - под буквами остаётся подложка. */
         int row, sx;
+        if (!transp)
+            for (i = 0; i < n; i++)
+                for (row = 0; row < 8 * scale; row++)
+                    for (sx = 0; sx < adv[i]; sx++)
+                        fb_pixel(cx[i] + sx, cy[i] + row, bg);
         for (i = 0; i < n; i++)
-            for (row = 0; row < 8 * scale; row++)
-                for (sx = 0; sx < adv[i]; sx++)
-                    fb_pixel(cx[i] + sx, cy[i] + row, bg);
-        for (i = 0; i < n; i++)
-            if (!fz_char_mono(cx[i], cy[i], cps[i], fg, bg, scale, 0))
-                fb_char(cx[i], cy[i], cps[i], fg, bg, scale);
+            if (!fz_char_mono(cx[i], cy[i], cps[i], fg, bg, scale, !transp))
+                fb_char(cx[i], cy[i], cps[i], fg, bg, scale, transp);
         return;
     }
 
     for (i = 0; i < n; i++)
-        fb_char(cx[i], cy[i], cps[i], fg, bg, scale);
+        fb_char(cx[i], cy[i], cps[i], fg, bg, scale, transp);
 }
 
 static void flush_cmd(void)
@@ -423,6 +452,17 @@ static void handle_cmd(const char *json)
         json_str(json, "color", color, sizeof(color));
         fb_rect(x, y, w, h, parse_color(color));
     }
+    else if (!strcmp(cmd, "vgrad")) {
+        int x = json_int(json, "x", 0);
+        int y = json_int(json, "y", 0);
+        int w = json_int(json, "w", LCD_W);
+        int h = json_int(json, "h", LCD_H);
+        char color2[32];
+        json_str(json, "color", color, sizeof(color));    /* верх */
+        json_str(json, "color2", color2, sizeof(color2));  /* низ */
+        fb_vgrad(x, y, w, h, parse_color(color[0] ? color : "black"),
+                 parse_color(color2[0] ? color2 : (color[0] ? color : "black")));
+    }
     else if (!strcmp(cmd, "text")) {
         int x = json_int(json, "x", 0);
         int y = json_int(json, "y", 0);
@@ -433,11 +473,12 @@ static void handle_cmd(const char *json)
         char bg_color[32];
         json_str(json, "bg", bg_color, sizeof(bg_color));
         json_str(json, "text", text, sizeof(text));
-        /* unescape \n */
-        char *p;
-        /* \n уже развёрнут в json_str */
+        /* \n уже развёрнут в json_str. bg:"none" - прозрачный фон: под буквами
+         * остаётся то, что уже нарисовано (градиент-подложка). */
+        int transp = !strcmp(bg_color, "none");
         fb_text(x, y, text, parse_color(color[0] ? color : "white"),
-                parse_color(bg_color[0] ? bg_color : "black"), size);
+                parse_color((bg_color[0] && !transp) ? bg_color : "black"),
+                size, transp);
     }
     else if (!strcmp(cmd, "fontmode")) {
         font_mode = json_int(json, "mode", 0);
