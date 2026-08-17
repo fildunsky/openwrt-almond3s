@@ -3192,6 +3192,25 @@ function sta_apply(ssid, key, band) {
         ucur.set("network", "wwan", "metric", "100");
         ucur.commit("network");
     }
+    // wwan обязан лежать в зоне wan фаервола: без зоны интерфейс висит «серым» -
+    // нет ни masquerade, ни форвардинга, и аплинк не раздаёт интернет. Делаем
+    // идемпотентно на каждый коннект, чтобы вылечить и созданный ранее в серой зоне.
+    let fzone = null;
+    ucur.foreach("firewall", "zone", function(z) {
+        if (z.name == "wan") fzone = z[".name"];
+    });
+    if (fzone) {
+        let nets = ucur.get("firewall", fzone, "network");
+        if (type(nets) != "array") nets = nets ? [ nets ] : [];
+        let has = false;
+        for (let n in nets) if (n == "wwan") has = true;
+        if (!has) {
+            push(nets, "wwan");
+            ucur.set("firewall", fzone, "network", nets);
+            ucur.commit("firewall");
+            system("/etc/init.d/firewall reload >/dev/null 2>&1 &");
+        }
+    }
     ucur.set("wireless", STA_SECTION, "device", dev);
     ucur.set("wireless", STA_SECTION, "ssid", ssid);
     ucur.set("wireless", STA_SECTION, "mode", "sta");
