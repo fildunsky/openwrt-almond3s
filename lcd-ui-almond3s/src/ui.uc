@@ -435,6 +435,7 @@ let TR_RU = {
     "5GHz off": "5ГГц выкл",
     "SIM %d": "SIM %d",
     "Fetching %s...": "Загружаю %s...",
+    "Updating...": "Обновляю...",
     "Display": "Экран",
     "SCREENSAVER AFTER": "ЗАСТАВКА ЧЕРЕЗ",
     "Never": "Никогда",
@@ -1155,8 +1156,11 @@ function refresh_data() {
     // Supplement: ubus system info (more accurate uptime/mem/load). Два
     // синхронных ubus-вызова каждые 2с - самая дорогая часть тика; пока экран
     // погашен, их результат никто не видит (заставка живёт на сокете/файлах),
-    // поэтому на спящем устройстве их пропускаем.
-    if (uconn && !st.blank) {
+    // поэтому на спящем устройстве их пропускаем. Плюс на STA-страницах
+    // (скан/пароль): после `wifi reload` netifd занят, и `network.interface.wan
+    // status` виснет секундами, морозя весь uloop - клавиатура не печатала.
+    // Этим страницам uptime/wan не нужны, опрос пропускаем.
+    if (uconn && !st.blank && st.page != "kbd" && st.page != "stascan") {
         let si = uconn.call("system", "info", {});
         if (si) {
             if (si.uptime) d.uptime = si.uptime;
@@ -3264,12 +3268,18 @@ function draw_dashboard() {
         return;
     }
 
+    // Идёт фоновое переключение приоритета? Помечаем нужную карточку, снимаем
+    // метку когда аплинк стал основным (или по таймауту, если не вышло).
+    let sw = st.np_switch;
+    if (sw && (l[0].iface == sw.ifn || (time() - sw.ts) >= 12)) { st.np_switch = null; sw = null; }
+
     // Карточка на аплинк: слева цветная полоска (зелёная у основного), имя,
     // тип, справа метрика и адрес. Тап делает аплинк основным.
     for (let i = 0; i < length(l) && i < 3; i++) {
         let e = l[i], b = netpri_btn(i);
         let up = (e.health ?? "") == "up";
-        let col = i == 0 ? C.green : (up ? C.cyan : C.dim);
+        let switching = (sw != null && e.iface == sw.ifn && i != 0);
+        let col = switching ? C.accent : (i == 0 ? C.green : (up ? C.cyan : C.dim));
         lcd_rect(b.x, b.y, b.w, b.h, C.widget);
         lcd_rect(b.x, b.y, 3, b.h, col);
         lcd_text(b.x + 12, b.y + 5, tcut(e.label ?? e.iface ?? "?", 16),
@@ -3288,9 +3298,11 @@ function draw_dashboard() {
         let ip = e.ip ?? "";
         if (ip != "")
             lcd_text(b.x + b.w - 10 - roff - tlen(ip) * 6, b.y + 25, ip, C.green, C.widget, 1);
-        let m = sprintf("%d", int(+(e.metric ?? 0)));
+        // Пока переключаемся - вместо метрики троеточие акцентом (мгновенный
+        // отклик без попапа); как станет основным, вернётся зелёная метрика.
+        let m = switching ? "..." : sprintf("%d", int(+(e.metric ?? 0)));
         lcd_text(b.x + b.w - 10 - roff - tlen(m) * 12, b.y + 5, m,
-                 i == 0 ? C.green : C.gray, C.widget, 2);
+                 switching ? C.accent : (i == 0 ? C.green : C.gray), C.widget, 2);
     }
 
     // Пунктирная карточка ожидания: сеть подключается, но в netpri ещё не
@@ -3419,7 +3431,9 @@ function sms_delete(m) {
 // на «Входящих» в 5gmodem. Буквенные имена вроде «T-Mob» phone_fmt вернёт как
 // есть, поэтому проверять тип отправителя отдельно не нужно.
 function sms_from(raw) {
-    let f = phone_fmt(raw);
+    // Компактный номер без пробелов (+7(962)699-90-32): в списке/шапке СМС полный
+    // с пробелами не влезал.
+    let f = phone_short(raw);
     return f != "" ? f : (raw ?? "?");
 }
 
@@ -5749,10 +5763,22 @@ function draw_services_page() {
     // своя заливка C.hdr, без нижней грани и с той же надписью.
     let rb = svc_refresh_btn(), bb = svc_back_btn();
     let lbl = tr("Ping");
+    // Идёт фоновая проверка? Снимаем метку, когда svcping перепишет кэш (сменит
+    // mtime) или по таймауту. Пока идёт - метку «Пинг» чуть выше, чтобы под ней
+    // поместилось мелкое «Проверка...».
+    let sc = st.svc_check;
+    if (sc) {
+        let ss = fs.stat("/tmp/lcd_services.json");
+        if ((ss && ss.mtime != sc.mt) || (time() - sc.ts) >= 15) { st.svc_check = null; sc = null; }
+    }
     lcd_rect(rb.x, rb.y, rb.w, rb.h, C.btn);
     lcd_rect(rb.x, rb.y + rb.h - 3, rb.w, 3, C.border);
-    lcd_text(rb.x + int((rb.w - tlen(lbl) * 12) / 2), rb.y + int((rb.h - 14) / 2),
-             lbl, C.white, C.btn, 2);
+    let lbl_y = sc ? (rb.y + 16) : (rb.y + int((rb.h - 14) / 2));
+    lcd_text(rb.x + int((rb.w - tlen(lbl) * 12) / 2), lbl_y, lbl, C.white, C.btn, 2);
+    if (sc) {
+        let ct = tr("Checking...");
+        lcd_text(rb.x + int((rb.w - tlen(ct) * 6) / 2), rb.y + 40, ct, C.cyan, C.btn, 1);
+    }
 
     lcd_rect(bb.x, bb.y, bb.w, bb.h, C.hdr);
     lcd_text(bb.x + 20, bb.y + 20, tr("<<< BACK"), C.white, C.hdr, 2);
@@ -5793,9 +5819,10 @@ function wifi_onoff_rect(cy) {
 }
 
 function wifi_onoff_box(cy, label) {
-    // Видимая рамка - впритык к тексту, прижата к правому краю зоны.
+    // Видимая рамка - впритык к тексту, прижата к правому краю зоны. Правый край
+    // держим левее QR-бокса (он с GX+GW-68=244), иначе кнопка касалась кода.
     let w = tlen(label) * 12 + 10;
-    let rx = GX + st.ox + 238;
+    let rx = GX + st.ox + 232;
     return { x: rx - w, y: cy + 43, w: w, h: 22 };
 }
 
@@ -6605,8 +6632,13 @@ function page_sig() {
         return base + sprintf("|%J", st.spd);
     case "spdcfg":
         return base + sprintf("|%J", st.spd_cfg);
-    case "services":
-        return base + sprintf("|%J", d.services);
+    case "services": {
+        // mtime кэша + флаг проверки в подписи: перерисуемся, когда svcping
+        // допишет результат (даже если статусы те же), и снимем «Проверка...».
+        let cs = fs.stat("/tmp/lcd_services.json");
+        return base + sprintf("|%J|%d|%d", d.services, cs ? cs.mtime : 0,
+                              st.svc_check ? 1 : 0);
+    }
     case "sms":
     case "sms1": {
         // mtime кэша читаем прямо из ФС, а не из st.sms_ts: иначе появление
@@ -7048,25 +7080,11 @@ function menu_press_fx(idx) {
 // Сброс модема: лестница 5gmodem (GPIO питание слота -> деавторизация USB ->
 // unbind/bind драйвера). Своего скрипта не дублируем.
 function menu_do_reset() {
-    action_splash("LTE", tr("Resetting modem..."), C.yellow);
+    // Лестница сброса (питание слота -> USB -> unbind/bind) уходит в фон одним
+    // скриптом (~14с) - меню остаётся живым, плитка «Модем» обновится сама, когда
+    // модем поднимется. Короткий тост для отклика вместо пошаговой заглушки.
     run_script("lte_reset.sh", true);
-    for (let step = 0; step < 7; step++) {
-        system("sleep 2");
-        let msgs = lang() == "ru"
-            ? [ "Отключаю...", "Сброс по GPIO...", "Жду...",
-                "Поднимаю...", "Жду...", "Проверяю...", "Готово" ]
-            : [ "Disconnecting...", "GPIO reset...", "Waiting...",
-                "Reconnecting...", "Waiting...", "Checking...", "Done" ];
-        lcd_rect(20, 140, 280, 20, C.bg);
-        lcd_text(20, 140, msgs[step], C.gray, C.bg, 2);
-        lcd_flush();
-    }
-    refresh_data();
-    draw_menu();
-    let u = st.data?.uqmi;
-    let rsrp = int(+(u?.rsrp ?? 0));
-    toast(rsrp < 0 ? sprintf("LTE OK  RSRP:%d", rsrp) : "LTE: no signal",
-          rsrp < 0 ? C.green : C.red, rsrp < 0 ? "#002000" : "#200000", 2);
+    toast(tr("Resetting modem..."), C.yellow, "#201406", 3);
     draw_menu();
 }
 
@@ -7124,15 +7142,10 @@ function menu_do_power() {
     }
 }
 
-// Определена ПОСЛЕ action_splash/refresh_data/toast/draw_wifi_page: в ucode нет
-// hoisting, и раньше (выше по файлу) её тело не видело action_splash - тап по
-// кнопке ВКЛ/ВЫКЛ ронял интерфейс с «undeclared variable».
-function wifi_toggle_radio(radio, sec, title) {
+function wifi_toggle_radio(radio, sec) {
     if (!ucur) return;
     let disabled = wifi_is_disabled(radio, sec);
     let new_state = disabled ? "0" : "1";
-    action_splash(title, tr(new_state == "0" ? "Enabling..." : "Disabling..."),
-                  new_state == "0" ? C.green : C.red);
     if (new_state == "0") {
         ucur.set("wireless", radio, "disabled", "0");
         ucur.set("wireless", sec, "disabled", "0");
@@ -7142,12 +7155,9 @@ function wifi_toggle_radio(radio, sec, title) {
         ucur.set("wireless", sec, "disabled", "1");
     }
     ucur.commit("wireless");
-    system("wifi reload");
-    system("sleep 3");
-    refresh_data();
-    toast(tr(new_state == "0" ? "Wi-Fi on" : "Wi-Fi off"),
-          new_state == "0" ? C.green : C.red,
-          new_state == "0" ? "#002000" : "#200000", 2);
+    // Фоново, без заглушки: uci уже сменён, поэтому кнопка сразу показывает новое
+    // состояние; `wifi reload` в фоне применяет его к радио, не вешая uloop.
+    system("wifi reload >/dev/null 2>&1 &");
     draw_wifi_page();
 }
 
@@ -7185,10 +7195,12 @@ function handle_touch(tx, ty, tmove) {
             go_page("menu");
             return;
         }
-        action_splash(tr("Services"), tr("Checking..."), C.cyan);
+        // Фоновая проверка без заглушки: svcping пишет кэш, страница обновится
+        // сама, когда статусы приедут. Отклик - мелкая надпись «Проверка...» под
+        // кнопкой «Пинг» (внутри неё), снимается по смене mtime кэша.
+        let cs = fs.stat("/tmp/lcd_services.json");
+        st.svc_check = { ts: time(), mt: cs ? cs.mtime : 0 };
         system("/etc/almond3s/scripts/svcping.sh >/dev/null 2>&1 &");
-        sock_poll(1500);
-        refresh_data();
         draw_services_page();
         return;
     }
@@ -7612,11 +7624,16 @@ function handle_touch(tx, ty, tmove) {
                 if (i == 0) return;          /* уже основной */
                 let ifn = l[i].iface ?? "";
                 if (ifn == "") return;
-                action_splash(tr("Internet"), tr("Switching..."), C.cyan);
-                system(sprintf("%s set %s >/dev/null 2>&1", NETPRI_SH, ifn));
-                netpri_refresh();
-                sock_poll(2500);
-                draw_current();
+                // Фоновое переключение БЕЗ заглушки на весь экран: ставим метрику
+                // и тут же освежаем кэш netpri одной фоновой командой - uloop не
+                // виснет. Карточку помечаем «переключаю» для мгновенной обратной
+                // связи; на следующем тике netpri покажет новый приоритет и
+                // карточка обновится сама (page_sig видит смену списка).
+                system("( " + NETPRI_SH + " set " + sh_quote(ifn) +
+                       "; " + NETPRI_SH + " list > " + NETPRI_CACHE + ".new 2>/dev/null" +
+                       " && mv " + NETPRI_CACHE + ".new " + NETPRI_CACHE + " ) >/dev/null 2>&1 &");
+                st.np_switch = { ifn: ifn, ts: time() };
+                draw_dashboard();
                 return;
             }
         }
@@ -7673,13 +7690,14 @@ function handle_touch(tx, ty, tmove) {
                 sta.pass = ""; sta.kb = { pg: "abc", caps: false };
                 go_page("kbd");
             } else {
-                // Открытая - подключаемся сразу.
-                action_splash(tr("Wi-Fi"), tr("Connecting..."), C.cyan);
+                // Открытая - подключаемся сразу, в фоне (sta_apply уже пускает
+                // `network reload` фоном). Пунктирная карточка sta_pending на
+                // дашборде - обратная связь; netpri обновит её как подключимся.
                 sta_apply(nets[i].ssid, "", nets[i].band);
                 sta_pending = { ssid: nets[i].ssid, since: time() };
-                sock_poll(2500);
                 netpri_refresh();
                 go_page("dashboard");
+                st.nav = [];   // мастер завершён - «назад» с дашборда ведёт в меню, не в пароль
             }
             return;
         }
@@ -7687,8 +7705,10 @@ function handle_touch(tx, ty, tmove) {
     }
 
     if (st.page == "kbd") {
-        // Полоса «назад» внизу = отмена ввода, возврат к списку сетей.
-        if (ty >= BACK_Y) { go_page("stascan"); return; }
+        // Полоса «назад» внизу = отмена ввода, возврат к списку сетей. go_back()
+        // СНИМАЕТ со стека (было go_page — оно КЛАДЁТ kbd обратно, отсюда петля
+        // kbd<->stascan, из которой не выйти).
+        if (ty >= BACK_Y) { go_back(); return; }
         let e = kb_key_at(tx, ty);
         if (!e) return;
         kb_press_show(e, sta.kb, 92);   // вдавить клавишу
@@ -7698,12 +7718,12 @@ function handle_touch(tx, ty, tmove) {
         else if (a.t == "space") sta.pass += " ";
         else if (a.t == "enter") {
             let n = sta.nets[sta.sel];
-            action_splash(tr("Wi-Fi"), tr("Connecting..."), C.cyan);
+            // В фоне, без заглушки (sta_apply пускает `network reload` фоном).
             sta_apply(n.ssid, sta.pass, n.band);
             sta_pending = { ssid: n.ssid, since: time() };
-            sock_poll(2500);
             netpri_refresh();
             go_page("dashboard");
+            st.nav = [];   // мастер завершён - «назад» с дашборда ведёт в меню, не в пароль
             return;
         }
         draw_kbd_page();
@@ -8214,10 +8234,11 @@ function handle_touch(tx, ty, tmove) {
                 lcd_flush();
                 ucur.set("almond3s", "weather", "city", list[idx]);
                 ucur.commit("almond3s");
-                action_splash(tr("Weather"), sprintf(tr("Fetching %s..."), city_name(list[idx])), C.yellow);
-                system("/etc/almond3s/scripts/weather_fetch.sh >/dev/null 2>&1");
-                refresh_data();
+                // Фоновая загрузка: fetch в фоне, уходим на «Погоду»; как кэш
+                // обновится, страница перерисуется сама (page_sig видит weather).
+                system("/etc/almond3s/scripts/weather_fetch.sh >/dev/null 2>&1 &");
                 go_page("weather");
+                toast(tr("Updating..."), C.yellow, "#201406", 2);
                 return;
             }
         }
@@ -8241,7 +8262,7 @@ function handle_touch(tx, ty, tmove) {
         // Кнопка ВКЛ/ВЫКЛ - радио переключаем ТОЛЬКО по её области.
         let br1 = wifi_onoff_rect(y1);
         if (in_rect(tx, ty, br1.x, br1.y, br1.w, br1.h)) {
-            wifi_toggle_radio("radio1", "default_radio1", "Wi-Fi 2.4GHz");
+            wifi_toggle_radio("radio1", "default_radio1");
             return;
         }
         // Тап по числу клиентов - список подключённых устройств диапазона.
@@ -8264,7 +8285,7 @@ function handle_touch(tx, ty, tmove) {
         }
         let br2 = wifi_onoff_rect(y2);
         if (in_rect(tx, ty, br2.x, br2.y, br2.w, br2.h)) {
-            wifi_toggle_radio("radio0", "default_radio0", "Wi-Fi 5GHz");
+            wifi_toggle_radio("radio0", "default_radio0");
             return;
         }
         let cr2 = wifi_cli_rect(y2);
