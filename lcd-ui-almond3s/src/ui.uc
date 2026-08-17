@@ -197,6 +197,7 @@ let BTN_W   = ((LCD_W - (BTN_PAD * 3)) / 2); // 154
 let BTN_H   = 68;
 let START_Y = HDR_H + BTN_PAD;
 let BACK_Y  = LCD_H - 32;
+let GEO_JSON = "/tmp/lcd_geo.json";   // ответ геокодера для пикера выбора города
 
 // --- Единая сетка страниц (8px модуль) ---
 // Контент живёт в безопасной зоне между шапкой (22) и полосой «назад» (208):
@@ -551,6 +552,13 @@ let TR_RU = {
     "Feels": "Ощущается",
     "Humidity": "Влажность",
     "Wind": "Ветер",
+    "Custom city...": "Свой город...",
+    "Custom city": "Свой город",
+    "Type city name": "Введите город",
+    "Source": "Источник",
+    "Select city": "Выбор города",
+    "Searching...": "Поиск...",
+    "City not found": "Город не найден",
     "Once": "Разово",
     "Daily": "Ежедневно",
     "repeat": "повтор",
@@ -4678,6 +4686,18 @@ function draw_kbd_icon(x, y) {
 
 function draw_kbd_page() {
     lcd_clear(C.bg);
+    // Режим ввода города: то же поле+клавиатура, но текст открытый и свой буфер.
+    if (st.kbmode == "city") {
+        draw_header(tr("Custom city"));
+        lcd_rect(10, 30, 300, 30, C.widget);
+        let v = st.citybuf ?? "";
+        lcd_text(18, 38, v != "" ? v : tr("Type city name"),
+                 v != "" ? C.white : C.dim, C.widget, 2);
+        kb_draw(92, st.citykb);
+        draw_back();
+        lcd_flush();
+        return;
+    }
     let n = sta.sel >= 0 ? sta.nets[sta.sel] : null;
     draw_header(tcut(n ? n.ssid : tr("Password"), 24));
 
@@ -6182,7 +6202,7 @@ let WCITY_DEFAULT = [ "Moscow", "Saint Petersburg", "Voronezh", "Novosibirsk",
                       "Yekaterinburg", "Kazan", "Nizhny Novgorod", "Samara",
                       "Rostov-on-Don", "Krasnoyarsk", "Sochi", "Khabarovsk",
                       "Vladivostok", "Ishim" ];
-let WCITY_PER_PAGE = 8;
+let WCITY_PER_PAGE = 6;   // 3 ряда пресетов; остальные города - через «Свой город»
 
 // В wttr.in уходит латинское имя (кириллицу он понимает хуже), а на экране
 // показываем русское. Незнакомый город останется как записан.
@@ -6223,9 +6243,21 @@ function wcity_current() {
     return (ucur ? ucur.get("almond3s", "weather", "city") : null) ?? "Moscow";
 }
 
+// Провайдер погоды: openmeteo (по умолчанию) | wttr. weather_fetch.sh читает тот
+// же ключ. Переключатель - строкой на экране выбора города.
+function weather_provider() {
+    return (ucur ? ucur.get("almond3s", "weather", "provider") : null) ?? "openmeteo";
+}
+function weather_provider_name() {
+    return weather_provider() == "wttr" ? "wttr.in" : "Open-Meteo";
+}
+
+// Экран выбора города: 6 пресетов (3 ряда), ниже «Свой город» и «Источник».
 function wcity_btn(i) {
     return { x: 8 + (i % 2) * 156, y: 28 + int(i / 2) * 36, w: 148, h: 32 };
 }
+function wcity_kbd_btn()  { return { x: 8, y: 136, w: 304, h: 28 }; }
+function wcity_prov_btn() { return { x: 8, y: 168, w: 304, h: 28 }; }
 
 // Стрелки листания — только когда страниц больше одной.
 function wcity_arrow(dir) {
@@ -6234,38 +6266,75 @@ function wcity_arrow(dir) {
 
 function draw_wcity_page() {
     lcd_clear(C.bg);
-    let pages = wcity_pages();
-    if (st.wpage == null || st.wpage >= pages) st.wpage = 0;
-    draw_header(pages > 1 ? sprintf(tr("City %d/%d"), st.wpage + 1, pages) : tr("City"));
+    draw_header(tr("City"));
 
     let cur = wcity_current();
     let list = wcity_list();
-    let base = st.wpage * WCITY_PER_PAGE;
 
-    for (let i = 0; i < WCITY_PER_PAGE; i++) {
-        let idx = base + i;
-        if (idx >= length(list)) break;
+    // До 6 быстрых пресетов; активный — фиолетовой полоской. Остальные города
+    // набираются на клавиатуре («Свой город») и ищутся геокодером.
+    let n = length(list); if (n > WCITY_PER_PAGE) n = WCITY_PER_PAGE;
+    for (let i = 0; i < n; i++) {
         let b = wcity_btn(i);
-        let sel = (list[idx] == cur);
+        let sel = (list[i] == cur);
         lcd_rect(b.x, b.y, b.w, b.h, C.widget);
         lcd_rect(b.x, b.y, 3, b.h, sel ? "#D2A8FF" : C.border);
-        lcd_text(b.x + 12, b.y + 10, city_name(list[idx]),
+        lcd_text(b.x + 12, b.y + 10, city_name(list[i]),
                  sel ? C.white : C.gray, C.widget, 1);
     }
 
-    if (pages > 1) {
-        let a = wcity_arrow(-1), z = wcity_arrow(1);
-        lcd_rect(a.x, a.y, a.w, a.h, C.widget);
-        lcd_text(a.x + 60, a.y + 8, "<<", C.accent, C.widget, 2);
-        lcd_rect(z.x, z.y, z.w, z.h, C.widget);
-        lcd_text(z.x + 60, z.y + 8, ">>", C.accent, C.widget, 2);
-    }
+    // «Свой город» — открывает клавиатуру.
+    let k = wcity_kbd_btn();
+    lcd_rect(k.x, k.y, k.w, k.h, C.widget);
+    lcd_rect(k.x, k.y, 3, k.h, C.accent);
+    lcd_text(k.x + 12, k.y + 8, tr("Custom city..."), C.accent, C.widget, 1);
+
+    // «Источник: <провайдер>» — переключатель по тапу.
+    let p = wcity_prov_btn();
+    lcd_rect(p.x, p.y, p.w, p.h, C.widget);
+    lcd_rect(p.x, p.y, 3, p.h, C.cyan);
+    lcd_text(p.x + 12, p.y + 8, tr("Source") + ": ", C.gray, C.widget, 1);
+    lcd_text(p.x + 12 + tlen(tr("Source") + ": ") * 6, p.y + 8,
+             weather_provider_name() + "  ▸", C.cyan, C.widget, 1);
 
     draw_back();
     lcd_flush();
 }
 
 // Время последнего обновления погоды - по mtime кэша, который пишет
+// Пикер выбора города при неоднозначности («две Москвы»): фоновый weather_geo.sh
+// кладёт JSON совпадений в GEO_JSON, здесь их парсим и показываем списком с
+// уточнением (регион, страна). НЕ зовёт go_page (no-hoisting) - выбор в тач-хэндлере.
+function geopick_btn(i) { return { x: 8, y: 28 + i * 30, w: 304, h: 28 }; }
+
+function draw_geopick_page() {
+    lcd_clear(C.bg);
+    draw_header(tr("Select city"));
+    let raw = fs.readfile(GEO_JSON);
+    if (!raw) {
+        let msg = (time() - (st.geo_wait ?? 0) > 15) ? tr("City not found") : tr("Searching...");
+        lcd_text(20, 100, msg, C.gray, C.bg, 2);
+        draw_back(); lcd_flush(); return;
+    }
+    let j; try { j = json(raw); } catch (e) { j = {}; }
+    let r = (type(j?.results) == "array") ? j.results : [];
+    st.geo_res = r;
+    if (length(r) == 0) {
+        lcd_text(20, 100, tr("City not found"), C.dim, C.bg, 2);
+        draw_back(); lcd_flush(); return;
+    }
+    let n = length(r); if (n > 6) n = 6;
+    for (let i = 0; i < n; i++) {
+        let b = geopick_btn(i), e = r[i];
+        let sub = e.admin1 ? (e.admin1 + ", " + (e.country ?? "")) : (e.country ?? "");
+        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+        lcd_rect(b.x, b.y, 3, b.h, C.accent);
+        lcd_text(b.x + 10, b.y + 3, tcut(e.name ?? "", 24), C.white, C.widget, 1);
+        lcd_text(b.x + 10, b.y + 15, tcut(sub, 48), C.gray, C.widget, 1);
+    }
+    draw_back(); lcd_flush();
+}
+
 // weather_fetch.sh (сам ответ API времени не несёт).
 function weather_updated_str() {
     let s = fs.stat("/tmp/lcd_weather.txt");
@@ -6647,6 +6716,10 @@ function page_sig() {
         return base + sprintf("|%J|%J|%J|%J", hist.rx, hist.tx, hist.wan_rx, hist.wan_tx);
     case "weather":
         return base + sprintf("|%J", d.weather);
+    case "geopick": {
+        let gs = fs.stat(GEO_JSON);
+        return base + sprintf("|%d|%d", gs ? gs.mtime : 0, st.geo_wait ?? 0);
+    }
     case "speedtest":
         return base + sprintf("|%J", st.spd);
     case "spdcfg":
@@ -6704,6 +6777,7 @@ function draw_current() {
     case "info":      draw_info_page(); break;
     case "weather":   draw_weather_page(); break;
     case "wcity":     draw_wcity_page(); break;
+    case "geopick":   draw_geopick_page(); break;
     case "qr":        draw_qr_page(); break;
     case "display":   draw_display_page(); break;
     case "cell":      draw_cell_page(); break;
@@ -7081,11 +7155,86 @@ function action_splash(title, subtitle, color) {
 // они были главным вором отзывчивости (тап -> страница доходил до 450 мс).
 // Вдавленное состояние всё равно остаётся на экране, пока рисуется и
 // уезжает кадр новой страницы, - глазу хватает.
-function back_press_fx() {
+function back_press_fx(label) {
     lcd_rect(0, BACK_Y, LCD_W, 32, C.back_press);
-    lcd_text(122, BACK_Y + 11, tr("< BACK"), C.white, C.back_press, 2);
+    if (label != null)
+        lcd_text(int((LCD_W - tlen(label) * 12) / 2), BACK_Y + 11, label, C.white, C.back_press, 2);
+    else
+        lcd_text(122, BACK_Y + 11, tr("< BACK"), C.white, C.back_press, 2);
     lcd_flush();
     sock_poll(50);
+}
+
+// Оптимистично показать новый город СРАЗУ. refresh_data каждый цикл берёт город
+// из кэш-файла, поэтому пишем плейсхолдер (город + «…» вместо метрик) и туда, и в
+// st.data - иначе на экране висит старый город, пока фетч в пути (баг «открылся не
+// тот город»). Фетч тут же перезапишет реальными данными. city_name() локализует.
+function weather_optimistic(name) {
+    fs.writefile("/tmp/lcd_weather.txt",
+                 sprintf("%s|%s|%s|%s|%s|%s\n", "", "…", "", "", "", name));
+    if (st.data)
+        st.data.weather = { desc: "", temp: "…", feels: "", humidity: "", wind: "", city: name };
+}
+
+// Применить выбранный/введённый город: пишем в uci, фоном фетчим (скрипт сам
+// геокодит имя), уходим на «Погоду». Общее для пресетов и клавиатурного ввода.
+// ВНИЗУ файла намеренно: зовёт go_page/toast, а ucode не хойстит - функция видит
+// лишь объявленное ВЫШЕ. См. память ucode-no-hoisting.
+function apply_city(name) {
+    name = trim(name ?? "");
+    if (name == "") return;
+    if (!ucur) { toast(tr("uci unavailable"), C.red, "#200000", 2); return; }
+    ucur.set("almond3s", "weather", "city", name);
+    // Пресет геокодится по имени - снимаем закреплённые координаты пикера.
+    ucur.delete("almond3s", "weather", "lat");
+    ucur.delete("almond3s", "weather", "lon");
+    ucur.delete("almond3s", "weather", "name");
+    ucur.commit("almond3s");
+    fs.unlink("/tmp/lcd_weather.geo");
+    weather_optimistic(name);
+    // Координаты/город - через env, без гонки uci-commit (см. weather_fetch.sh).
+    // Пресет: WLAT/WLON пустые -> геокод по имени.
+    system(sprintf("WCITY=%s WLAT= WLON= /etc/almond3s/scripts/weather_fetch.sh >/dev/null 2>&1 &",
+                   sh_quote(name)));
+    go_page("weather");
+    toast(tr("Updating..."), C.yellow, "#201406", 2);
+}
+
+// Выбранное в пикере совпадение: закрепляем координаты+имя в uci (переживает
+// ребут), фетчим, уходим на «Погоду». weather_fetch.sh увидит lat/lon и не геокодит.
+function apply_city_coords(name, lat, lon) {
+    if (!ucur) return;
+    name = trim(name ?? "");
+    ucur.set("almond3s", "weather", "city", name);
+    ucur.set("almond3s", "weather", "name", name);
+    ucur.set("almond3s", "weather", "lat", "" + lat);
+    ucur.set("almond3s", "weather", "lon", "" + lon);
+    ucur.commit("almond3s");
+    fs.unlink("/tmp/lcd_weather.geo");
+    weather_optimistic(name);
+    // Координаты/имя - через env: ucur.commit не сразу виден фону, фетч успевал
+    // прочитать СТАРЫЙ город (баг «открылся Воронеж»). uci-commit выше - для ребута.
+    system(sprintf("WCITY=%s WLAT=%s WLON=%s WNAME=%s /etc/almond3s/scripts/weather_fetch.sh >/dev/null 2>&1 &",
+                   sh_quote(name), sh_quote("" + lat), sh_quote("" + lon), sh_quote(name)));
+    // Снимаем транзитные клавиатуру/пикер из стека: «назад» с погоды - к списку.
+    st.nav ??= [];
+    while (length(st.nav) && (st.nav[length(st.nav) - 1] == "kbd" ||
+                              st.nav[length(st.nav) - 1] == "geopick"))
+        pop(st.nav);
+    go_page("weather", true);
+    toast(tr("Updating..."), C.yellow, "#201406", 2);
+}
+
+// Ввод города с клавиатуры: пускаем фоновый геокод и уходим на страницу пикера,
+// которая покажет совпадения (одно/несколько - с уточнением).
+function geo_search(name) {
+    name = trim(name ?? "");
+    if (name == "") { go_back(); return; }
+    fs.unlink(GEO_JSON);
+    st.geo_wait = time();
+    st.geo_res = [];
+    system(SCRIPTS + "/weather_geo.sh " + sh_quote(name) + " >/dev/null 2>&1 &");
+    go_page("geopick");
 }
 
 // Нажатая плитка меню: перерисовать меню с вдавленной кнопкой её же кодом.
@@ -7291,17 +7440,20 @@ function handle_touch(tx, ty, tmove) {
         // Из развёрнутой карточки «назад» ведёт к списку карточек, а не
         // сразу в меню: разворот - это подстраница.
         if (st.page == "info" && st.izoom != null) {
+            back_press_fx();
             st.izoom = null;
             draw_info_page();
             return;
         }
         if (st.page == "traffic" && st.tzoom != null) {
+            back_press_fx();
             st.tzoom = null;
             draw_traffic_page();
             return;
         }
         // Раскрытая группа VPN: «назад» сворачивает к списку групп, не выходит.
         if (st.page == "vpn" && st.vpn_exp != null) {
+            back_press_fx();
             st.vpn_exp = null;
             draw_vpn_page();
             return;
@@ -7317,7 +7469,7 @@ function handle_touch(tx, ty, tmove) {
         let n = type(list) == "array" ? length(list) : 0;
         let pages = n > 0 ? int((n + SMS_ROWS - 1) / SMS_ROWS) : 1;
         let hit = pager_hit(tx, ty, st.sms_pg, pages);
-        if (hit == 2) { go_page("menu"); return; }
+        if (hit == 2) { back_press_fx(); go_page("menu"); return; }
         if (hit != 0) { st.sms_pg += hit; draw_sms_page(); return; }
         for (let r = 0; r < SMS_ROWS; r++) {
             let idx = st.sms_pg * SMS_ROWS + r;
@@ -7353,7 +7505,7 @@ function handle_touch(tx, ty, tmove) {
         let pages = int((length(lines) + SMS_LINES - 1) / SMS_LINES);
         if (pages < 1) pages = 1;
         let hit = pager_hit(tx, ty, st.sms_tp, pages);
-        if (hit == 2) { go_page("sms"); return; }
+        if (hit == 2) { back_press_fx(); go_page("sms"); return; }
         if (hit != 0) { st.sms_tp += hit; draw_sms_one(); return; }
         return;
     }
@@ -7707,6 +7859,7 @@ function handle_touch(tx, ty, tmove) {
             if (nets[i].enc) {
                 // Защищённая сеть - вводим пароль.
                 sta.pass = ""; sta.kb = { pg: "abc", caps: false };
+                st.kbmode = "sta";
                 go_page("kbd");
             } else {
                 // Открытая - подключаемся сразу, в фоне (sta_apply уже пускает
@@ -7727,9 +7880,25 @@ function handle_touch(tx, ty, tmove) {
         // Полоса «назад» внизу = отмена ввода, возврат к списку сетей. go_back()
         // СНИМАЕТ со стека (было go_page — оно КЛАДЁТ kbd обратно, отсюда петля
         // kbd<->stascan, из которой не выйти).
-        if (ty >= BACK_Y) { go_back(); return; }
+        if (ty >= BACK_Y) { if (st.kbmode == "city") st.kbmode = "sta"; go_back(); return; }
         let e = kb_key_at(tx, ty);
         if (!e) return;
+        // Режим города: свой буфер/клавиатура, ↵ = применить город (геокод в фетче).
+        if (st.kbmode == "city") {
+            kb_press_show(e, st.citykb, 92);
+            let a = kb_apply(e, st.citykb);
+            if (a.t == "char") st.citybuf = (st.citybuf ?? "") + a.ch;
+            else if (a.t == "del") st.citybuf = substr(st.citybuf ?? "", 0, length(st.citybuf ?? "") - 1);
+            else if (a.t == "space") st.citybuf = (st.citybuf ?? "") + " ";
+            else if (a.t == "enter") {
+                let name = trim(st.citybuf ?? "");
+                st.kbmode = "sta";
+                if (name != "") geo_search(name); else go_back();
+                return;
+            }
+            draw_kbd_page();
+            return;
+        }
         kb_press_show(e, sta.kb, 92);   // вдавить клавишу
         let a = kb_apply(e, sta.kb);
         if (a.t == "char") sta.pass += a.ch;
@@ -7760,6 +7929,7 @@ function handle_touch(tx, ty, tmove) {
                 draw_term_page(); return;
             }
             if (tx >= 278) { t.kbd = !t.kbd; t.scroll = 0; st.term_rows_sent = -1; draw_term_page(); return; }
+            back_press_fx(tr("Exit"));
             term_stop();
             st.page = "menu"; st.mpg = 4; draw_menu();
             return;
@@ -8223,43 +8393,59 @@ function handle_touch(tx, ty, tmove) {
         return;
     }
 
-    if (st.page == "wcity") {
-        let list = wcity_list();
-        let pages = wcity_pages();
-        let base = (st.wpage ?? 0) * WCITY_PER_PAGE;
-        if (pages > 1) {
-            let a = wcity_arrow(-1), z = wcity_arrow(1);
-            if (in_rect(tx, ty, a.x, a.y, a.w, a.h)) {
-                st.wpage = (st.wpage + pages - 1) % pages;
-                draw_wcity_page();
-                return;
-            }
-            if (in_rect(tx, ty, z.x, z.y, z.w, z.h)) {
-                st.wpage = (st.wpage + 1) % pages;
-                draw_wcity_page();
+    if (st.page == "geopick") {
+        if (ty >= BACK_Y) { back_press_fx(); go_page("wcity"); return; }
+        let r = st.geo_res ?? [];
+        let n = length(r); if (n > 6) n = 6;
+        for (let i = 0; i < n; i++) {
+            let b = geopick_btn(i);
+            if (in_rect(tx, ty, b.x, b.y, b.w, b.h)) {
+                let e = r[i];
+                lcd_rect(b.x, b.y, b.w, b.h, C.press);
+                lcd_text(b.x + 10, b.y + 3, tcut(e.name ?? "", 24), C.white, C.press, 1);
+                lcd_flush();
+                apply_city_coords(e.name, e.latitude, e.longitude);
                 return;
             }
         }
-        for (let i = 0; i < WCITY_PER_PAGE; i++) {
-            let idx = base + i;
-            if (idx >= length(list)) break;
+        return;
+    }
+
+    if (st.page == "wcity") {
+        let list = wcity_list();
+        let n = length(list); if (n > WCITY_PER_PAGE) n = WCITY_PER_PAGE;
+        for (let i = 0; i < n; i++) {
             let b = wcity_btn(i);
             if (in_rect(tx, ty, b.x, b.y, b.w, b.h)) {
-                if (!ucur) { toast(tr("uci unavailable"), C.red, "#200000", 2); return; }
                 lcd_rect(b.x, b.y, b.w, b.h, C.press);
-                let ct = city_name(list[idx]);
+                let ct = city_name(list[i]);
                 lcd_text(b.x + int((b.w - tlen(ct) * 6) / 2) + 2, b.y + 10 + 2,
                          ct, C.white, C.press, 1);
                 lcd_flush();
-                ucur.set("almond3s", "weather", "city", list[idx]);
-                ucur.commit("almond3s");
-                // Фоновая загрузка: fetch в фоне, уходим на «Погоду»; как кэш
-                // обновится, страница перерисуется сама (page_sig видит weather).
-                system("/etc/almond3s/scripts/weather_fetch.sh >/dev/null 2>&1 &");
-                go_page("weather");
-                toast(tr("Updating..."), C.yellow, "#201406", 2);
+                apply_city(list[i]);
                 return;
             }
+        }
+        // «Свой город» — клавиатура в режиме города.
+        let k = wcity_kbd_btn();
+        if (in_rect(tx, ty, k.x, k.y, k.w, k.h)) {
+            st.kbmode = "city";
+            st.citybuf = "";
+            st.citykb = { pg: "abc", caps: false };
+            go_page("kbd");
+            return;
+        }
+        // «Источник» — переключить провайдера, перефетчить в фоне.
+        let p = wcity_prov_btn();
+        if (in_rect(tx, ty, p.x, p.y, p.w, p.h)) {
+            if (!ucur) { toast(tr("uci unavailable"), C.red, "#200000", 2); return; }
+            ucur.set("almond3s", "weather", "provider",
+                     weather_provider() == "wttr" ? "openmeteo" : "wttr");
+            ucur.commit("almond3s");
+            system("/etc/almond3s/scripts/weather_fetch.sh >/dev/null 2>&1 &");
+            draw_wcity_page();
+            toast(tr("Source") + ": " + weather_provider_name(), C.cyan, "#06202a", 2);
+            return;
         }
         return;
     }

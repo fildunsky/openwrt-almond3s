@@ -1,87 +1,137 @@
 #!/bin/sh
 # weather_fetch.sh — caches current weather for lcd_ui dashboard
 #
-# Install:
-#   scp weather_fetch.sh root@192.168.11.1:/etc/almond3s/scripts/weather_fetch.sh
-#   ssh root@192.168.11.1 chmod +x /etc/almond3s/scripts/weather_fetch.sh
+# Провайдер выбирается в UCI (переключатель на экране выбора города):
+#   almond3s.weather.provider = openmeteo (по умолчанию) | wttr
 #
-# Schedule (every 15 min) — add to /etc/crontabs/root:
+# Open-Meteo (по умолчанию): бесплатный, без ключа, надёжный, current + WMO code.
+# wttr.in: оставлен опцией, НО его апстрим WWO периодически застревает и отдаёт
+# битый снимок на весь мир (ловили зиму в августе 17.08.2026) - поэтому не дефолт.
+# Условие в ОБОИХ случаях берём по-английски и переводим таблицей WCOND_RU в
+# ui.uc (иконку ловит weather_icon_key). См. память almond3s-weather-wttr-lang-cache.
+#
+# Schedule (every 15 min) — /etc/crontabs/root:
 #   */15 * * * * /etc/almond3s/scripts/weather_fetch.sh
-# then: /etc/init.d/cron restart
-#
-# Run once manually after install so the dashboard has data immediately:
-#   /etc/almond3s/scripts/weather_fetch.sh
 
-# Город берётся из UCI, чтобы менять его не правкой скрипта:
-#   uci set almond3s.weather.city='Saint Petersburg'; uci commit almond3s
-# Значение из конфига перекрывается переменной окружения CITY (для проверок).
-# ВАЖНО: конфиг давно переехал lcd -> almond3s, а скрипт остался на старом
-# имени - город всегда выходил пустым, и фолбэк показывал Москву, какой
-# город ни выбирай (пойман 16.08 на Воронеже). Старое имя оставлено вторым
-# шансом для непереехавших систем.
-CITY="${CITY:-$(uci -q get almond3s.weather.city)}"
+# WCITY/WLAT/WLON/WNAME из env: ui.uc передаёт их напрямую при смене города, т.к.
+# ucur.commit не сразу виден фоновому процессу (фетч успевал прочитать СТАРЫЙ
+# город - баг «открылся Воронеж»). Cron зовёт без env - берёт из uci.
+CITY="${WCITY:-${CITY:-$(uci -q get almond3s.weather.city)}}"
 [ -n "$CITY" ] || CITY="$(uci -q get lcd.weather.city)"
 [ -n "$CITY" ] || CITY="Moscow"
+PROVIDER=$(uci -q get almond3s.weather.provider)
+[ -n "$PROVIDER" ] || PROVIDER="openmeteo"
+
 OUT="/tmp/lcd_weather.txt"
 TMP="/tmp/lcd_weather.txt.tmp"
+GEO="/tmp/lcd_weather.geo"   # кэш координат Open-Meteo: "city<TAB>lat<TAB>lon"
 
-# Custom one-line format instead of the huge format=j1 JSON (which can be
-# 15-30KB and time out on a slow/LTE link). Fields, pipe-separated:
-#   condition | temp | feels-like | humidity | wind
-# &m forces metric units.
-# Пробел в имени города («Saint Petersburg», «Nizhny Novgorod») уходил в URL
-# как есть: curl отвечает 3 (кривой URL), wget - ошибкой разбора, и виджет
-# молча оставался со старым городом. Заменяем пробелы на +.
-CITY_URL=$(printf '%s' "$CITY" | tr ' ' '+')
-# lang=ru: в рендерер добавлена кириллическая страница шрифта, поэтому
-# описание погоды можно брать по-русски («Небольшой дождь» вместо
-# «Light rain shower»).
-# Язык описания берём тот же, что у интерфейса на экране.
-LANG_UI=$(uci -q get almond3s.display.lang)
-[ -n "$LANG_UI" ] || LANG_UI=$(uci -q get lcd.display.lang)
-[ "$LANG_UI" = en ] && WLANG="" || WLANG="&lang=ru"
-URL="https://wttr.in/${CITY_URL}?format=%C|%t|%f|%h|%w&m${WLANG}"
-
-# City name shown on the LCD is NOT taken from the API response — wttr.in
-# doesn't return it in this format string anyway, and for some cities it
-# only has the name transliterated/in the local language. We just reuse
-# the CITY variable typed above, so lcd_ui.uc always shows exactly what
-# was configured here, and there is only ONE place to edit the city name.
-# Also ASCII-sanitized in case someone types it with non-Latin letters —
-# same reason the weather fields get stripped below.
+# Имя на экране берём из CITY (ASCII), не из ответа API.
 DISPLAY_CITY=$(printf '%s' "$CITY" | tr -cd '\11\12\15\40-\176')
 
-rc=1
-if command -v curl >/dev/null 2>&1; then
-    # -k: router's CA bundle is missing/incomplete, skip cert verification
-    # -f: treat HTTP errors as failure instead of saving an error page
-    # --http1.1 ОБЯЗАТЕЛЕН: curl этой сборки (mbedTLS + nghttp2) на wttr.in
-    # висит по HTTP/2 ровно до таймаута и возвращает 28, даже с -4.
-    curl --http1.1 -k -s -f --max-time 15 "$URL" -o "$TMP"
-    rc=$?
-    # Падение curl - не приговор: wget на том же адресе отвечает всегда.
-    [ "$rc" -ne 0 ] && { wget --no-check-certificate -q -T 15 -O "$TMP" "$URL"; rc=$?; }
+# curl (http1.1 обязателен: сборка виснет по HTTP/2), фолбэк на wget. -k/-f.
+fetch() {
+    if command -v curl >/dev/null 2>&1; then
+        curl --http1.1 -k -s -f --max-time 15 "$1" && return 0
+    fi
+    wget --no-check-certificate -q -T 15 -O - "$1"
+}
+
+if [ "$PROVIDER" = wttr ]; then
+    # --- wttr.in: без &lang (единый кэш-ключ), условие по-английски ---
+    CU=$(printf '%s' "$CITY" | tr ' ' '+')
+    R=$(fetch "https://wttr.in/${CU}?format=%C|%t|%f|%h|%w&m")
+    [ -n "$R" ] || exit 0
+    # R уже "cond|temp|feels|hum|wind"; дописываем город шестым полем.
+    printf '%s|%s\n' "$R" "$DISPLAY_CITY" > "$TMP"
 else
-    wget --no-check-certificate -q -T 15 -O "$TMP" "$URL"
-    rc=$?
+    # --- Open-Meteo: координаты + current-погода ---
+    LAT=""; LON=""; NM=""
+    # Закреплённый выбор из пикера (при неоднозначности): координаты в uci -
+    # используем их напрямую, без геокода. Переживает ребут (в отличие от /tmp).
+    ULAT="${WLAT-$(uci -q get almond3s.weather.lat)}"
+    ULON="${WLON-$(uci -q get almond3s.weather.lon)}"
+    if [ -n "$ULAT" ] && [ -n "$ULON" ]; then
+        LAT="$ULAT"; LON="$ULON"
+        NM="${WNAME-$(uci -q get almond3s.weather.name)}"
+    else
+        # Пресет/без выбора: геокодим имя (топ-совпадение), кэшируем координаты.
+        if [ -f "$GEO" ] && [ "$(cut -f1 "$GEO")" = "$CITY" ]; then
+            LAT=$(cut -f2 "$GEO"); LON=$(cut -f3 "$GEO"); NM=$(cut -f4 "$GEO")
+        fi
+        if [ -z "$LAT" ] || [ -z "$LON" ]; then
+            CU=$(printf '%s' "$CITY" | tr ' ' '+')
+            # language=ru -> локализованное имя («Ишим», «Москва») для показа.
+            G=$(fetch "https://geocoding-api.open-meteo.com/v1/search?name=${CU}&count=1&language=ru&format=json")
+            LAT=$(printf '%s' "$G" | jsonfilter -e '@.results[0].latitude' 2>/dev/null)
+            LON=$(printf '%s' "$G" | jsonfilter -e '@.results[0].longitude' 2>/dev/null)
+            NM=$(printf  '%s' "$G" | jsonfilter -e '@.results[0].name' 2>/dev/null | tr -d '|')
+            [ -n "$LAT" ] && [ -n "$LON" ] && printf '%s\t%s\t%s\t%s\n' "$CITY" "$LAT" "$LON" "$NM" > "$GEO"
+        fi
+    fi
+    [ -n "$LAT" ] && [ -n "$LON" ] || exit 0
+    # Показываем локализованное имя; если его нет - введённую строку.
+    [ -n "$NM" ] && DISPLAY_CITY="$NM"
+
+    W=$(fetch "https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}&current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,wind_direction_10m,weather_code")
+    [ -n "$W" ] || exit 0
+
+    T=$(printf  '%s' "$W" | jsonfilter -e '@.current.temperature_2m' 2>/dev/null)
+    F=$(printf  '%s' "$W" | jsonfilter -e '@.current.apparent_temperature' 2>/dev/null)
+    H=$(printf  '%s' "$W" | jsonfilter -e '@.current.relative_humidity_2m' 2>/dev/null)
+    WS=$(printf '%s' "$W" | jsonfilter -e '@.current.wind_speed_10m' 2>/dev/null)
+    WD=$(printf '%s' "$W" | jsonfilter -e '@.current.wind_direction_10m' 2>/dev/null)
+    WC=$(printf '%s' "$W" | jsonfilter -e '@.current.weather_code' 2>/dev/null)
+    [ -n "$T" ] || exit 0
+    [ -n "$F" ] || F="$T"
+
+    # WMO weather_code -> английский статус словаря WCOND_RU/weather_icon_key.
+    case "$WC" in
+        0|1)   COND="Sunny" ;;
+        2)     COND="Partly cloudy" ;;
+        3)     COND="Overcast" ;;
+        45)    COND="Fog" ;;
+        48)    COND="Freezing fog" ;;
+        51|53) COND="Light drizzle" ;;
+        55)    COND="Heavy freezing drizzle" ;;
+        56)    COND="Freezing drizzle" ;;
+        57)    COND="Heavy freezing drizzle" ;;
+        61)    COND="Light rain" ;;
+        63)    COND="Moderate rain" ;;
+        65)    COND="Heavy rain" ;;
+        66)    COND="Light freezing rain" ;;
+        67)    COND="Moderate or heavy freezing rain" ;;
+        71|77) COND="Light snow" ;;
+        73)    COND="Moderate snow" ;;
+        75)    COND="Heavy snow" ;;
+        80)    COND="Light rain shower" ;;
+        81)    COND="Moderate or heavy rain shower" ;;
+        82)    COND="Torrential rain shower" ;;
+        85)    COND="Light snow showers" ;;
+        86)    COND="Moderate or heavy snow showers" ;;
+        95)    COND="Thundery outbreaks possible" ;;
+        96|99) COND="Moderate or heavy rain with thunder" ;;
+        *)     COND="Cloudy" ;;
+    esac
+
+    # Числа -> те же строки, что даёт wttr.in (UI рисует их как есть).
+    TEMP=$(awk  -v v="$T"  'BEGIN{printf "%+.0f", v}')"°C"
+    FEELS=$(awk -v v="$F"  'BEGIN{printf "%+.0f", v}')"°C"
+    HUM=$(awk   -v v="$H"  'BEGIN{printf "%.0f", v}')"%"
+    KMH=$(awk   -v v="$WS" 'BEGIN{printf "%.0f", v}')
+    ARROW=$(awk -v d="$WD" 'BEGIN{
+        if (d=="") { print "→"; exit }
+        split("↑ ↗ → ↘ ↓ ↙ ← ↖", a, " ");
+        to=(d+180)%360; s=int((to+22.5)/45)%8;
+        print a[s+1];
+    }')
+    printf '%s|%s|%s|%s|%s%s|%s\n' "$COND" "$TEMP" "$FEELS" "$HUM" "$ARROW" "${KMH}km/h" "$DISPLAY_CITY" > "$TMP"
 fi
 
-if [ "$rc" -eq 0 ] && [ -s "$TMP" ]; then
-    # Раньше здесь вырезались градус и стрелки ветра - рисовать их было нечем.
-    # Теперь они есть в шрифте, и ответ wttr.in идёт на экран как есть.
-
-    # Append the city name as field 6 (see DISPLAY_CITY above). Strip any
-    # trailing newline from wttr.in's output first so we get one clean line.
-    printf '%s' "$(cat "$TMP")" > "$TMP"
-    printf '|%s\n' "$DISPLAY_CITY" >> "$TMP"
-
-    # Sanity check: must have all 6 pipe-separated fields
-    fields=$(awk -F'|' '{print NF}' "$TMP" 2>/dev/null)
-    if [ -n "$fields" ] && [ "$fields" -ge 6 ]; then
-        mv "$TMP" "$OUT"
-    else
-        rm -f "$TMP" "$TMP.ascii"
-    fi
+# Sanity: ровно 6 полей — иначе не подменяем рабочий кэш.
+fields=$(awk -F'|' '{print NF}' "$TMP" 2>/dev/null)
+if [ -n "$fields" ] && [ "$fields" -ge 6 ]; then
+    mv "$TMP" "$OUT"
 else
-    rm -f "$TMP" "$TMP.ascii"
+    rm -f "$TMP"
 fi
