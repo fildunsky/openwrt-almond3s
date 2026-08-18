@@ -561,6 +561,19 @@ let TR_RU = {
     "Setup": "Настройки",
     "tap to change": "тап по строке - следующее значение",
     "Gamepad": "Пульт",
+    "Settings": "Настройки",
+    "LIGHT, %": "ЯРКОСТЬ, %",
+    "WARM, %": "ТЕПЛО, %",
+    "brightness, warm, language": "яркость, тепло, язык",
+    "timeout and look": "время и вид",
+    "schedule and actions": "расписание и действия",
+    "driver debug": "отладка драйвера",
+    "Warm": "Тепло",
+    "Wi-Fi off": "Wi-Fi ночью",
+    "Green saver": "Зелёная",
+    "light": "слабо",
+    "medium": "средне",
+    "strong": "сильно",
     "Keyboard": "Клавиатура",
     "Keys": "Клавиши",
     "Player %d": "Игрок %d",
@@ -1622,10 +1635,55 @@ function night_cfg() {
     };
 }
 
-let NIGHT_BRIGHT_STEPS = [ 3, 7, 15, 25, 40 ];
+let NIGHT_BRIGHT_STEPS = [ 3, 5, 7, 10, 15 ];
 
 function nbright_btn(i) {
-    return { x: 96 + i * 44, y: 178, w: 40, h: 26 };
+    return { x: 96 + i * 44, y: 132, w: 40, h: 22 };
+}
+
+// Что именно делать ночью. Раньше режим влиял только на экран, поэтому и жил
+// внутри «Заставки»; теперь это расписание для устройства целиком.
+let NIGHT_ACTS = [
+    { key: "night_wifi",  label: "Wi-Fi off" },
+    { key: "night_green", label: "Green saver", def: true },
+];
+
+// У ночи своя степень тепла, как своя яркость: дневное значение живёт на
+// «Экране» отдельно и возвращается утром. Ноль - ночью тепло не трогаем.
+let NIGHT_WARM_STEPS = [ 0, 30, 60, 100 ];
+
+function nwarm_cfg() {
+    let v = ucur ? ucur.get("almond3s", "display", "night_warm_lvl") : null;
+    v = (v == null || v == "") ? 0 : int(+v);
+    for (let i = 0; i < length(NIGHT_WARM_STEPS); i++)
+        if (NIGHT_WARM_STEPS[i] == v) return v;
+    return 0;
+}
+
+function nwarm_btn(i) {
+    return { x: 96 + i * 44, y: 158, w: 40, h: 22 };
+}
+
+function nact_btn(i) {
+    return { x: i == 0 ? 8 : 164, y: 184, w: 148, h: 22 };
+}
+
+function night_act(key) {
+    let v = ucur ? ucur.get("almond3s", "display", key) : null;
+    if (v == null || v == "") {
+        // Умолчание берём из таблицы: зелёная заставка была зашита в код и
+        // работала всегда, поэтому по умолчанию она остаётся включённой.
+        for (let i = 0; i < length(NIGHT_ACTS); i++)
+            if (NIGHT_ACTS[i].key == key) return NIGHT_ACTS[i].def == true;
+        return false;
+    }
+    return (v == "1");
+}
+
+function night_act_set(key, on) {
+    if (!ucur) return;
+    ucur.set("almond3s", "display", key, on ? "1" : "0");
+    ucur.commit("almond3s");
 }
 
 function night_set(key, v) {
@@ -1706,7 +1764,7 @@ function saver_btn(which) {
 }
 
 function svshift_btn() {
-    return { x: 10, y: 150, w: 130, h: 36 };
+    return { x: 10, y: 150, w: 300, h: 36 };
 }
 
 function svnight_btn() {
@@ -1742,10 +1800,10 @@ function tog_btn(i) {
 
 // Часы «с» и «до» живут на своей странице: две группы «минус - значение - плюс».
 function hour_btn(row, which) {
-    let y = row == 0 ? 74 : 130;
-    if (which < 0) return { x: 96, y: y, w: 52, h: 40 };
-    if (which > 0) return { x: 214, y: y, w: 52, h: 40 };
-    return { x: 154, y: y, w: 54, h: 40 };
+    let y = row == 0 ? 60 : 96;
+    if (which < 0) return { x: 96, y: y, w: 52, h: 32 };
+    if (which > 0) return { x: 214, y: y, w: 52, h: 32 };
+    return { x: 154, y: y, w: 54, h: 32 };
 }
 
 function night_btn() {
@@ -2020,6 +2078,60 @@ let WIFI_ST_DEF = [
     ".........###.........",
     "..........#..........",
 ];
+// Плашка VPN и полумесяц - в том же формате и рядом с Wi-Fi, по той же
+// причине: статус-строка выше по файлу, чем движок иконок, а ucode не
+// хойстит. Буквы в плашке - дырки в белом прямоугольнике, начертание взято
+// из шрифта интерфейса, поэтому читается так же, как обычный текст.
+let VPN_ST_DEF = [
+    ".....................",
+    "#####################",
+    "#####################",
+    "##.###.#....##.###.##",
+    "##.###.#.###.#.###.##",
+    "##.###.#.###.#..##.##",
+    "##.###.#....##.#.#.##",
+    "##.###.#.#####.##..##",
+    "###.#.##.#####.###.##",
+    "####.###.#####.###.##",
+    "#####################",
+    "#####################",
+    ".....................",
+    ".....................",
+];
+let MOON_ST_DEF = [
+    ".....................",
+    ".......#####.........",
+    "......####...........",
+    ".....####............",
+    "....####.............",
+    "....####.............",
+    "....####.............",
+    "....####.............",
+    "....####.............",
+    "....####.............",
+    ".....####............",
+    "......####...........",
+    ".......#####.........",
+    ".....................",
+];
+
+// Один отрисовщик на все значки статус-строки: правки из редактора лежат в
+// MICON_CUSTOM и перекрывают вшитый арт.
+function draw_st_icon(x, y, name, def, col) {
+    let cu = MICON_CUSTOM[name];
+    if (cu) {
+        for (let r = 0; r < cu.h; r++)
+            for (let c = 0; c < cu.w; c++)
+                if (cu.g[r][c]) lcd_rect(x + c, y + r, 1, 1, cu.pal[cu.g[r][c] - 1]);
+        return;
+    }
+    for (let r = 0; r < length(def); r++) {
+        let row = def[r];
+        for (let c = 0; c < length(row); c++)
+            if (substr(row, c, 1) == "#") lcd_rect(x + c, y + r, 1, 1, col);
+    }
+}
+
 function draw_wifi_status(x, y, col) {
     let cu = MICON_CUSTOM["wifi_st"];
     if (cu) {
@@ -2135,6 +2247,20 @@ function uplink_kind() {
     return uplink_kind_v;
 }
 
+// Значок VPN в статус-строке: белая плашка со словом внутри. Состояние
+// спрашиваем у того же vpn_clash.sh, что и страница VPN, но не на каждом
+// тике - запрос идёт в API михомо, это форк и сетевой вызов.
+function clash_running() {
+    if (!vpn_present()) return false;
+    let p = fs.popen(SCRIPTS + "/vpn_clash.sh status 2>/dev/null", "r");
+    if (!p) return false;
+    let out = p.read("all") ?? "";
+    p.close();
+    return index(out, "\"running\":1") >= 0;
+}
+
+
+
 function draw_status_row(y, o) {
     let d = st.data;
     let sig = sig_state();
@@ -2199,12 +2325,30 @@ function draw_status_row(y, o) {
 
     // Будильник включён - колокольчик слева от заряда (на всех экранах и на
     // заставке-часах, которая тоже рисует этот статус-бар).
-    if (st.alarm_on) {
-        let pw = (o?.pct && !(bat?.no_battery || bpct < 0))
-               ? tlen(sprintf("%d", bpct)) * 12 + 6 : 0;
-        // Без процентов колокольчик отодвигаем от батареи до зазора 8px (как
-        // между шкалой сигнала и «4G»); с процентами расстояние уже нормальное.
-        draw_alarm_icon(bat_x - pw - (pw > 0 ? 17 : 20), y + 2, mono ?? C.yellow);
+    // Ширину зоны процентов считаем ОДИН раз и снаружи: к ней привязаны и
+    // колокольчик, и значок VPN. Раньше она объявлялась внутри блока
+    // будильника, и обращение к ней снаружи роняло бы демон - ucode не
+    // прощает необъявленную переменную, а поймать это можно было только с
+    // включённым VPN.
+    let pw = (o?.pct && !(bat?.no_battery || bpct < 0))
+           ? tlen(sprintf("%d", bpct)) * 12 + 6 : 0;
+    // Без процентов колокольчик отодвигаем от батареи до зазора 8px (как
+    // между шкалой сигнала и «4G»); с процентами расстояние уже нормальное.
+    let bell_x = bat_x - pw - (pw > 0 ? 17 : 20);
+
+    if (st.alarm_on)
+        draw_alarm_icon(bell_x, y + 2, mono ?? C.yellow);
+
+    // Справа налево: плашка VPN, за ней полумесяц ночного режима.
+    let cur = st.alarm_on ? bell_x - 6 : bell_x + 14;
+    if (st.vpn_on) {
+        cur -= 21;
+        draw_st_icon(cur, y + 1, "vpn", VPN_ST_DEF, "#FFFFFF");
+        cur -= 5;
+    }
+    if (night_now()) {
+        cur -= 21;
+        draw_st_icon(cur, y + 1, "moon", MOON_ST_DEF, mono ?? "#8B949E");
     }
 }
 
@@ -2228,6 +2372,8 @@ let MICONS = {
     wifi_st: WIFI_ST_DEF,
     // Значок RJ45/WAN статус-бара - тоже редактируемый (ETH_DEF).
     eth: ETH_DEF,
+    vpn: VPN_ST_DEF,
+    moon: MOON_ST_DEF,
     // Кнопка «Fn» терминала - редактируемая (FN_DEF).
     fn: FN_DEF,
     // конвертик - нарисован в редакторе на роутере
@@ -3788,17 +3934,15 @@ function menu_items() {
     push(it, { label: tr("Traffic"), sub: sprintf("R:%s T:%s", fmt_bytes(rx_last), fmt_bytes(tx_last)), icon: "traffic", ic: C.cyan, act: "traffic" });
     push(it, { label: tr("SMS"), sub: ns > 0 ? sprintf(tr("%d new"), ns) : tr("inbox"), sc: ns > 0 ? C.green : C.gray, icon: "sms", ic: C.white, act: "sms" });
     push(it, { label: tr("LED"), sub: led_blinking ? tr("blinking") : (lc.on ? tr("on") : tr("off")), sc: (lc.on || led_blinking) ? C.green : C.gray, icon: "led", ic: C.yellow, act: "led" });
-    push(it, { label: tr("Display"), sub: sprintf("%d%%", bright_cfg()), icon: "display", ic: C.cyan, act: "display" });
-    push(it, { label: tr("Saver"), sub: saver_label(saver_cfg()), icon: "saver", ic: C.yellow, act: "saver" });
     push(it, { label: tr("Weather"), sub: weather_sub(), icon: "weather", ic: C.yellow, act: "weather" });
     push(it, { label: tr("Alarm"), sub: alarm_sub(), icon: "sound", ic: C.cyan, act: "alarm" });
     push(it, { label: tr("Battery"), sub: bp >= 0 ? sprintf("%d%%", bp) : "--", sc: bt?.charging ? C.green : C.gray, icon: "bolt", ic: "#FFA930", act: "battery" });
-    push(it, { label: tr("Editor"), sub: tr("pixel art"), icon: "editor", ic: C.cyan, act: "iconedit" });
     push(it, { label: tr("Terminal"), sub: tr("shell"), icon: "term", ic: C.green, act: "term" });
     // Зигби из меню убран: пока модулем ничего не управляется, плитка только
     // занимает место. Сама страница жива и открывается через /tmp/.lcd_goto,
     // так что вернуть её - это одна строка.
     push(it, { label: tr("Games"), sub: games_sub(), icon: "game", ic: C.green, act: "games" });
+    push(it, { label: tr("Settings"), sub: sprintf("%d%%", bright_cfg()), icon: "display", ic: C.cyan, act: "settings" });
     push(it, { label: tr("Info"), sub: fmt_uptime(d?.uptime), icon: "info", ic: C.cyan, act: "info" });
     push(it, { label: tr("Modem Reset"), sub: tr("LTE restart"), sc: "#F0A868", bg: "#3A2208", icon: "reset", ic: C.orange, act: "reset", line: C.orange });
     push(it, { label: tr("Power"), sub: tr("System"), sc: "#F0B0B8", bg: C.back, icon: "reboot", ic: "#F0B0B8", act: "power", line: "#D32F2F" });
@@ -4076,6 +4220,7 @@ let ED_SLOTS = [
     { name: "debug",    pal: 8 }, { name: "editor", pal: 6 },
     { name: "reset",    pal: 4 }, { name: "reboot", pal: 2 },
     { name: "term",     pal: 5 }, { name: "wifi_st", pal: 6 },
+    { name: "vpn",      pal: 1 }, { name: "moon",   pal: 1 },
     { name: "eth",      pal: 6 }, { name: "fn",     pal: 5 },
 ];
 let ed_pick = false;
@@ -4279,6 +4424,78 @@ function draw_iconedit_page() {
 
 function dbg_open_btn() { return { x: GX, y: 176, w: 160, h: 26 }; }
 
+// Тёплый фильтр: вечернее наложение. Убавляет синий и чуть зелёный уже при
+// передаче на панель, поэтому это настоящий тёплый свет, а не нарисованная
+// поверх плёнка - исходный кадр не трогается.
+let WARM_STEPS = [ 0, 30, 60, 100 ];
+
+function warm_btn() { return { x: GX, y: 176, w: GW, h: 26 }; }
+
+function warm_cfg() {
+    let v = ucur ? ucur.get("almond3s", "display", "warm") : null;
+    v = (v == null || v == "") ? 0 : int(+v);
+    for (let i = 0; i < length(WARM_STEPS); i++)
+        if (WARM_STEPS[i] == v) return v;
+    return 0;
+}
+
+function warm_apply() {
+    system(sprintf("almond3s-lcd warm %d >/dev/null 2>&1", warm_cfg()));
+}
+
+function warm_next() {
+    let v = warm_cfg(), k = 0;
+    for (let i = 0; i < length(WARM_STEPS); i++)
+        if (WARM_STEPS[i] == v) k = i;
+    v = WARM_STEPS[(k + 1) % length(WARM_STEPS)];
+    if (ucur) {
+        ucur.set("almond3s", "display", "warm", sprintf("%d", v));
+        ucur.commit("almond3s");
+    }
+    warm_apply();
+}
+
+function warm_label() {
+    let v = warm_cfg();
+    if (v == 0)  return tr("off");
+    if (v <= 30) return tr("light");
+    if (v <= 60) return tr("medium");
+    return tr("strong");
+}
+
+// Настройки одним местом. Раньше они были размазаны: «Экран» и «Заставка»
+// плитками в меню, «Ночь» внутри «Заставки», редактор иконок и дебаг панели -
+// кто где. Найти что-то можно было только помня, где оно лежит.
+// Питание и Будильник сюда НЕ переехали - это функции, а не настройки.
+let SETTINGS = [
+    { label: "Display",      sub: "brightness, warm, language", act: "display" },
+    { label: "Saver",        sub: "timeout and look",           act: "saver" },
+    { label: "Night",        sub: "schedule and actions",       act: "night" },
+    { label: "Editor",       sub: "pixel art",                  act: "iconedit" },
+    { label: "Panel tuning", sub: "driver debug",               act: "debug" },
+];
+
+function settings_btn(i) {
+    return { x: GX, y: 30 + i * 34, w: GW, h: 30 };
+}
+
+function draw_settings_page() {
+    lcd_clear(C.bg);
+    draw_header(tr("Settings"));
+
+    for (let i = 0; i < length(SETTINGS); i++) {
+        let b = settings_btn(i);
+        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+        lcd_rect(b.x, b.y, 3, b.h, C.accent);
+        lcd_text(b.x + 12, b.y + 4, tr(SETTINGS[i].label), C.white, C.widget, 1);
+        lcd_text(b.x + 12, b.y + 17, tr(SETTINGS[i].sub), C.gray, C.widget, 1);
+        lcd_text(b.x + b.w - 18, b.y + 10, ">", C.gray, C.widget, 2);
+    }
+
+    draw_back();
+    lcd_flush();
+}
+
 function draw_display_page() {
     lcd_clear(C.bg);
     draw_header(tr("Display"));
@@ -4326,11 +4543,11 @@ function draw_display_page() {
                  sel ? C.white : C.gray, C.widget, 1);
     }
 
-    // Дебаг панели переехал из меню сюда - маленькой кнопкой.
-    let db = dbg_open_btn();
-    gcard(db.x, db.y, db.w, db.h, C.gray);
-    lcd_text(db.x + 12, db.y + 9, tr("Panel tuning"), C.white, C.widget, 1);
-    lcd_text(db.x + db.w - 18, db.y + 9, ">", C.gray, C.widget, 2);
+    let wb = warm_btn(), wv = warm_cfg();
+    gcard(wb.x, wb.y, wb.w, wb.h, wv ? "#F0A868" : C.dim);
+    lcd_text(wb.x + 12, wb.y + 9, tr("Warm"), C.white, C.widget, 1);
+    lcd_text(wb.x + wb.w - 8 - tlen(warm_label()) * 6, wb.y + 9, warm_label(),
+             wv ? "#F0A868" : C.gray, C.widget, 1);
 
     draw_back();
     lcd_flush();
@@ -4372,13 +4589,6 @@ function draw_saver_page() {
 
     // Ночной режим: зелёная тусклая заставка по расписанию. Тап открывает
     // часы и включает, если был выключен.
-    let nb = svnight_btn(), non = night_cfg().on;
-    lcd_rect(nb.x, nb.y, nb.w, nb.h, C.widget);
-    lcd_rect(nb.x, nb.y, 3, nb.h, non ? C.green : C.dim);
-    let nt = tr("Night mode");
-    lcd_text(nb.x + int((nb.w - tlen(nt) * 6) / 2) + 2, nb.y + 15, nt,
-             C.white, C.widget, 1);
-
     draw_back();
     lcd_flush();
 }
@@ -5909,7 +6119,7 @@ function draw_night_page() {
         lcd_text(pl.x + 18, pl.y + 10, "+", C.accent, C.widget, 4);
     }
 
-    lcd_text(24, 186, tr("LIGHT"), C.gray, C.bg, 1);
+    lcd_text(24, 138, tr("LIGHT, %"), C.gray, C.bg, 1);
     for (let i = 0; i < length(NIGHT_BRIGHT_STEPS); i++) {
         let b = nbright_btn(i), sel = (NIGHT_BRIGHT_STEPS[i] == c.bright);
         lcd_rect(b.x, b.y, b.w, b.h, C.widget);
@@ -5917,6 +6127,26 @@ function draw_night_page() {
         let t = sprintf("%d", NIGHT_BRIGHT_STEPS[i]);
         lcd_text(b.x + int((b.w - tlen(t) * 6) / 2) + 2, b.y + 10, t,
                  sel ? C.white : C.gray, C.widget, 1);
+    }
+
+    lcd_text(24, 164, tr("WARM, %"), C.gray, C.bg, 1);
+    for (let i = 0; i < length(NIGHT_WARM_STEPS); i++) {
+        let b = nwarm_btn(i), sel = (NIGHT_WARM_STEPS[i] == nwarm_cfg());
+        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+        lcd_rect(b.x, b.y, 3, b.h, sel ? "#F0A868" : C.border);
+        let t = NIGHT_WARM_STEPS[i] == 0 ? tr("off") : sprintf("%d", NIGHT_WARM_STEPS[i]);
+        lcd_text(b.x + int((b.w - tlen(t) * 6) / 2) + 2, b.y + 8, t,
+                 sel ? C.white : C.gray, C.widget, 1);
+    }
+
+    for (let i = 0; i < length(NIGHT_ACTS); i++) {
+        let b = nact_btn(i), on = night_act(NIGHT_ACTS[i].key);
+        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+        lcd_rect(b.x, b.y, 3, b.h, (c.on && on) ? C.green : C.dim);
+        lcd_text(b.x + 12, b.y + 7, tr(NIGHT_ACTS[i].label),
+                 c.on ? C.white : C.dim, C.widget, 1);
+        lcd_text(b.x + b.w - 30, b.y + 7, on ? tr("on") : tr("off"),
+                 (c.on && on) ? C.green : C.gray, C.widget, 1);
     }
 
     draw_back();
@@ -7121,6 +7351,7 @@ function draw_current() {
     // гасит службы - без этого гварда таймеры успевали нарисовать меню
     // поверх заставки, и пользователь видел интерфейс перед ребутом.
     if (st.halting) return;
+
     // Пока на экране заставка, страницы не рисуем. Иначе длинная операция
     // (переключение аплинка занимает секунды) заканчивалась уже под заставкой
     // и дорисовывала страницу поверх неё - на экране получалась каша.
@@ -7145,6 +7376,7 @@ function draw_current() {
     case "sms":       draw_sms_page(); break;
     case "sms1":      draw_sms_one(); break;
     case "night":     draw_night_page(); break;
+    case "settings":  draw_settings_page(); break;
     case "led":       draw_led_page(); break;
     case "battery":   draw_battery_page(); break;
     case "savercfg":  draw_savercfg_page(); break;
@@ -7175,7 +7407,9 @@ function draw_screensaver() {
     if (st.halting) return;
     if (st.saver_scene != null) return;   // сцену рисует kmod, ui.uc не вмешивается
     let t = localtime();
-    let night = night_now();
+    // Зелёный «ночной терминал» раньше был зашит намертво; теперь это
+    // настройка на странице «Ночь».
+    let night = night_now() && night_act("night_green");
     let bg = night ? "#000000" : C.bg;
     let primary = night ? "#1F6F3D" : C.white;
     let secondary = night ? "#1F6F3D" : C.gray;
@@ -7385,13 +7619,50 @@ function backlight_path() {
 // Ночью гасим заставку до трети яркости: зелёный цвет от zipfo экономил глаза
 // только по цвету, а панель светила в полную силу. Активный экран не трогаем -
 // если человек подошёл и ткнул, ему нужно видеть.
+// Ночной режим как СОБЫТИЕ. Раньше night_now() просто вычислялся по часам в
+// момент отрисовки, и «наступления ночи» не существовало - для Wi-Fi этого
+// мало, нужен именно переход.
+// Состояние задаём ЦЕЛИКОМ, а не «если включено». Раньше обе ветки стояли
+// под условием самой настройки, и выключение её ночью ничего не возвращало:
+// снимаешь «Wi-Fi ночью» в час ночи - точки так и остаются погашенными, а
+// «Тепло» в ноль - панель остаётся тёплой до утра, которое тоже ничего не
+// сделает. Теперь любой вызов приводит систему к тому виду, который положен
+// прямо сейчас; обе операции идемпотентны, лишний вызов ничего не стоит.
+function night_apply(on) {
+    let warm = (on && nwarm_cfg() > 0) ? nwarm_cfg() : warm_cfg();
+    system(sprintf("almond3s-lcd warm %d >/dev/null 2>&1", warm));
+
+    let ap_off = on && night_act("night_wifi");
+    system(sprintf("%s/night_wifi.sh %s >/dev/null 2>&1 &", SCRIPTS, ap_off ? "off" : "on"));
+}
+
+function night_tick() {
+    let n = night_now();
+    if (st.night_was == null) {
+        // Применяем в ОБЕ стороны. Раньше при старте днём не делалось ничего -
+        // и если ночь застала перезагрузка (или падение интерфейса), точки
+        // доступа оставались выключенными на весь день: восстановить их было
+        // некому. Скрипт при этом ничего не делает, если гасить было нечего.
+        st.night_was = n;
+        night_apply(n);
+        return;
+    }
+    if (n == st.night_was) return;
+    st.night_was = n;
+    night_apply(n);
+}
+
 function night_dim(lvl) {
-    if (!night_now() || st.screen != "screensaver") return lvl;
-    // Своя ночная яркость (issue #1): процент от полной шкалы, а не от
-    // дневного уровня - так настройка предсказуема при любой дневной.
-    let d = int(255 * night_cfg().bright / 100);
-    if (d > lvl) d = lvl;   // ночью не ярче, чем днём
-    return d < 8 ? 8 : d;
+    // Ночная яркость действует везде - в меню, на страницах и на заставке.
+    // Раньше она ограничивалась заставкой; ограничение снято.
+    if (!night_now()) return lvl;
+    // Ночная яркость задаётся так же, как дневная: процент от полной шкалы.
+    // Подрезание дневным уровнем убрано - оно делало настройку относительной
+    // и непредсказуемой: при дневных 10% ночные 15 молча превращались в 10.
+    // Раз уж значение выбрано ночным, оно и применяется.
+    // Порог снят: выбранный процент применяется как есть. Шкала ШИМ целая,
+    // 0..255, поэтому 3% - это 7 отсчётов (2.75%), точнее панель не умеет.
+    return int(255 * night_cfg().bright / 100);
 }
 
 function backlight_write(on) {
@@ -7404,27 +7675,37 @@ function backlight_write(on) {
     // строки, а в покое - ноль строк, и переливать нечего.
     let lvl = on ? night_dim(int(bright_cfg() * 255 / 100)) : 0;
     if (lvl > 255) lvl = 255;
-    if (lvl < 8 && on) lvl = 8;   // ниже уже неразличимо, но экран не гасим
+    // Второй порог тоже снят - иначе он поднимал бы до 8 всё, что ночная
+    // яркость честно опустила ниже. Ноль остаётся ровно одним случаем:
+    // экран выключен.
 
-    // Гибрид: ШИМ не опускаем ниже 30% - на глубокой скважности окно света
-    // такое короткое, что его рвёт любая передача кадра, и это видно как
-    // мерцание. Остаток затемнения добираем цифрой: свет физически убавлен
-    // ШИМом, поэтому картинка тёмная, а не серая, как при чистой цифре.
-    // Порог 20%: ниже него окно света такое короткое, что передачи кадра
-    // его рвут. На 20% окно 0.8 мс - уже устойчиво, а серости от цифровой
-    // добавки вдвое меньше, чем при пороге 30%.
-    let pwm = lvl, gray = 255;
-    if (on && lvl < 51) {
-        pwm = 51;
-        gray = int(lvl * 255 / 51);
-    }
-    system(sprintf("almond3s-lcd gray %d >/dev/null 2>&1", gray));
-    system(sprintf("almond3s-lcd dim %d >/dev/null 2>&1", on ? pwm : 0));
+    // Цифрового затемнения нет ни на одном уровне. Раньше ниже 20% ШИМ
+    // упирался в пол, а остаток добирался рисованием тёмных пикселей - и
+    // цвета вымывались, картинка становилась блёклой вместо тёмной.
+    // Гибрид держался на том, что короткое окно света рвала передача кадра.
+    // Причина была не в скважности: фаза ШИМ сбрасывалась в ноль на каждой
+    // передаче, а после неё таймер просыпался с задержкой. Обе границы теперь
+    // сшиты по абсолютным часам, окно света держится и на глубокой
+    // скважности - значит и добирать цифрой больше нечего.
+    system("almond3s-lcd gray 255 >/dev/null 2>&1");
+    warm_apply();   /* уровень живёт в драйвере и сбрасывается при перезагрузке */
+    system(sprintf("almond3s-lcd dim %d >/dev/null 2>&1", on ? lvl : 0));
     // Классу светодиодов оставляем согласованное состояние, чтобы очередная
     // перезагрузка триггеров не зажгла панель мимо нас.
     let p = backlight_path();
     if (p != "")
         system(sprintf("echo %d > %s", on ? 1 : 0, p));
+}
+
+// Любая правка на ночной странице применяется сразу, если время уже ночное -
+// ждать следующего перехода незачем. Состояние пересобираем с нуля
+// (st.night_was = null), затем пересчитываем яркость: night_dim сам решит,
+// ночная она или дневная, по тому, что сейчас на экране. Пока открыта сама
+// страница, экран активен - и он не темнеет, иначе настройку не было бы видно.
+function night_refresh() {
+    st.night_was = null;
+    night_tick();
+    backlight_write(true);
 }
 
 // Тач работает независимо от подсветки, поэтому разбудить экран можно пальцем.
@@ -7904,6 +8185,7 @@ function handle_touch(tx, ty, tmove) {
             case "traffic":   go_page("traffic"); return;
             case "sms":       st.sms_pg = 0; st.sms_i = -1; sms_refresh(); go_page("sms"); return;
             case "led":       go_page("led"); return;
+            case "settings":  go_page("settings"); return;
             case "display":   go_page("display"); return;
             case "saver":     go_page("saver"); return;
             case "weather":   run_script("weather_fetch.sh", true); go_page("weather"); return;
@@ -8621,11 +8903,29 @@ function handle_touch(tx, ty, tmove) {
     }
 
     if (st.page == "night") {
+        for (let i = 0; i < length(NIGHT_WARM_STEPS); i++) {
+            let b = nwarm_btn(i);
+            if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
+            night_set("night_warm_lvl", sprintf("%d", NIGHT_WARM_STEPS[i]));
+            night_refresh();
+            draw_night_page();
+            return;
+        }
+        for (let i = 0; i < length(NIGHT_ACTS); i++) {
+            let b = nact_btn(i);
+            if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
+            let k = NIGHT_ACTS[i].key;
+            night_act_set(k, !night_act(k));
+            night_refresh();
+            draw_night_page();
+            return;
+        }
         let c = night_cfg();
         for (let i = 0; i < length(NIGHT_BRIGHT_STEPS); i++) {
             let b = nbright_btn(i);
             if (in_rect(tx, ty, b.x, b.y, b.w, b.h)) {
                 night_set("night_bright", NIGHT_BRIGHT_STEPS[i]);
+                night_refresh();
                 if (!st.blank) backlight_write(true);
                 draw_night_page();
                 return;
@@ -8634,6 +8934,7 @@ function handle_touch(tx, ty, tmove) {
         let nb = night_btn();
         if (in_rect(tx, ty, nb.x, nb.y, nb.w, nb.h)) {
             night_set("night", c.on ? "0" : "1");
+            night_refresh();
             draw_night_page();
             return;
         }
@@ -8643,11 +8944,13 @@ function handle_touch(tx, ty, tmove) {
             let m = hour_btn(r, -1), pl = hour_btn(r, 1);
             if (in_rect(tx, ty, m.x, m.y, m.w, m.h)) {
                 night_set(key, (val + 23) % 24);
+                night_refresh();
                 draw_night_page();
                 return;
             }
             if (in_rect(tx, ty, pl.x, pl.y, pl.w, pl.h)) {
                 night_set(key, (val + 1) % 24);
+                night_refresh();
                 draw_night_page();
                 return;
             }
@@ -8655,7 +8958,23 @@ function handle_touch(tx, ty, tmove) {
         return;
     }
 
+    if (st.page == "settings") {
+        for (let i = 0; i < length(SETTINGS); i++) {
+            let b = settings_btn(i);
+            if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
+            go_page(SETTINGS[i].act);
+            return;
+        }
+        return;
+    }
+
     if (st.page == "display") {
+        let wb = warm_btn();
+        if (in_rect(tx, ty, wb.x, wb.y, wb.w, wb.h)) {
+            warm_next();
+            draw_display_page();
+            return;
+        }
         let rb = rot_btn();
         if (in_rect(tx, ty, rb.x, rb.y, rb.w, rb.h)) {
             rot_set(!rot_cfg());
@@ -8704,8 +9023,6 @@ function handle_touch(tx, ty, tmove) {
                 return;
             }
         }
-        let db = dbg_open_btn();
-        if (in_rect(tx, ty, db.x, db.y, db.w, db.h)) { go_page("debug"); return; }
         return;
     }
 
@@ -9144,6 +9461,12 @@ function main() {
         data_t = uloop_mod.timer(T.data * 1000, function() {
             refresh_data();
             st.alarm_on = alarm_is_on();   // статус-иконка будильника
+            night_tick();
+            st.vpn_tick = (st.vpn_tick ?? 99) + 1;
+            if (st.vpn_tick >= 5) {          // ~раз в 10 с, чаще незачем
+                st.vpn_tick = 0;
+                st.vpn_on = clash_running();
+            }
             // Матрица-заставка: снизу живой logread (kmsg после буста молчит).
             // Срезаем дату+facility, режем по ширине, фоном чтоб не блокировать.
             if (st.saver_scene == 0)
