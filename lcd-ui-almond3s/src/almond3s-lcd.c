@@ -707,6 +707,13 @@ int main(int argc, char **argv)
         return ret < 0 ? 1 : 0;
     }
 
+    /* almond3s-lcd warm <0..100> — тёплый вечерний фильтр (ioctl 27). */
+    if (argc >= 3 && strcmp(argv[1], "warm") == 0) {
+        int ret = ioctl(fd, 27, (unsigned long)atoi(argv[2]));
+        close(fd);
+        return ret < 0 ? 1 : 0;
+    }
+
     /* almond3s-lcd stat — сколько строк ушло на панель в последнем кадре. */
     if (argc >= 2 && strcmp(argv[1], "stat") == 0) {
         int d[3] = { -1, -1, -1 };
@@ -764,6 +771,22 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    /* Default: demo mode */
-    return demo_mode(fd);
+    /* Демо-режим только по явному слову. Раньше он стоял умолчанием, и любая
+       опечатка или команда без обязательного значения (например «gray» без
+       числа) вместо ошибки уводила сюда: процесс захватывал /dev/lcd, рисовал
+       красный прицел по каждому касанию и висел, пока его не убьют. */
+    if (argc >= 2 && strcmp(argv[1], "demo") == 0)
+        return demo_mode(fd);
+
+    fprintf(stderr,
+            "almond3s-lcd: неизвестная команда%s%s\n"
+            "  подсветка: bl 0|1 | dim 0..255 | gray 0..255 | warm 0..100 | pwm <мкс>\n"
+            "  панель:    scene N | matrixline <текст> | reinit | rotate 0|1\n"
+            "  сведения:  version | stats | stat | bench | level | pic\n"
+            "  касания:   touchmode N | waittouch <мс> | daemon | daemon_fg\n"
+            "  звук:      volume N | tone | melody | bell | siren | stop\n"
+            "  проверка:  demo\n",
+            argc >= 2 ? ": " : "", argc >= 2 ? argv[1] : "");
+    close(fd);
+    return 1;
 }
