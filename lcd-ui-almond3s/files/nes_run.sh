@@ -9,15 +9,7 @@
 # работающей игры - касания начинают уезжать в меню.
 
 ROM="$1"
-# Какое ядро запускать - выбирается в «Игры → Настройки» и лежит тут же файлом.
-# QuickNES точнее держит игры с маппером MMC3 (Super Mario Bros 3 и подобные),
-# InfoNES знает больше мапперов. Не подошло - переключаешься одним тапом.
-CORE=$(cat /etc/almond3s/nes_core 2>/dev/null)
-if [ "$CORE" = quicknes ] && [ -x /usr/libexec/almond3s/nes-quick ]; then
-	NES=/usr/libexec/almond3s/nes-quick
-else
-	NES=/usr/libexec/almond3s/nes
-fi
+NES=/usr/libexec/almond3s/nes-quick
 
 [ -x "$NES" ] || exit 1
 [ -f "$ROM" ] || exit 1

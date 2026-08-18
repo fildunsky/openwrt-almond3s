@@ -3749,7 +3749,7 @@ function speedtest_sub() {
 // Свой платформер + ромы NES. Ромы ищем в /etc/almond3s/roms (переживает
 // перезагрузку) и в /tmp/roms (закинул на пробу - и играешь).
 let ROM_DIRS = [ "/etc/almond3s/roms", "/tmp/roms" ];
-let NES_BIN  = "/usr/libexec/almond3s/nes";
+let NES_BIN  = "/usr/libexec/almond3s/nes-quick";
 
 function rom_list() {
     let out = [];
@@ -5074,8 +5074,6 @@ function games_cfg_btn() {
 let KEYFILE = "/etc/almond3s/nes_keys";
 
 let GSET = [
-    { file: "/etc/almond3s/nes_core",  label: "Ядро",   vals: [ "infones", "quicknes" ],
-      names: [ "InfoNES", "QuickNES" ], def: "infones" },
     { file: "/etc/almond3s/nes_fps",   label: "Кадры",  vals: [ "all", "45", "30" ],
       names: [ "60", "45", "30" ], def: "all" },
     { file: "/etc/almond3s/nes_blend", label: "Склейка", vals: [ "off", "avg", "max" ],
@@ -5127,16 +5125,16 @@ function gset_next(i) {
 }
 
 function gset_btn(i) {
-    return { x: 8, y: 26 + i * 22, w: 304, h: 20 };
+    return { x: 8, y: 28 + i * 24, w: 304, h: 22 };
 }
 
 // Кнопка «Пульт» под списком настроек - ведёт на страницу с QR-кодами.
 function gqr_btn() {
-    return { x: 8, y: 28 + length(GSET) * 22, w: 148, h: 24 };
+    return { x: 8, y: 32 + length(GSET) * 24, w: 148, h: 26 };
 }
 
 function gkeys_btn() {
-    return { x: 164, y: 28 + length(GSET) * 22, w: 148, h: 24 };
+    return { x: 164, y: 32 + length(GSET) * 24, w: 148, h: 26 };
 }
 
 function lan_ip() {
@@ -5266,18 +5264,18 @@ function draw_gset_page() {
         let k = gset_read(i);
         lcd_rect(b.x, b.y, b.w, b.h, C.widget);
         lcd_rect(b.x, b.y, 3, b.h, C.accent);
-        lcd_text(b.x + 10, b.y + 6, GSET[i].label, C.gray, C.widget, 1);
-        lcd_text(b.x + 150, b.y + 6, GSET[i].names[k], C.white, C.widget, 1);
+        lcd_text(b.x + 10, b.y + 7, GSET[i].label, C.gray, C.widget, 1);
+        lcd_text(b.x + 150, b.y + 7, GSET[i].names[k], C.white, C.widget, 1);
     }
     let kb = gkeys_btn();
     lcd_rect(kb.x, kb.y, kb.w, kb.h, C.widget);
     lcd_rect(kb.x, kb.y, 3, kb.h, C.accent);
-    lcd_text(kb.x + 10, kb.y + 7, tr("Keys"), C.accent, C.widget, 1);
+    lcd_text(kb.x + 10, kb.y + 8, tr("Keys"), C.accent, C.widget, 1);
 
     let q = gqr_btn();
     lcd_rect(q.x, q.y, q.w, q.h, C.widget);
     lcd_rect(q.x, q.y, 3, q.h, C.accent);
-    lcd_text(q.x + 10, q.y + 7, tr("Gamepad"), C.accent, C.widget, 1);
+    lcd_text(q.x + 10, q.y + 8, tr("Gamepad"), C.accent, C.widget, 1);
 
     draw_back();
     lcd_flush();
