@@ -16,6 +16,7 @@
 #include <sys/un.h>
 #include <stdint.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #define LCD_W 320
 #define LCD_H 240
@@ -116,7 +117,7 @@ static const uint8_t font5x7[96][5] = {
     {0x36,0x49,0x55,0x22,0x50},{0x00,0x05,0x03,0x00,0x00},
     {0x00,0x1C,0x22,0x41,0x00},{0x00,0x41,0x22,0x1C,0x00},
     {0x14,0x08,0x3E,0x08,0x14},{0x08,0x08,0x3E,0x08,0x08},
-    {0x00,0x50,0x30,0x00,0x00},{0x08,0x08,0x08,0x08,0x08},
+    {0x00,0xA0,0x60,0x00,0x00},{0x08,0x08,0x08,0x08,0x08},
     {0x00,0x60,0x60,0x00,0x00},{0x20,0x10,0x08,0x04,0x02},
     {0x3E,0x51,0x49,0x45,0x3E},{0x00,0x42,0x7F,0x40,0x00},
     {0x42,0x61,0x51,0x49,0x46},{0x21,0x41,0x45,0x4B,0x31},
@@ -297,13 +298,16 @@ static void fb_char(int x, int y, unsigned cp, uint16_t fg, uint16_t bg, int sca
         if (idx < 0 || idx > 95) idx = 0;
         g = font5x7[idx];
     }
-    for (row = 0; row < 7; row++)
+    /* 8 рядов: ряд7 (bit7) свободен во всех глифах, кроме запятой - она в него
+       свешивает хвост под базовую линию. bg-заливка только рядов 0-6, иначе row7
+       затирал бы пиксель под каждым символом. */
+    for (row = 0; row < 8; row++)
         for (sy = 0; sy < scale; sy++)
             for (col = 0; col < 5; col++)
                 for (sx = 0; sx < scale; sx++) {
                     if (g[col] & (1 << row))
                         fb_pixel(x + col*scale + sx, y + row*scale + sy, fg);
-                    else if (!transp)
+                    else if (!transp && row < 7)
                         fb_pixel(x + col*scale + sx, y + row*scale + sy, bg);
                 }
     /* space between chars - прозрачный текст его не закрашивает */
