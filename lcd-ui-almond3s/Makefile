@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=lcd-ui-almond3s
-PKG_RELEASE:=346
+PKG_RELEASE:=360
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -63,6 +63,8 @@ define Package/lcd-ui-almond3s/install
 	$(INSTALL_BIN) ./files/alarm_play.sh $(1)/etc/almond3s/scripts/alarm_play.sh
 	$(INSTALL_BIN) ./files/alarm_stop.sh $(1)/etc/almond3s/scripts/alarm_stop.sh
 	$(INSTALL_BIN) ./files/vpn_clash.sh $(1)/etc/almond3s/scripts/vpn_clash.sh
+	$(INSTALL_BIN) ./files/nes_run.sh $(1)/etc/almond3s/scripts/nes_run.sh
+	$(INSTALL_DIR) $(1)/etc/almond3s/roms
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./files/almond3s.config $(1)/etc/config/almond3s
 	# Нарисованные в редакторе иконки: кладём в /etc/almond3s/icons, откуда

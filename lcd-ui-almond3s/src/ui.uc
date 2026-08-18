@@ -556,6 +556,22 @@ let TR_RU = {
     "Custom city": "Свой город",
     "Type city name": "Введите город",
     "Source": "Источник",
+    "Zigbee": "Зигби",
+    "Games": "Игры",
+    "Setup": "Настройки",
+    "tap to change": "тап по строке - следующее значение",
+    "Gamepad": "Пульт",
+    "Keyboard": "Клавиатура",
+    "Keys": "Клавиши",
+    "Player %d": "Игрок %d",
+    "tap a row, then press a key": "тап по строке, затем нажми клавишу",
+    "press a key": "жми клавишу",
+    "Gamepad on phone": "Джойстик на телефоне",
+    "scan while a game is running": "сканируй, когда игра запущена",
+    "no ROMs": "нет ромов",
+    "%d ROMs": "ромов: %d",
+    "Put .nes into": "Положи .nes в",
+    "emulator not installed": "эмулятор не установлен",
     "Select city": "Выбор города",
     "Searching...": "Поиск...",
     "City not found": "Город не найден",
@@ -743,6 +759,7 @@ function lcd_flush() {
         try { s.close(); } catch(e2) {}
     }
 }
+
 
 // Самая высокая палка вровень со значком батареи - 16 пикселей.
 function draw_sigbars(x, y, bars, col, empty) {
@@ -2446,6 +2463,23 @@ let MICONS = {
         "..............",
     ],
     // зигби - нарисован в редакторе на роутере
+    // геймпад: крестовина слева, две кнопки справа
+    game: [
+        "..............",
+        "..............",
+        "..............",
+        "...88888888...",
+        ".888888888888.",
+        "88881888855888",
+        "88811188888888",
+        "88881888822888",
+        ".888888888888.",
+        "..8888....8888",
+        "..888......888",
+        "..............",
+        "..............",
+        "..............",
+    ],
     zigbee: [
         "....2111111...",
         "...212222221..",
@@ -3711,6 +3745,30 @@ function speedtest_sub() {
 
 // Пункты меню в фиксированном порядке (пожелание владельца). VPN - только если
 // стоит SSClash. draw_menu бьёт список по 5 на страницу; тап диспатчит по act.
+// === Раздел «Игры» ===
+// Свой платформер + ромы NES. Ромы ищем в /etc/almond3s/roms (переживает
+// перезагрузку) и в /tmp/roms (закинул на пробу - и играешь).
+let ROM_DIRS = [ "/etc/almond3s/roms", "/tmp/roms" ];
+let NES_BIN  = "/usr/libexec/almond3s/nes";
+
+function rom_list() {
+    let out = [];
+    for (let d in ROM_DIRS) {
+        let ls = fs.lsdir(d);
+        if (type(ls) != "array") continue;
+        for (let f in ls) {
+            if (lc(substr(f, length(f) - 4)) != ".nes") continue;
+            push(out, { name: substr(f, 0, length(f) - 4), path: d + "/" + f });
+        }
+    }
+    return out;
+}
+
+function games_sub() {
+    let n = length(rom_list());
+    return n ? sprintf(tr("%d ROMs"), n) : tr("no ROMs");
+}
+
 function menu_items() {
     let d = st.data;
     let nc = type(d?.wifi?.clients) == "array" ? length(d.wifi.clients) : 0;
@@ -3737,7 +3795,10 @@ function menu_items() {
     push(it, { label: tr("Battery"), sub: bp >= 0 ? sprintf("%d%%", bp) : "--", sc: bt?.charging ? C.green : C.gray, icon: "bolt", ic: "#FFA930", act: "battery" });
     push(it, { label: tr("Editor"), sub: tr("pixel art"), icon: "editor", ic: C.cyan, act: "iconedit" });
     push(it, { label: tr("Terminal"), sub: tr("shell"), icon: "term", ic: C.green, act: "term" });
-    push(it, { label: "Зигби", sub: "EM357", icon: "zigbee", ic: C.green, act: "zigbee" });
+    // Зигби из меню убран: пока модулем ничего не управляется, плитка только
+    // занимает место. Сама страница жива и открывается через /tmp/.lcd_goto,
+    // так что вернуть её - это одна строка.
+    push(it, { label: tr("Games"), sub: games_sub(), icon: "game", ic: C.green, act: "games" });
     push(it, { label: tr("Info"), sub: fmt_uptime(d?.uptime), icon: "info", ic: C.cyan, act: "info" });
     push(it, { label: tr("Modem Reset"), sub: tr("LTE restart"), sc: "#F0A868", bg: "#3A2208", icon: "reset", ic: C.orange, act: "reset", line: C.orange });
     push(it, { label: tr("Power"), sub: tr("System"), sc: "#F0B0B8", bg: C.back, icon: "reboot", ic: "#F0B0B8", act: "power", line: "#D32F2F" });
@@ -3839,6 +3900,29 @@ function wifi_qr_rows(ssid, key) {
         }
     }
     qr_cache[ck] = rows;
+    return rows;
+}
+
+// То же самое, но для произвольной строки: ссылка на джойстик, например.
+let qr_txt_cache = {};
+
+function qr_rows(text) {
+    if (!text || text == "") return null;
+    if (exists(qr_txt_cache, text)) return qr_txt_cache[text];
+
+    let rows = null;
+    let p = fs.popen("qrencode -t ASCII -m 0 -l L -o - " + sh_quote(text) + " 2>/dev/null", "r");
+    if (p) {
+        let out = p.read("all");
+        p.close();
+        if (out) {
+            rows = [];
+            for (let ln in split(trim(out), "\n"))
+                if (length(ln) > 3) push(rows, ln);
+            if (!length(rows)) rows = null;
+        }
+    }
+    qr_txt_cache[text] = rows;
     return rows;
 }
 
@@ -4970,9 +5054,282 @@ function draw_battery_page() {
     lcd_flush();
 }
 
+function games_btn(i) {
+    return { x: 8, y: 28 + i * 34, w: 304, h: 30 };
+}
+
+// Листалка: ромов стало много, на страницу помещается четыре.
+function games_arrow(dir) {
+    return { x: dir < 0 ? 112 : 224, y: 172, w: 88, h: 28 };
+}
+
+// Кнопка настроек живёт между стрелками листалки: отдельной строки на неё в
+// списке нет, а место посередине всё равно занимал только счётчик страниц.
+function games_cfg_btn() {
+    return { x: 8, y: 172, w: 96, h: 28 };
+}
+
+// Переключатели эмулятора лежат в файлах: он перечитывает их на живую, без
+// перезапуска игры. Здесь мы им просто даём лицо.
+let KEYFILE = "/etc/almond3s/nes_keys";
+
+let GSET = [
+    { file: "/etc/almond3s/nes_core",  label: "Ядро",   vals: [ "infones", "quicknes" ],
+      names: [ "InfoNES", "QuickNES" ], def: "infones" },
+    { file: "/etc/almond3s/nes_fps",   label: "Кадры",  vals: [ "all", "45", "30" ],
+      names: [ "60", "45", "30" ], def: "all" },
+    { file: "/etc/almond3s/nes_blend", label: "Склейка", vals: [ "off", "avg", "max" ],
+      names: [ "выкл", "полусумма", "максимум" ], def: "off" },
+    // Ровный ритм: кадров доходит меньше, но через равные промежутки - глаз
+    // читает как плавность именно регулярность, а не их число.
+    { file: "/etc/almond3s/nes_cadence", label: "Ритм", vals: [ "even", "off" ],
+      names: [ "ровный", "как есть" ], def: "even" },
+    // Звук выключен: на этой плате динамик висит на PIC, а не на звуковой
+    // шине, выхода нет. Выключатель сделан под будущее железо.
+    { file: "/etc/almond3s/nes_sound", label: "Звук", vals: [ "off", "on" ],
+      names: [ "выкл", "вкл" ], def: "off" },
+    // Глубина цвета панели: 12 бит - это на четверть меньше байтов по шине
+    // GPIO, то есть выше частота обновления, ценой ступенек на градиентах.
+    { file: "/etc/almond3s/lcd_color12", label: "Цвет", vals: [ "0", "1" ],
+      names: [ "16 бит", "12 бит" ], def: "0",
+      sysfs: "/sys/module/almond3s_lcd/parameters/color12" },
+    // Обновление через строку: байтов по шине вдвое меньше, но на быстром
+    // движении видна гребёнка.
+    { file: "/etc/almond3s/lcd_interlace", label: "Через строку", vals: [ "0", "1" ],
+      names: [ "выкл", "вкл" ], def: "0",
+      sysfs: "/sys/module/almond3s_lcd/parameters/interlace" },
+];
+
+function gset_read(i) {
+    let raw = fs.readfile(GSET[i].file);
+    let v = raw ? trim(raw) : GSET[i].def;
+    for (let k = 0; k < length(GSET[i].vals); k++)
+        if (GSET[i].vals[k] == v) return k;
+    return 0;
+}
+
+// Настройка, у которой есть sysfs, живёт в параметре модуля - файл лишь
+// помнит выбор между перезагрузками.
+function gset_apply(i) {
+    if (!GSET[i].sysfs) return;
+    fs.writefile(GSET[i].sysfs, GSET[i].vals[gset_read(i)]);
+}
+
+function gset_apply_all() {
+    for (let i = 0; i < length(GSET); i++) gset_apply(i);
+}
+
+function gset_next(i) {
+    let k = (gset_read(i) + 1) % length(GSET[i].vals);
+    fs.writefile(GSET[i].file, GSET[i].vals[k] + "\n");
+    gset_apply(i);
+    return k;
+}
+
+function gset_btn(i) {
+    return { x: 8, y: 26 + i * 22, w: 304, h: 20 };
+}
+
+// Кнопка «Пульт» под списком настроек - ведёт на страницу с QR-кодами.
+function gqr_btn() {
+    return { x: 8, y: 28 + length(GSET) * 22, w: 148, h: 24 };
+}
+
+function gkeys_btn() {
+    return { x: 164, y: 28 + length(GSET) * 22, w: 148, h: 24 };
+}
+
+function lan_ip() {
+    let raw = fs.popen("uci -q get network.lan.ipaddr", "r");
+    let v = raw ? trim(raw.read("all") ?? "") : "";
+    if (raw) raw.close();
+    v = split(v, "/")[0];              // uci отдаёт адрес с маской
+    return (v && v != "") ? v : "192.168.1.1";
+}
+
+// Сервер джойстика поднимается вместе с игрой и живёт только пока она идёт.
+// Номер игрока берётся из ссылки, поэтому коды разные: кто по какому зашёл,
+// тот тем и играет, а не «кто успел первым».
+function pad_url(player) {
+    return sprintf("http://%s:8099/?p=%d", lan_ip(), player);
+}
+
+function draw_gqr_page() {
+    lcd_clear(C.bg);
+    draw_header(tr("Gamepad"));
+
+    for (let i = 0; i < 2; i++) {
+        let x = 22 + i * 156;
+        draw_qr(qr_rows(pad_url(i + 1)), x, 46, 3, "#000000", "#FFFFFF");
+        lcd_text(x + 4, 140, sprintf(tr("Player %d"), i + 1), C.white, C.bg, 1);
+    }
+    lcd_text(12, 168, tr("scan while a game is running"), C.dim, C.bg, 1);
+    lcd_text(12, 184, pad_url(1), C.gray, C.bg, 1);
+
+    draw_back();
+    lcd_flush();
+}
+
+// Раскладка клавиатуры. Ловит нажатие помощником keygrab: разбирать двоичные
+// события /dev/input прямо здесь неудобно, а он печатает один код и выходит.
+let KEYS = [
+    { id: "a",      label: "A (прыжок)", def: 45 },
+    { id: "b",      label: "B (бег)",    def: 44 },
+    { id: "start",  label: "START",      def: 28 },
+    { id: "select", label: "SELECT",     def: 42 },
+    { id: "exit",   label: "Выход",      def: 1  },
+];
+
+// Имена для кодов, которые реально попадаются; остальное показываем числом.
+let KEYNAMES = {
+    "1": "ESC", "28": "ENTER", "42": "SHIFT", "54": "SHIFT",  "57": "ПРОБЕЛ",
+    "44": "Z", "45": "X", "46": "C", "47": "V", "48": "B", "49": "N", "50": "M",
+    "30": "A", "31": "S", "32": "D", "33": "F", "34": "G", "35": "H", "36": "J",
+    "37": "K", "38": "L", "16": "Q", "17": "W", "18": "E", "19": "R", "20": "T",
+    "21": "Y", "22": "U", "23": "I", "24": "O", "25": "P",
+    "103": "ВВЕРХ", "108": "ВНИЗ", "105": "ВЛЕВО", "106": "ВПРАВО",
+    "96": "ENTER", "29": "CTRL", "56": "ALT", "15": "TAB",
+};
+
+function keymap_read() {
+    let m = {};
+    for (let k in KEYS) m[k.id] = k.def;
+    let raw = fs.readfile(KEYFILE);
+    if (raw)
+        for (let ln in split(trim(raw), "\n")) {
+            let f = split(trim(ln), /\s+/);
+            if (length(f) == 2 && int(f[1]) > 0) m[f[0]] = int(f[1]);
+        }
+    return m;
+}
+
+function keymap_write(m) {
+    let out = "";
+    for (let k in KEYS) out += k.id + " " + m[k.id] + "\n";
+    fs.writefile(KEYFILE, out);
+}
+
+function gkey_btn(i) {
+    return { x: 8, y: 32 + i * 32, w: 304, h: 28 };
+}
+
+function key_title(code) {
+    return KEYNAMES[sprintf("%d", code)] ?? sprintf("код %d", code);
+}
+
+function draw_gkeys_page() {
+    lcd_clear(C.bg);
+    draw_header(tr("Keyboard"));
+
+    let m = keymap_read();
+    for (let i = 0; i < length(KEYS); i++) {
+        let b = gkey_btn(i);
+        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+        lcd_rect(b.x, b.y, 3, b.h, C.accent);
+        lcd_text(b.x + 12, b.y + 8, KEYS[i].label, C.gray, C.widget, 1);
+        lcd_text(b.x + 180, b.y + 8, key_title(m[KEYS[i].id]), C.white, C.widget, 1);
+    }
+    lcd_text(12, 32 + length(KEYS) * 32 + 4, tr("tap a row, then press a key"), C.dim, C.bg, 1);
+
+    draw_back();
+    lcd_flush();
+}
+
+// Ждём нажатие и записываем. Пока ждём, показываем это на самой строке -
+// иначе непонятно, слушает интерфейс или подвис.
+function gkey_learn(i) {
+    let b = gkey_btn(i);
+    lcd_rect(b.x, b.y, b.w, b.h, C.press);
+    lcd_rect(b.x, b.y, 3, b.h, C.accent);
+    lcd_text(b.x + 12, b.y + 8, KEYS[i].label, C.gray, C.press, 1);
+    lcd_text(b.x + 180, b.y + 8, tr("press a key"), C.accent, C.press, 1);
+    lcd_flush();
+
+    let p = fs.popen("/usr/libexec/almond3s/keygrab 8 2>/dev/null", "r");
+    let code = p ? int(trim(p.read("all") ?? "")) : 0;
+    if (p) p.close();
+
+    if (code > 0) {
+        let m = keymap_read();
+        m[KEYS[i].id] = code;
+        keymap_write(m);
+    }
+    draw_gkeys_page();
+}
+
+function draw_gset_page() {
+    lcd_clear(C.bg);
+    draw_header(tr("Setup"));
+
+    for (let i = 0; i < length(GSET); i++) {
+        let b = gset_btn(i);
+        let k = gset_read(i);
+        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+        lcd_rect(b.x, b.y, 3, b.h, C.accent);
+        lcd_text(b.x + 10, b.y + 6, GSET[i].label, C.gray, C.widget, 1);
+        lcd_text(b.x + 150, b.y + 6, GSET[i].names[k], C.white, C.widget, 1);
+    }
+    let kb = gkeys_btn();
+    lcd_rect(kb.x, kb.y, kb.w, kb.h, C.widget);
+    lcd_rect(kb.x, kb.y, 3, kb.h, C.accent);
+    lcd_text(kb.x + 10, kb.y + 7, tr("Keys"), C.accent, C.widget, 1);
+
+    let q = gqr_btn();
+    lcd_rect(q.x, q.y, q.w, q.h, C.widget);
+    lcd_rect(q.x, q.y, 3, q.h, C.accent);
+    lcd_text(q.x + 10, q.y + 7, tr("Gamepad"), C.accent, C.widget, 1);
+
+    draw_back();
+    lcd_flush();
+}
+
+function draw_games_page() {
+    lcd_clear(C.bg);
+    draw_header(tr("Games"));
+
+    let roms = rom_list();
+    let pages = length(roms) > 4 ? int((length(roms) + 3) / 4) : 1;
+    if (st.gpg == null || st.gpg >= pages) st.gpg = 0;
+    let base = st.gpg * 4;
+    for (let i = 0; i < 4 && base + i < length(roms); i++) {
+        let r = games_btn(i);
+        lcd_rect(r.x, r.y, r.w, r.h, C.widget);
+        lcd_rect(r.x, r.y, 3, r.h, C.accent);
+        lcd_text(r.x + 12, r.y + 9, tcut(roms[base + i].name, 46), C.white, C.widget, 1);
+    }
+    let cb = games_cfg_btn();
+    lcd_rect(cb.x, cb.y, cb.w, cb.h, C.widget);
+    lcd_rect(cb.x, cb.y, 3, cb.h, C.accent);
+    lcd_text(cb.x + 10, cb.y + 10, tr("Setup"), C.accent, C.widget, 1);
+
+    if (pages > 1) {
+        let a = games_arrow(-1), z = games_arrow(1);
+        lcd_rect(a.x, a.y, a.w, a.h, C.widget);
+        lcd_text(a.x + 32, a.y + 8, "<<", C.accent, C.widget, 2);
+        lcd_rect(z.x, z.y, z.w, z.h, C.widget);
+        lcd_text(z.x + 32, z.y + 8, ">>", C.accent, C.widget, 2);
+        // Просвет между стрелками 200..224, текст 3 знака по 6px - ставим в центр.
+        lcd_text(203, z.y + 11, sprintf("%d/%d", st.gpg + 1, pages), C.gray, C.bg, 1);
+
+    }
+
+    // Подсказка, когда ромов нет или эмулятор не поставлен.
+    let y = 28 + (length(roms) + 1) * 34 + 6;
+    if (!fs.stat(NES_BIN))
+        lcd_text(12, y, tr("emulator not installed"), C.dim, C.bg, 1);
+    else if (!length(roms)) {
+        lcd_text(12, y, tr("Put .nes into"), C.dim, C.bg, 1);
+        lcd_text(12, y + 12, ROM_DIRS[0], C.gray, C.bg, 1);
+    }
+
+    draw_back();
+    lcd_flush();
+}
+
+
 function draw_zigbee_page() {
     lcd_clear(C.bg);
-    draw_header("Зигби");
+    draw_header(tr("Zigbee"));
 
     let cx = GX, cw = GW;
     let y1 = GY;
@@ -5819,8 +6176,10 @@ function draw_services_page() {
         lcd_text(rb.x + int((rb.w - tlen(ct) * 6) / 2), rb.y + 40, ct, C.cyan, C.btn, 1);
     }
 
-    lcd_rect(bb.x, bb.y, bb.w, bb.h, C.hdr);
-    lcd_text(bb.x + 20, bb.y + 20, tr("<<< BACK"), C.white, C.hdr, 2);
+    // «Назад» - в стиле стандартной полосы: красный фон + верхняя подсветка.
+    lcd_rect(bb.x, bb.y, bb.w, bb.h, C.back);
+    lcd_rect(bb.x, bb.y, bb.w, 2, "#D32F2F");
+    lcd_text(bb.x + 20, bb.y + 20, tr("<<< BACK"), C.white, C.back, 2);
 
     lcd_flush();
 }
@@ -6795,6 +7154,10 @@ function draw_current() {
     case "debug":     draw_debug_page(); break;
     case "iconedit":  draw_iconedit_page(); break;
     case "zigbee":    draw_zigbee_page(); break;
+    case "games":     draw_games_page(); break;
+    case "gset":      draw_gset_page(); break;
+    case "gqr":       draw_gqr_page(); break;
+    case "gkeys":     draw_gkeys_page(); break;
     case "vpn":       draw_vpn_page(); break;
     case "speedtest": draw_speedtest_page(); break;
     case "spdcfg":    draw_speedtest_settings_page(); break;
@@ -6859,9 +7222,11 @@ function draw_screensaver() {
         // что 4G+ и конвертик нового SMS не пересекаются с первой цифрой часов.
         // Прозрачный фон ("none"): под цифрами остаётся подложка-градиент, а не
         // чёрная плашка. В ночном режиме под ними всё равно ровный чёрный.
-        lcd_text(int((LCD_W - tlen(ts) * 24) / 2), 20, ts, primary, "none", 4);
+        // Часы/дата были прижаты к статус-строке, а внизу карточек - пустоты.
+        // Опускаем верх (воздух берём из низа): часы 20->26, дата 50->58.
+        lcd_text(int((LCD_W - tlen(ts) * 24) / 2), 26, ts, primary, "none", 4);
         if (fl.date)
-            lcd_text(int((LCD_W - tlen(ds) * 12) / 2), 50, ds, secondary, "none", 2);
+            lcd_text(int((LCD_W - tlen(ds) * 12) / 2), 58, ds, secondary, "none", 2);
 
         if (!w2) {
             let c = gcard_pos(GX, 80, GW, 76);
@@ -6872,13 +7237,17 @@ function draw_screensaver() {
         }
 
         let desc = w2.desc ?? "";
-        let h = gcard_pos(GX, 80, GW, 76);
-        draw_weather_icon(h.r - 82, h.y + 4, desc, 3, night ? primary : null);
-        lcd_text(h.ix, h.y + 10, w2.temp ?? "?", primary, "none", 4);
-        lcd_text(h.ix, h.y + 52, city_name(w2.city) ?? "", secondary, "none", 1);
+        // Высоту героя держит иконка (72px), поэтому текст слева прижимаем к
+        // верху, а город ставим сразу под цифрами - иначе под ними дыра.
+        let h = gcard_pos(GX, 84, GW, 76);
+        draw_weather_icon(h.r - 82, h.y + 2, desc, 3, night ? primary : null);
+        lcd_text(h.ix, h.y + 6, w2.temp ?? "?", primary, "none", 4);
+        lcd_text(h.ix, h.y + 40, city_name(w2.city) ?? "", secondary, "none", 1);
 
-        let cc = gcard_pos(GX, 164, GW, 28);
-        lcd_text(cc.ix, cc.y + 7, tcut(wcond_tr(desc), 24), accent, "none", 2);
+        // Условие подтянуто к герою и ужато по высоте: над и под словом было
+        // поровну пусто.
+        let cc = gcard_pos(GX, 162, GW, 24);
+        lcd_text(cc.ix, cc.y + 5, tcut(wcond_tr(desc), 24), accent, "none", 2);
 
         let mw = int((GW - 2 * GG) / 3);
         let mets = [ [ tr("Feels"), w2.feels ?? "?" ],
@@ -6886,7 +7255,7 @@ function draw_screensaver() {
                      [ tr("Wind"), wind_fmt(w2.wind ?? "") ] ];
         for (let i = 0; i < 3; i++) {
             let mx = GX + i * (mw + GG);
-            let mc = gcard_pos(mx, 200, (i < 2) ? mw : (GX + GW - mx), 40);
+            let mc = gcard_pos(mx, 194, (i < 2) ? mw : (GX + GW - mx), 44);
             lcd_text(mc.ix, mc.y + 8, mets[i][0], secondary, "none", 1);
             let mv = split_unit(mets[i][1]);
             lcd_text(mc.ix, mc.y + 21, mv[0], primary, "none", 2);
@@ -7545,6 +7914,7 @@ function handle_touch(tx, ty, tmove) {
             case "iconedit":  ed_armed = false; go_page("iconedit"); return;
             case "term":      term_start(); go_page("term"); return;
             case "zigbee":    go_page("zigbee"); return;
+            case "games":     go_page("games"); return;
             case "info":      go_page("info"); return;
             case "reset":     menu_do_reset(); return;
             case "power":     menu_do_power(); return;
@@ -8411,6 +8781,67 @@ function handle_touch(tx, ty, tmove) {
         return;
     }
 
+    if (st.page == "gset") {
+        for (let i = 0; i < length(GSET); i++) {
+            let b = gset_btn(i);
+            if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
+            gset_next(i);
+            draw_gset_page();
+            return;
+        }
+        let q = gqr_btn();
+        if (in_rect(tx, ty, q.x, q.y, q.w, q.h)) { go_page("gqr"); return; }
+        let kb = gkeys_btn();
+        if (in_rect(tx, ty, kb.x, kb.y, kb.w, kb.h)) { go_page("gkeys"); return; }
+        return;
+    }
+
+    if (st.page == "gkeys") {
+        for (let i = 0; i < length(KEYS); i++) {
+            let b = gkey_btn(i);
+            if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
+            gkey_learn(i);
+            return;
+        }
+        return;
+    }
+
+    if (st.page == "gqr")
+        return;
+
+    if (st.page == "games") {
+        let roms = rom_list();
+        let cb = games_cfg_btn();
+        if (in_rect(tx, ty, cb.x, cb.y, cb.w, cb.h)) { go_page("gset"); return; }
+        let pages = length(roms) > 4 ? int((length(roms) + 3) / 4) : 1;
+        let base = (st.gpg ?? 0) * 4;
+        if (pages > 1) {
+            let a = games_arrow(-1), z = games_arrow(1);
+            if (in_rect(tx, ty, a.x, a.y, a.w, a.h)) {
+                st.gpg = (st.gpg + pages - 1) % pages; draw_games_page(); return;
+            }
+            if (in_rect(tx, ty, z.x, z.y, z.w, z.h)) {
+                st.gpg = (st.gpg + 1) % pages; draw_games_page(); return;
+            }
+        }
+        for (let i = 0; i < 4 && base + i < length(roms); i++) {
+            let r = games_btn(i);
+            if (!in_rect(tx, ty, r.x, r.y, r.w, r.h)) continue;
+            if (!fs.stat(NES_BIN)) {
+                toast(tr("emulator not installed"), C.red, "#200000", 3);
+                return;
+            }
+            lcd_rect(r.x, r.y, r.w, r.h, C.press);
+            lcd_text(r.x + 12, r.y + 9, tcut(roms[base + i].name, 46), C.white, C.press, 1);
+            lcd_flush();
+            // setsid: скрипт гасит нашу же службу, и без отвязки умрёт вместе с нами.
+            system(sprintf("setsid %s/nes_run.sh %s >/dev/null 2>&1 &",
+                           SCRIPTS, sh_quote(roms[base + i].path)));
+            return;
+        }
+        return;
+    }
+
     if (st.page == "wcity") {
         let list = wcity_list();
         let n = length(list); if (n > WCITY_PER_PAGE) n = WCITY_PER_PAGE;
@@ -8596,6 +9027,10 @@ function main() {
         uconn ? "OK" : "NO",
         ucur  ? "OK" : "NO",
         uloop_mod ? "OK" : "NO"));
+
+    // Настройки панели живут в параметрах модуля и после перезагрузки
+    // сбросились бы: восстанавливаем выбранное.
+    gset_apply_all();
 
     // Wait for lcd_drv splash logo
     system("sleep 3");
@@ -8795,6 +9230,7 @@ function main() {
             data_t.set(T.data * 1000);
         });
 
+
         // Touch polling (every 100ms)
         let touch_t, term_null = 0;
         touch_t = uloop_mod.timer(100, function() {
@@ -8806,8 +9242,25 @@ function main() {
                 st.ltch = time();
                 if (st.screen != "active")
                     set_screen("active");
-                else if (!t.move || st.page == "iconedit" || st.page == "term")
-                    handle_touch(t.x, t.y, t.move ?? false);
+                else if (!t.move || st.page == "iconedit" || st.page == "term") {
+                    // Тачскрин резистивный и дребезжит: одно нажатие нередко
+                    // приходит дважды подряд, и страницы листались через одну
+                    // по всему интерфейсу. Гасим повтор, если он пришёл в
+                    // пределах 250мс и почти в ту же точку. Рисование в
+                    // редакторе и терминал не трогаем - там важен каждый тик.
+                    let drop = false;
+                    if (!t.move && st.page != "iconedit" && st.page != "term") {
+                        let c = clock(true);
+                        let ms = c[0] * 1000 + int(c[1] / 1000000);
+                        let dx = t.x - (st.tap_x ?? -999); if (dx < 0) dx = -dx;
+                        let dy = t.y - (st.tap_y ?? -999); if (dy < 0) dy = -dy;
+                        if (st.tap_t != null && (ms - st.tap_t) < 250 &&
+                            dx < 24 && dy < 24)
+                            drop = true;
+                        st.tap_t = ms; st.tap_x = t.x; st.tap_y = t.y;
+                    }
+                    if (!drop) handle_touch(t.x, t.y, t.move ?? false);
+                }
             } else {
                 // Палец оторван - взводим редактор (теперь холст можно рисовать).
                 if (st.page == "iconedit") ed_armed = true;
