@@ -23,6 +23,7 @@
 #include <sys/select.h>
 #include <time.h>
 #include <sys/file.h>
+#include <signal.h>
 
 static int fd;
 static unsigned char rx_ack, tx_num;
@@ -145,6 +146,14 @@ static int frame_body(const unsigned char *f, int m, const unsigned char **body)
         }
     }
     return 0;
+}
+
+static volatile int stop_flag;
+
+static void on_term(int sig)
+{
+    (void)sig;
+    stop_flag = 1;
 }
 
 static int port_open(const char *dev)
@@ -449,7 +458,7 @@ int main(int argc, char **argv)
        networkInit - как и сканы. */
     int scanning = !strcmp(cmd, "escan") || !strcmp(cmd, "ascan")
                 || !strcmp(cmd, "tone") || !strcmp(cmd, "listen")
-                || !strcmp(cmd, "send");
+                || !strcmp(cmd, "send") || !strcmp(cmd, "beacon");
     if (!scanning) {
         init = network_init();
         /* Стеку нужно мгновение, чтобы доложить о поднятой сети. */
@@ -483,6 +492,105 @@ int main(int argc, char **argv)
                 key[i] = (unsigned char)strtol(b, NULL, 16);
             }
         form(pan, ch, pw, key);
+    } else if (!strcmp(cmd, "beacon")) {
+        /* Фоновый маячок: слушаем канал и раз в период кричим своё имя.
+           Услышанных соседей складываем в JSON для страницы «Соседи».
+           Стек не поднимаем - заводская библиотека работает только на спящем. */
+        int ch = argc > 2 ? atoi(argv[2]) : 20;
+        int period = argc > 3 ? atoi(argv[3]) : 10;
+        const char *me = argc > 4 ? argv[4] : "almond";
+        const char *out = getenv("ZIG_PEERS") ? getenv("ZIG_PEERS") : "/tmp/lcd_zig_peers.json";
+        unsigned char pl[128], d[130];
+        int r_start = -1, r_ch = -1;
+
+        signal(SIGTERM, on_term);
+        signal(SIGINT, on_term);
+
+        d[0] = 1;
+        ezsp_cmd(0x83, d, 1);
+        for (int i = 0; i < 6; i++) {
+            int pn = ezsp_read(pl, sizeof pl, 600);
+            if (pn >= 4 && pl[2] == 0x83) { r_start = pl[3]; break; }
+        }
+        d[0] = (unsigned char)ch;
+        ezsp_cmd(0x8A, d, 1);
+        for (int i = 0; i < 6; i++) {
+            int pn = ezsp_read(pl, sizeof pl, 600);
+            if (pn >= 4 && pl[2] == 0x8A) { r_ch = pl[3]; break; }
+        }
+        d[0] = 0; d[1] = 3;
+        ezsp_cmd(0x8C, d, 2);
+        ezsp_read(pl, sizeof pl, 400);
+        if (r_start != 0 || r_ch != 0) {
+            printf("{\"ok\":0,\"start\":%d,\"channel\":%d}\n", r_start, r_ch);
+            return 1;
+        }
+
+        struct { char name[24]; int rssi, lqi; long seen; int seq; } pr[8];
+        int npr = 0;
+        memset(pr, 0, sizeof pr);
+        long last_tx = 0, last_save = 0;
+        int seq = 0;
+        while (!stop_flag) {
+            long now = (long)time(NULL);
+            if (now - last_tx >= period) {
+                last_tx = now;
+                int tl = (int)strlen(me);
+                if (tl > 20) tl = 20;
+                d[0] = (unsigned char)(tl + 4);
+                d[1] = 0x41;
+                d[2] = (unsigned char)seq++;
+                memcpy(d + 3, me, tl);
+                d[3 + tl] = 0; d[4 + tl] = 0;
+                ezsp_cmd(0x89, d, tl + 5);
+                for (int i = 0; i < 3; i++) {
+                    int pn = ezsp_read(pl, sizeof pl, 200);
+                    if (pn >= 4 && pl[2] == 0x89) break;
+                }
+            }
+            int pn = ezsp_read(pl, sizeof pl, 700);
+            if (pn >= 8 && pl[2] == 0x8E && pl[6] == 0x41) {
+                int lqi = pl[3], rssi = (signed char)pl[4], len = pl[5];
+                int tl = len - 4;
+                if (tl > 20) tl = 20;
+                char nm[24];
+                int k = 0;
+                for (; k < tl && 8 + k < pn; k++) {
+                    unsigned char c = pl[8 + k];
+                    nm[k] = (c >= 32 && c < 127) ? (char)c : '.';
+                }
+                nm[k] = 0;
+                if (k > 0 && strcmp(nm, me) != 0) {
+                    int idx = -1;
+                    for (int j = 0; j < npr; j++) if (!strcmp(pr[j].name, nm)) idx = j;
+                    if (idx < 0 && npr < 8) { idx = npr++; snprintf(pr[idx].name, sizeof pr[idx].name, "%s", nm); }
+                    if (idx >= 0) {
+                        pr[idx].rssi = rssi;
+                        pr[idx].lqi = lqi;
+                        pr[idx].seen = (long)time(NULL);
+                        pr[idx].seq = pl[7];
+                    }
+                }
+            }
+            now = (long)time(NULL);
+            if (now - last_save >= 2) {
+                last_save = now;
+                char tmp[128];
+                snprintf(tmp, sizeof tmp, "%s.tmp", out);
+                FILE *f = fopen(tmp, "w");
+                if (f) {
+                    fprintf(f, "{\"ok\":1,\"me\":\"%s\",\"ch\":%d,\"ts\":%ld,\"peers\":[", me, ch, now);
+                    for (int j = 0; j < npr; j++)
+                        fprintf(f, "%s{\"name\":\"%s\",\"rssi\":%d,\"lqi\":%d,\"age\":%ld}",
+                                j ? "," : "", pr[j].name, pr[j].rssi, pr[j].lqi, now - pr[j].seen);
+                    fprintf(f, "]}\n");
+                    fclose(f);
+                    rename(tmp, out);
+                }
+            }
+        }
+        ezsp_cmd(0x84, NULL, 0);
+        ezsp_read(pl, sizeof pl, 400);
     } else if (!strcmp(cmd, "listen") || !strcmp(cmd, "send")) {
         /* Заводская библиотека умеет и передавать, и принимать сырые пакеты в
            том же диапазоне. Стек для этого не нужен - а он у нас и не передаёт. */

@@ -397,6 +397,11 @@ let TR_RU = {
     "Blink on SMS": "Мигать при SMS",
     "Widgets": "Виджеты",
     "Air": "Эфир",
+    "Peers": "Соседи",
+    "Beacon": "Маячок",
+    "every 10 sec": "раз в 10 с",
+    "no peers heard": "соседей не слышно",
+    "beacon off": "маячок выключен",
     "Networks": "Сети",
     "Scanning...": "Сканирую...",
     "quietest": "тише всего",
@@ -5642,7 +5647,27 @@ function zig_cfg() {
         ch:    clampi(int(+g("channel", 15)), 11, 26),
         power: clampi(int(+g("power", 8)), -8, 20),
         key:   g("key", "30313233343536373839404142434445"),
+        beacon: g("beacon", "0") == "1",
     };
+}
+
+let ZIG_PEERS = "/tmp/lcd_zig_peers.json";
+
+function zig_name() {
+    let v = ucur ? ucur.get("system", "@system[0]", "hostname") : null;
+    return (v == null || v == "") ? "almond" : v;
+}
+
+function zig_beacon_stop() {
+    system("killall almond3s-zig >/dev/null 2>&1");
+}
+
+function zig_beacon_start() {
+    let c = zig_cfg();
+    if (!c.beacon) return;
+    zig_beacon_stop();
+    system(sprintf("setsid %s beacon %d 10 %s >/dev/null 2>&1 </dev/null &",
+                   ZIG_BIN, c.ch, zig_name()));
 }
 
 function zig_set(k, v) {
@@ -5687,8 +5712,9 @@ function zig_btn(i) {
 function draw_zigbee_page() {
     lcd_clear(C.bg);
     draw_header(tr("Zigbee"));
-    st.zig ??= { mode: "escan" };
-    let z = st.zig, cfg = zig_cfg();
+    let cfg = zig_cfg();
+    st.zig ??= { mode: cfg.beacon ? "peers" : "escan" };
+    let z = st.zig;
 
     let info = zig_json(ZIG_INFO);
     let head = info?.ok ? sprintf("EM357  EZSP v%d  %s", info.ezsp, info.stack ?? "")
@@ -5702,6 +5728,7 @@ function draw_zigbee_page() {
     let ay = GY + 32, ah = BACK_Y - 44 - ay;
     lcd_rect(GX, ay, GW, ah, C.widget);
 
+    if (!zig_busy() && st.zig?.restart) { st.zig.restart = false; zig_beacon_start(); }
     if (zig_busy()) {
         lcd_text(GX + int((GW - tlen(tr("Scanning...")) * 12) / 2), ay + int(ah / 2) - 7,
                  tr("Scanning..."), C.cyan, C.widget, 2);
@@ -5736,26 +5763,34 @@ function draw_zigbee_page() {
                      best.ch, best.rssi), C.green, C.widget, 1);
         }
     } else {
-        let d = zig_json(ZIG_ASCAN);
-        let nets = type(d?.networks) == "array" ? d.networks : [];
-        lcd_text(GX + 12, ay + 6, tr("Networks"), C.gray, C.widget, 1);
-        if (length(nets) == 0) {
-            lcd_text(GX + 12, ay + 24, tr("no networks found"), C.dim, C.widget, 1);
+        let d = zig_json(ZIG_PEERS);
+        let peers = type(d?.peers) == "array" ? d.peers : [];
+        let on = zig_cfg().beacon;
+        lcd_text(GX + 12, ay + 6, on ? sprintf("%s: %s, %s %d", tr("Beacon"), d?.me ?? zig_name(),
+                 tr("Channel"), d?.ch ?? zig_cfg().ch) : tr("beacon off"),
+                 on ? C.green : C.dim, C.widget, 1);
+        if (length(peers) == 0) {
+            lcd_text(GX + 12, ay + 26, on ? tr("no peers heard") : tr("off"), C.dim, C.widget, 2);
         } else {
-            for (let i = 0; i < length(nets) && i < 5; i++) {
-                let n = nets[i], y = ay + 22 + i * 18;
-                lcd_text(GX + 12, y, sprintf("PAN %04X", n.pan), C.white, C.widget, 1);
-                lcd_text(GX + 90, y, sprintf("%s %d", tr("Channel"), n.ch), C.gray, C.widget, 1);
-                lcd_text(GX + 170, y, sprintf("LQI %d", n.lqi), C.gray, C.widget, 1);
-                lcd_text(GX + 240, y, sprintf("%d dBm", n.rssi), C.cyan, C.widget, 1);
+            for (let i = 0; i < length(peers) && i < 5; i++) {
+                let n = peers[i], y = ay + 24 + i * 20;
+                let fresh = int(+(n.age ?? 999)) < 30;
+                lcd_text(GX + 12, y, tcut(n.name ?? "?", 14), fresh ? C.white : C.dim, C.widget, 1);
+                let bw = 60, fill = clampi(int(+(n.lqi ?? 0)) * bw / 255, 0, bw);
+                lcd_rect(GX + 110, y, bw, 7, C.btn);
+                if (fill > 0) lcd_rect(GX + 110, y, fill, 7, fresh ? C.green : C.dim);
+                lcd_text(GX + 180, y, sprintf("%d dBm", int(+(n.rssi ?? 0))),
+                         fresh ? C.cyan : C.dim, C.widget, 1);
+                lcd_text(GX + 250, y, sprintf("%d %s", int(+(n.age ?? 0)), tr("sec")),
+                         C.dim, C.widget, 1);
             }
         }
     }
 
-    let labels = [ tr("Air"), tr("Networks"), tr("Settings") ];
+    let labels = [ tr("Air"), tr("Peers"), tr("Settings") ];
     for (let i = 0; i < 3; i++) {
         let b = zig_btn(i);
-        let on = (i == 0 && z.mode == "escan") || (i == 1 && z.mode == "ascan");
+        let on = (i == 0 && z.mode == "escan") || (i == 1 && z.mode == "peers");
         lcd_rect(b.x, b.y, b.w, b.h, C.widget);
         lcd_rect(b.x, b.y, 3, b.h, on ? C.green : C.border);
         lcd_text(b.x + int((b.w - tlen(labels[i]) * 6) / 2), b.y + 12, labels[i],
@@ -5791,6 +5826,14 @@ function draw_zigset_page() {
         [ tr("Channel"), sprintf("%d", c.ch) ],
         [ tr("TX power"), sprintf("%d dBm", c.power) ],
     ];
+    let bb = zigset_row(3);
+    lcd_rect(bb.x, bb.y, bb.w, bb.h, C.widget);
+    lcd_rect(bb.x, bb.y, 3, bb.h, c.beacon ? C.green : C.dim);
+    lcd_text(bb.x + 12, bb.y + 11, tr("Beacon"), C.gray, C.widget, 1);
+    lcd_text(bb.x + 100, bb.y + 8, c.beacon ? tr("on") : tr("off"),
+             c.beacon ? C.green : C.gray, C.widget, 2);
+    lcd_text(bb.x + bb.w - 11 - tlen(tr("every 10 sec")) * 6, bb.y + 11,
+             tr("every 10 sec"), C.dim, C.widget, 1);
     for (let i = 0; i < length(rows); i++) {
         let r = zigset_row(i);
         lcd_rect(r.x, r.y, r.w, r.h, C.widget);
@@ -5812,7 +5855,7 @@ function draw_zigset_page() {
     else if (stt?.state == 2)
         hint = sprintf("%s: PAN %04X, %s %d, %s", tr("own network"), stt.pan,
                        tr("Channel"), stt.ch, stt.node == 1 ? "координатор" : "узел");
-    lcd_text(GX + 12, GY + 3 * 34 + 8, hint, C.dim, C.bg, 1);
+    lcd_text(GX + 12, BACK_Y - 48, hint, C.dim, C.bg, 1);
 
     let names = [ tr("Form network"), tr("Leave network") ];
     for (let i = 0; i < 2; i++) {
@@ -7491,9 +7534,9 @@ function page_sig() {
         return base + sprintf("|%d|%d", f ? f.mtime : 0, st.zig?.form_msg ? 1 : 0);
     }
     if (st.page == "zigbee") {
-        let e = fs.stat(ZIG_ESCAN), a = fs.stat(ZIG_ASCAN);
+        let e = fs.stat(ZIG_ESCAN), pf = fs.stat(ZIG_PEERS);
         return base + sprintf("|%s|%d|%d|%d", st.zig?.mode ?? "escan",
-                              zig_busy() ? 1 : 0, e ? e.mtime : 0, a ? a.mtime : 0);
+                              zig_busy() ? 1 : 0, e ? e.mtime : 0, pf ? pf.mtime : 0);
     }
     switch (st.page) {
     case "dashboard":
@@ -8669,8 +8712,12 @@ function handle_touch(tx, ty, tmove) {
                 go_page("zigset");
                 return;
             }
-            st.zig.mode = (i == 0) ? "escan" : "ascan";
-            zig_run(st.zig.mode, i == 0 ? ZIG_ESCAN : ZIG_ASCAN, i == 0 ? "3" : "5");
+            if (i == 1) { st.zig.mode = "peers"; draw_zigbee_page(); return; }
+            st.zig.mode = "escan";
+            // Скан держит порт, поэтому маячок на время глушим и поднимаем после.
+            zig_beacon_stop();
+            zig_run("escan", ZIG_ESCAN, "3");
+            st.zig.restart = true;
             draw_zigbee_page();
             return;
         }
@@ -8695,6 +8742,16 @@ function handle_touch(tx, ty, tmove) {
             }
             draw_zigset_page();
             return;
+        }
+        {
+            let bb = zigset_row(3);
+            if (in_rect(tx, ty, bb.x, bb.y, bb.w, bb.h)) {
+                let on = !c.beacon;
+                zig_set("beacon", on ? 1 : 0);
+                if (on) zig_beacon_start(); else zig_beacon_stop();
+                draw_zigset_page();
+                return;
+            }
         }
         for (let i = 0; i < 2; i++) {
             let b = zigset_act(i);
@@ -10089,6 +10146,7 @@ function main() {
     refresh_data();
     st.alarm_on = alarm_is_on();   // статус-иконка будильника с первого кадра
     st.vpn_on = clash_running();   // и значок VPN тоже - до первого кадра
+    zig_beacon_start();            // маячок Zigbee, если включён в настройках
     // Стек Zigbee после сброса чипа (в том числе по питанию) спит, пока ему не
     // скажут networkInit. Поднятая сеть иначе перестаёт отвечать на запросы
     // маяка, и соседи её не видят. Делаем это фоном при старте службы.
