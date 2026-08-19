@@ -78,11 +78,13 @@ static void mask_data(unsigned char *d, int n)
 
 static void ezsp_cmd(unsigned char frame_id, const unsigned char *par, int parlen)
 {
+    if (parlen < 0) parlen = 0;
+    if (parlen > 160) parlen = 160;
     static unsigned char seq;
-    unsigned char body[128];
+    unsigned char body[192];
     int n = 0;
     body[n++] = (unsigned char)(((tx_num & 7) << 4) | (rx_ack & 7));
-    unsigned char pl[64];
+    unsigned char pl[176];
     int pn = 0;
     pl[pn++] = seq++;
     pl[pn++] = 0x00;
@@ -146,6 +148,93 @@ static int frame_body(const unsigned char *f, int m, const unsigned char **body)
         }
     }
     return 0;
+}
+
+/* --- Телеметрия в эфир ---------------------------------------------------
+ * Кладём поля записями [id, длина, значение] - компактно, но с однозначным
+ * соответствием ZCL: у каждого id в контракте прописан свой кластер и атрибут
+ * (батарея - 0x0001/0x0021, температура - 0x0402/0x0000, остальное в
+ * производительском 0xFC00). Если чип однажды заговорит по стандарту, отчёты
+ * соберутся из тех же записей без смены формата.
+ */
+#define T_SIG 0x01
+#define T_RSRP 0x02
+#define T_BATT 0x03
+#define T_CHG 0x04
+#define T_CPU 0x05
+#define T_MEM 0x06
+#define T_DISK 0x07
+#define T_UP 0x08
+#define T_WIFI 0x09
+#define T_PING 0x0A
+#define T_SMS 0x0B
+#define T_RX 0x0C
+#define T_TX 0x0D
+#define T_TEMP 0x0E
+#define T_VPN 0x0F
+
+static const struct { unsigned char id; const char *key; int width; } TELE[] = {
+    { T_SIG, "sig", 1 }, { T_RSRP, "rsrp", 1 }, { T_BATT, "batt", 1 },
+    { T_CHG, "chg", 1 }, { T_CPU, "cpu", 1 }, { T_MEM, "mem", 1 },
+    { T_DISK, "disk", 1 }, { T_UP, "up", 2 }, { T_WIFI, "wifi", 1 },
+    { T_PING, "ping", 2 }, { T_SMS, "sms", 1 }, { T_RX, "rx", 4 },
+    { T_TX, "tx", 4 }, { T_TEMP, "temp", 1 }, { T_VPN, "vpn", 1 },
+};
+
+static long jnum(const char *buf, const char *key, long dflt)
+{
+    char pat[48];
+    snprintf(pat, sizeof pat, "\"%s\":", key);
+    const char *p = strstr(buf, pat);
+    if (!p) return dflt;
+    p += strlen(pat);
+    while (*p == ' ' || *p == '"') p++;
+    return strtol(p, NULL, 10);
+}
+
+static int tele_pack(unsigned char *out, int max)
+{
+    char buf[1024];
+    const char *path = getenv("ZIG_TELE") ? getenv("ZIG_TELE") : "/tmp/lcd_zig_tele.json";
+    FILE *f = fopen(path, "r");
+    int n = 0;
+    if (!f) return 0;
+    size_t got = fread(buf, 1, sizeof buf - 1, f);
+    buf[got] = 0;
+    fclose(f);
+    for (unsigned i = 0; i < sizeof TELE / sizeof TELE[0]; i++) {
+        long v = jnum(buf, TELE[i].key, 0x7FFFFFFF);
+        if (v == 0x7FFFFFFF) continue;
+        if (n + 2 + TELE[i].width > max) break;
+        out[n++] = TELE[i].id;
+        out[n++] = (unsigned char)TELE[i].width;
+        for (int b = 0; b < TELE[i].width; b++)
+            out[n++] = (unsigned char)((v >> (8 * b)) & 0xFF);
+    }
+    return n;
+}
+
+/* Разбор принятой телеметрии в JSON для интерфейса. */
+static void tele_unpack(const unsigned char *in, int n, char *out, int max)
+{
+    int off = 0, first = 1;
+    out[0] = 0;
+    for (int i = 0; i + 2 <= n; ) {
+        int id = in[i], w = in[i + 1];
+        if (w < 1 || w > 4 || i + 2 + w > n) break;
+        long v = 0;
+        for (int b = 0; b < w; b++) v |= (long)in[i + 2 + b] << (8 * b);
+        if (w == 1 && (id == T_RSRP || id == T_TEMP)) v = (signed char)v;
+        if (w == 2 && v > 32767) v -= 65536;
+        const char *key = NULL;
+        for (unsigned k = 0; k < sizeof TELE / sizeof TELE[0]; k++)
+            if (TELE[k].id == id) key = TELE[k].key;
+        if (key)
+            off += snprintf(out + off, max - off, "%s\"%s\":%ld", first ? "" : ",", key, v),
+            first = 0;
+        i += 2 + w;
+        if (off > max - 24) break;
+    }
 }
 
 static volatile int stop_flag;
@@ -518,15 +607,17 @@ int main(int argc, char **argv)
             int pn = ezsp_read(pl, sizeof pl, 600);
             if (pn >= 4 && pl[2] == 0x8A) { r_ch = pl[3]; break; }
         }
-        d[0] = 0; d[1] = 3;
-        ezsp_cmd(0x8C, d, 2);
-        ezsp_read(pl, sizeof pl, 400);
         if (r_start != 0 || r_ch != 0) {
             printf("{\"ok\":0,\"start\":%d,\"channel\":%d}\n", r_start, r_ch);
             return 1;
         }
 
-        struct { char name[24]; int rssi, lqi; long seen; int seq; } pr[8];
+        /* Короткий адрес выводим из имени - лишь бы аппараты отличались. */
+        unsigned int myid = 0;
+        for (const char *q = me; *q; q++) myid = myid * 31u + (unsigned char)*q;
+        myid = (myid & 0x7FFF) | 0x0001;
+
+        struct { char name[24]; int rssi, lqi; long seen; int seq; char tele[320]; } pr[8];
         int npr = 0;
         memset(pr, 0, sizeof pr);
         long last_tx = 0, last_save = 0;
@@ -537,29 +628,84 @@ int main(int argc, char **argv)
                 last_tx = now;
                 int tl = (int)strlen(me);
                 if (tl > 20) tl = 20;
-                d[0] = (unsigned char)(tl + 4);
-                d[1] = 0x41;
-                d[2] = (unsigned char)seq++;
-                memcpy(d + 3, me, tl);
-                d[3 + tl] = 0; d[4 + tl] = 0;
-                ezsp_cmd(0x89, d, tl + 5);
+                unsigned char tele[80];
+                int tn = tele_pack(tele, sizeof tele);
+                /* Кадр 802.15.4: без заголовка радио приёмника фильтрует
+                   пакет по мусору в первых байтах. FCF = кадр данных со
+                   сжатым PAN, адреса короткие, получатель широковещательный. */
+                int n = 0;
+                unsigned char body[128];
+                body[n++] = 0x41;                       /* FCF: данные, сжатый PAN */
+                body[n++] = 0x88;                       /* FCF: адреса короткие */
+                body[n++] = (unsigned char)seq++;
+                body[n++] = 0xFF; body[n++] = 0xFF;     /* PAN получателя: всем */
+                body[n++] = 0xFF; body[n++] = 0xFF;     /* кому: всем */
+                body[n++] = (unsigned char)(myid & 0xFF);
+                body[n++] = (unsigned char)((myid >> 8) & 0xFF);
+                body[n++] = 0x41;                       /* наша метка полезной части */
+                body[n++] = 0x01;                       /* версия формата */
+                body[n++] = (unsigned char)tl;
+                memcpy(body + n, me, tl); n += tl;
+                memcpy(body + n, tele, tn); n += tn;
+                body[n++] = 0; body[n++] = 0;           /* место под CRC радио */
+                d[0] = (unsigned char)n;
+                memcpy(d + 1, body, n);
+                ezsp_cmd(0x89, d, n + 1);
+
                 for (int i = 0; i < 3; i++) {
                     int pn = ezsp_read(pl, sizeof pl, 200);
-                    if (pn >= 4 && pl[2] == 0x89) break;
+                    if (pn >= 4 && pl[2] == 0x89) {
+                        if (getenv("ZIG_DEBUG"))
+                            fprintf(stderr, "маячок: длина %d -> статус %d\n", n, pl[3]);
+                        break;
+                    }
                 }
+                /* После передачи приёмник глохнет: поднимаем библиотеку заново
+                   с включённым обратным вызовом и возвращаем канал. */
+                int s_end = -1, s_start = -1, s_ch = -1;
+                ezsp_cmd(0x84, NULL, 0);
+                for (int i = 0; i < 3; i++) {
+                    int pn = ezsp_read(pl, sizeof pl, 300);
+                    if (pn >= 4 && pl[2] == 0x84) { s_end = pl[3]; break; }
+                }
+                d[0] = 1;
+                ezsp_cmd(0x83, d, 1);
+                for (int i = 0; i < 3; i++) {
+                    int pn = ezsp_read(pl, sizeof pl, 300);
+                    if (pn >= 4 && pl[2] == 0x83) { s_start = pl[3]; break; }
+                }
+                d[0] = (unsigned char)ch;
+                ezsp_cmd(0x8A, d, 1);
+                for (int i = 0; i < 3; i++) {
+                    int pn = ezsp_read(pl, sizeof pl, 300);
+                    if (pn >= 4 && pl[2] == 0x8A) { s_ch = pl[3]; break; }
+                }
+                if (getenv("ZIG_DEBUG"))
+                    fprintf(stderr, "возврат в приём: end=%d start=%d ch=%d\n",
+                            s_end, s_start, s_ch);
             }
             int pn = ezsp_read(pl, sizeof pl, 700);
-            if (pn >= 8 && pl[2] == 0x8E && pl[6] == 0x41) {
+            if (pn > 0 && getenv("ZIG_DEBUG"))
+                fprintf(stderr, "приём: pn=%d id=0x%02X метка=0x%02X len=%d\n",
+                        pn, pn > 2 ? pl[2] : 0, pn > 6 ? pl[6] : 0, pn > 5 ? pl[5] : 0);
+            /* Кадр: [lqi, rssi, длина] + MAC-заголовок 9 байт + наша часть */
+            if (pn >= 21 && pl[2] == 0x8E && pl[6] == 0x41 && pl[7] == 0x88
+                && pl[15] == 0x41) {
                 int lqi = pl[3], rssi = (signed char)pl[4], len = pl[5];
-                int tl = len - 4;
-                if (tl > 20) tl = 20;
+                int tl = pl[17];
+                if (tl < 0 || tl > 20) tl = 0;
                 char nm[24];
                 int k = 0;
-                for (; k < tl && 8 + k < pn; k++) {
-                    unsigned char c = pl[8 + k];
+                for (; k < tl && 18 + k < pn; k++) {
+                    unsigned char c = pl[18 + k];
                     nm[k] = (c >= 32 && c < 127) ? (char)c : '.';
                 }
                 nm[k] = 0;
+                char mj[320];
+                int tstart = 18 + tl, tlen = len - 14 - tl;
+                if (tlen < 0) tlen = 0;
+                if (tstart + tlen > pn) tlen = pn - tstart;
+                tele_unpack(pl + tstart, tlen, mj, sizeof mj);
                 if (k > 0 && strcmp(nm, me) != 0) {
                     int idx = -1;
                     for (int j = 0; j < npr; j++) if (!strcmp(pr[j].name, nm)) idx = j;
@@ -569,6 +715,7 @@ int main(int argc, char **argv)
                         pr[idx].lqi = lqi;
                         pr[idx].seen = (long)time(NULL);
                         pr[idx].seq = pl[7];
+                        snprintf(pr[idx].tele, sizeof pr[idx].tele, "%s", mj);
                     }
                 }
             }
@@ -581,8 +728,9 @@ int main(int argc, char **argv)
                 if (f) {
                     fprintf(f, "{\"ok\":1,\"me\":\"%s\",\"ch\":%d,\"ts\":%ld,\"peers\":[", me, ch, now);
                     for (int j = 0; j < npr; j++)
-                        fprintf(f, "%s{\"name\":\"%s\",\"rssi\":%d,\"lqi\":%d,\"age\":%ld}",
-                                j ? "," : "", pr[j].name, pr[j].rssi, pr[j].lqi, now - pr[j].seen);
+                        fprintf(f, "%s{\"name\":\"%s\",\"rssi\":%d,\"lqi\":%d,\"age\":%ld,\"m\":{%s}}",
+                                j ? "," : "", pr[j].name, pr[j].rssi, pr[j].lqi,
+                                now - pr[j].seen, pr[j].tele);
                     fprintf(f, "]}\n");
                     fclose(f);
                     rename(tmp, out);
@@ -647,6 +795,11 @@ int main(int argc, char **argv)
                 int pn = ezsp_read(pl, sizeof pl, 900);
                 if (pn >= 6 && pl[2] == 0x8E) {
                     int lqi = pl[3], rssi = (signed char)pl[4], len = pl[5];
+                    if (getenv("ZIG_DEBUG")) {
+                        fprintf(stderr, "сырой кадр (pn=%d, len=%d):", pn, len);
+                        for (int k = 6; k < pn && k < 40; k++) fprintf(stderr, " %02X", pl[k]);
+                        fprintf(stderr, "\n");
+                    }
                     char txt[64] = "";
                     int show = len > 2 ? len - 2 : 0;      /* хвост - CRC радио */
                     for (int k = 0; k < show && k < 40 && 6 + k < pn; k++) {
