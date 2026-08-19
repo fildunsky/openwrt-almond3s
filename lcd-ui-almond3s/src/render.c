@@ -303,9 +303,12 @@ static int fb_kern(const uint8_t *gp, const uint8_t *gc)
 {
     int row, best = 1;
     for (row = 0; row < 7; row++) {
+        unsigned mask = 1u << row;
         int pr = -1, cl = 5, col;
-        for (col = 4; col >= 0; col--) if (gp[col] & (1 << row)) { pr = col; break; }
-        for (col = 0; col < 5; col++)  if (gc[col] & (1 << row)) { cl = col; break; }
+        if (row > 0) mask |= 1u << (row - 1);
+        if (row < 6) mask |= 1u << (row + 1);
+        for (col = 4; col >= 0; col--) if (gp[col] & mask) { pr = col; break; }
+        for (col = 0; col < 5; col++)  if (gc[col] & mask) { cl = col; break; }
         if (pr < 0 || cl > 4) continue;
         if ((6 + cl) - pr - 2 < best) best = (6 + cl) - pr - 2;
     }
