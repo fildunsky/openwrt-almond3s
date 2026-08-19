@@ -236,6 +236,23 @@ static int network_init(void)
     return -1;
 }
 
+/* Настройки стека живут только до сброса чипа, а сбрасываем мы его каждым
+   запуском - значит выставляем заново. Профиль по умолчанию 0, и с ним стек
+   не умеет ZigBee PRO: запрос маяка не уходит в эфир. */
+static int set_cfg(int id, int val)
+{
+    unsigned char pl[64], d[3];
+    d[0] = (unsigned char)id;
+    d[1] = (unsigned char)(val & 0xFF);
+    d[2] = (unsigned char)((val >> 8) & 0xFF);
+    ezsp_cmd(0x53, d, 3);
+    for (int i = 0; i < 6; i++) {
+        int pn = ezsp_read(pl, sizeof pl, 600);
+        if (pn >= 4 && pl[2] == 0x53) return pl[3];
+    }
+    return -1;
+}
+
 static void die(const char *msg)
 {
     printf("{\"ok\":0,\"error\":\"%s\"}\n", msg);
@@ -255,9 +272,15 @@ static int scan(int active, int duration, unsigned int mask)
 
     int first = 1, done = 0, items = 0;
     printf("{\"ok\":1,\"%s\":[", active ? "networks" : "channels");
+    int dbg = getenv("ZIG_DEBUG") != NULL;
     for (int i = 0; i < 160 && !done; i++) {
         int pn = ezsp_read(pl, sizeof pl, 500);
         if (!pn) continue;
+        if (dbg) {
+            fprintf(stderr, "кадр id=0x%02X len=%d:", pl[2], pn);
+            for (int k = 0; k < pn && k < 24; k++) fprintf(stderr, " %02X", pl[k]);
+            fprintf(stderr, "\n");
+        }
         if (!active && pn >= 5 && pl[2] == 0x48) {
             printf("%s{\"ch\":%d,\"rssi\":%d}", first ? "" : ",", pl[3], (signed char)pl[4]);
             first = 0;
@@ -389,6 +412,9 @@ int main(int argc, char **argv)
     int proto = 0, stype = 0, sver = 0;
     if (!ezsp_version(&proto, &stype, &sver)) die("нет ответа EZSP");
 
+    int prof = set_cfg(0x0C, 2);      /* stack profile: ZigBee PRO */
+    set_cfg(0x0D, 5);                 /* security level */
+
     int init = -1;
     int scanning = !strcmp(cmd, "escan") || !strcmp(cmd, "ascan");
     if (!scanning) {
@@ -402,13 +428,15 @@ int main(int argc, char **argv)
 
     if (!strcmp(cmd, "info")) {
         printf("{\"ok\":1,\"ash\":%d,\"reset\":%d,\"ezsp\":%d,\"stack_type\":%d,"
-               "\"netinit\":%d,\"stack\":\"%d.%d.%d.%d\"}\n",
-               ver, reason, proto, stype, init,
+               "\"netinit\":%d,\"profile\":%d,\"stack\":\"%d.%d.%d.%d\"}\n",
+               ver, reason, proto, stype, init, prof,
                (sver >> 12) & 15, (sver >> 8) & 15, (sver >> 4) & 15, sver & 15);
     } else if (!strcmp(cmd, "escan")) {
-        scan(0, argc > 2 ? atoi(argv[2]) : 3, 0x07FFF800u);
+        unsigned int mk = argc > 3 ? (1u << atoi(argv[3])) : 0x07FFF800u;
+        scan(0, argc > 2 ? atoi(argv[2]) : 3, mk);
     } else if (!strcmp(cmd, "ascan")) {
-        scan(1, argc > 2 ? atoi(argv[2]) : 5, 0x07FFF800u);
+        unsigned int mk = argc > 3 ? (1u << atoi(argv[3])) : 0x07FFF800u;
+        scan(1, argc > 2 ? atoi(argv[2]) : 5, mk);
     } else if (!strcmp(cmd, "form")) {
         int pan = argc > 2 ? (int)strtol(argv[2], NULL, 0) : 0x1A2B;
         int ch  = argc > 3 ? atoi(argv[3]) : 15;
@@ -421,6 +449,86 @@ int main(int argc, char **argv)
                 key[i] = (unsigned char)strtol(b, NULL, 16);
             }
         form(pan, ch, pw, key);
+    } else if (!strcmp(cmd, "cfg")) {
+        /* getConfigurationValue по всем идентификаторам: ищем нули там, где
+           стеку нужны буферы и профиль - без них передача невозможна. */
+        unsigned char pl[64], d[1];
+        printf("{\"ok\":1,\"cfg\":[");
+        int first = 1;
+        for (int id = 0; id <= 0x35; id++) {
+            d[0] = (unsigned char)id;
+            ezsp_cmd(0x52, d, 1);
+            for (int i = 0; i < 4; i++) {
+                int pn = ezsp_read(pl, sizeof pl, 400);
+                if (pn >= 6 && pl[2] == 0x52) {
+                    if (pl[3] == 0) {
+                        printf("%s{\"id\":%d,\"v\":%d}", first ? "" : ",",
+                               id, pl[4] | (pl[5] << 8));
+                        first = 0;
+                    }
+                    break;
+                }
+            }
+        }
+        printf("]}\n");
+    } else if (!strcmp(cmd, "setcfg")) {
+        unsigned char pl[64], d[3];
+        int id = argc > 2 ? (int)strtol(argv[2], NULL, 0) : 0;
+        int val = argc > 3 ? (int)strtol(argv[3], NULL, 0) : 0;
+        int stt = -1;
+        d[0] = (unsigned char)id;
+        d[1] = (unsigned char)(val & 0xFF);
+        d[2] = (unsigned char)((val >> 8) & 0xFF);
+        ezsp_cmd(0x53, d, 3);
+        for (int i = 0; i < 6; i++) {
+            int pn = ezsp_read(pl, sizeof pl, 600);
+            if (pn >= 4 && pl[2] == 0x53) { stt = pl[3]; break; }
+        }
+        printf("{\"ok\":%d,\"id\":%d,\"v\":%d,\"status\":%d}\n",
+               stt == 0 ? 1 : 0, id, val, stt);
+    } else if (!strcmp(cmd, "tone")) {
+        /* Заводская библиотека: включаем несущую на канале, чтобы проверить,
+           работает ли передатчик вообще (соседний аппарат ловит энергосканом). */
+        int ch = argc > 2 ? atoi(argv[2]) : 26;
+        int sec = argc > 3 ? atoi(argv[3]) : 10;
+        unsigned char pl[64], d[4];
+        int r_start = -1, r_ch = -1, r_pow = -1, r_tone = -1;
+        ezsp_cmd(0x83, (unsigned char[]){ 0 }, 1);
+        for (int i = 0; i < 6; i++) { int pn = ezsp_read(pl, sizeof pl, 600);
+            if (pn >= 4 && pl[2] == 0x83) { r_start = pl[3]; break; } }
+        d[0] = (unsigned char)ch;
+        ezsp_cmd(0x8A, d, 1);
+        for (int i = 0; i < 6; i++) { int pn = ezsp_read(pl, sizeof pl, 600);
+            if (pn >= 4 && pl[2] == 0x8A) { r_ch = pl[3]; break; } }
+        d[0] = 0; d[1] = 3;
+        ezsp_cmd(0x8C, d, 2);
+        for (int i = 0; i < 6; i++) { int pn = ezsp_read(pl, sizeof pl, 600);
+            if (pn >= 4 && pl[2] == 0x8C) { r_pow = pl[3]; break; } }
+        ezsp_cmd(0x85, NULL, 0);
+        for (int i = 0; i < 6; i++) { int pn = ezsp_read(pl, sizeof pl, 600);
+            if (pn >= 4 && pl[2] == 0x85) { r_tone = pl[3]; break; } }
+        printf("{\"ok\":%d,\"start\":%d,\"channel\":%d,\"power\":%d,\"tone\":%d,\"ch\":%d,\"sec\":%d}\n",
+               r_tone == 0 ? 1 : 0, r_start, r_ch, r_pow, r_tone, ch, sec);
+        time_t t0 = time(NULL);
+        while (time(NULL) - t0 < sec) ezsp_read(pl, sizeof pl, 500);
+        ezsp_cmd(0x86, NULL, 0);
+        ezsp_read(pl, sizeof pl, 600);
+        ezsp_cmd(0x84, NULL, 0);
+        ezsp_read(pl, sizeof pl, 600);
+    } else if (!strcmp(cmd, "hold")) {
+        /* Держим сеть поднятой и приём открытым заданное число секунд, не
+           закрывая порт: проверяем, не засыпает ли чип без хоста. */
+        int sec = argc > 2 ? atoi(argv[2]) : 30;
+        unsigned char pl[64], d1[1] = { 0xFF };
+        int pj = -1;
+        ezsp_cmd(0x22, d1, 1);
+        for (int i = 0; i < 6; i++) {
+            int pn = ezsp_read(pl, sizeof pl, 500);
+            if (pn >= 4 && pl[2] == 0x22) { pj = pl[3]; break; }
+        }
+        printf("{\"ok\":1,\"netinit\":%d,\"permit\":%d,\"hold\":%d}\n", init, pj, sec);
+        time_t t0 = time(NULL);
+        while (time(NULL) - t0 < sec) ezsp_read(pl, sizeof pl, 500);
     } else if (!strcmp(cmd, "state")) {
         state();
     } else if (!strcmp(cmd, "leave")) {
