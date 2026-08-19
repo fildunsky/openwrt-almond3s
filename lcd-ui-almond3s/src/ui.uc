@@ -398,6 +398,10 @@ let TR_RU = {
     "Widgets": "Виджеты",
     "Air": "Эфир",
     "Peers": "Соседи",
+    "Signal": "Сигнал",
+    "Key": "Ключ",
+    "plain": "без шифра",
+    "ms": "мс",
     "heard": "услышан",
     "link": "линк",
     "Beacon": "Маячок",
@@ -5702,10 +5706,20 @@ function zig_beacon_stop() {
     system("killall almond3s-zig >/dev/null 2>&1");
 }
 
+let ZIG_KEYFILE = "/tmp/.zig_key";
+
 function zig_beacon_start() {
     let c = zig_cfg();
     if (!c.beacon) return;
     zig_beacon_stop();
+    // Ключ эфира кладём в файл, а не в аргументы: аргументы видно всем в списке
+    // процессов. Пустой ключ - маячок работает открытым текстом.
+    if (length(c.key) >= 32) {
+        fs.writefile(ZIG_KEYFILE, substr(c.key, 0, 32) + "\n");
+        system("chmod 600 " + ZIG_KEYFILE + " 2>/dev/null");
+    } else {
+        fs.unlink(ZIG_KEYFILE);
+    }
     system(sprintf("setsid %s beacon %d 10 %s >/dev/null 2>&1 </dev/null &",
                    ZIG_BIN, c.ch, zig_name()));
 }
@@ -5875,7 +5889,7 @@ function draw_zigpeer_page() {
           int(+(m.chg ?? 0)) == 1 ? tr("charging") : tr("on battery") ],
         [ "CPU", m.cpu != null ? sprintf("%d%%", int(+m.cpu)) : "--",
           m.mem != null ? sprintf("%s %d%%", tr("Memory"), int(+m.mem)) : "" ],
-        [ tr("Ping"), m.ping != null ? sprintf("%d ms", int(+m.ping)) : "--",
+        [ tr("Ping"), m.ping != null ? sprintf("%d %s", int(+m.ping), tr("ms")) : "--",
           m.temp != null ? sprintf("%d°C", int(+m.temp)) : "" ],
         [ tr("Uptime short"), m.up != null ? fmt_uptime(int(+m.up) * 60) : "--",
           m.disk != null ? sprintf("%s %d%%", tr("Disk"), int(+m.disk)) : "" ],
@@ -5900,12 +5914,12 @@ function draw_zigpeer_page() {
 let ZIG_POWERS = [ -8, 0, 3, 8, 20 ];
 
 function zigset_row(i) {
-    return { x: GX, y: GY + i * 34, w: GW, h: 30 };
+    return { x: GX, y: GY + i * 27, w: GW, h: 24 };
 }
 
 function zigset_pm(i, plus) {
     let r = zigset_row(i);
-    return { x: plus ? r.x + r.w - 40 : r.x + r.w - 84, y: r.y + 2, w: 38, h: 26 };
+    return { x: plus ? r.x + r.w - 40 : r.x + r.w - 84, y: r.y + 1, w: 38, h: 24 };
 }
 
 function zigset_act(i) {
@@ -5925,17 +5939,17 @@ function draw_zigset_page() {
     let bb = zigset_row(3);
     lcd_rect(bb.x, bb.y, bb.w, bb.h, C.widget);
     lcd_rect(bb.x, bb.y, 3, bb.h, c.beacon ? C.green : C.dim);
-    lcd_text(bb.x + 12, bb.y + 11, tr("Beacon"), C.gray, C.widget, 1);
-    lcd_text(bb.x + 100, bb.y + 8, c.beacon ? tr("on") : tr("off"),
+    lcd_text(bb.x + 12, bb.y + 9, tr("Beacon"), C.gray, C.widget, 1);
+    lcd_text(bb.x + 100, bb.y + 6, c.beacon ? tr("on") : tr("off"),
              c.beacon ? C.green : C.gray, C.widget, 2);
-    lcd_text(bb.x + bb.w - 11 - tlen(tr("every 10 sec")) * 6, bb.y + 11,
+    lcd_text(bb.x + bb.w - 11 - tlen(tr("every 10 sec")) * 6, bb.y + 9,
              tr("every 10 sec"), C.dim, C.widget, 1);
     for (let i = 0; i < length(rows); i++) {
         let r = zigset_row(i);
         lcd_rect(r.x, r.y, r.w, r.h, C.widget);
         lcd_rect(r.x, r.y, 3, r.h, C.cyan);
-        lcd_text(r.x + 12, r.y + 11, rows[i][0], C.gray, C.widget, 1);
-        lcd_text(r.x + 100, r.y + 8, rows[i][1], C.white, C.widget, 2);
+        lcd_text(r.x + 12, r.y + 9, rows[i][0], C.gray, C.widget, 1);
+        lcd_text(r.x + 100, r.y + 6, rows[i][1], C.white, C.widget, 2);
         let m = zigset_pm(i, false), pl = zigset_pm(i, true);
         lcd_rect(m.x, m.y, m.w, m.h, C.btn);
         lcd_text(m.x + 15, m.y + 6, "-", C.accent, C.btn, 2);
@@ -5943,15 +5957,25 @@ function draw_zigset_page() {
         lcd_text(pl.x + 13, pl.y + 6, "+", C.accent, C.btn, 2);
     }
 
+    // Отпечаток ключа: по нему видно, совпадает ли он на двух аппаратах,
+    // и при этом сам ключ на экран не выводится.
+    let kb = zigset_row(4);
+    let kt = length(c.key) >= 32
+        ? sprintf("%s…%s", uc(substr(c.key, 0, 4)), uc(substr(c.key, 28, 4)))
+        : tr("plain");
+    lcd_rect(kb.x, kb.y, kb.w, kb.h, C.widget);
+    lcd_rect(kb.x, kb.y, 3, kb.h, length(c.key) >= 32 ? C.cyan : C.dim);
+    lcd_text(kb.x + 12, kb.y + 9, tr("Key"), C.gray, C.widget, 1);
+    lcd_text(kb.x + 100, kb.y + 6, kt, C.white, C.widget, 2);
+
     let stt = zig_json("/tmp/lcd_zig_state.json");
-    if (stt != null && st.zig?.form_msg && (time() - (st.zig.msg_ts ?? 0)) > 3)
+    if (st.zig?.form_msg && stt != null && (time() - (st.zig.msg_ts ?? 0)) > 3)
         st.zig.form_msg = null;
-    let hint = sprintf("%s: %s", tr("own network"), tr("off"));
-    if (st.zig?.form_msg) hint = st.zig.form_msg;
-    else if (stt?.state == 2)
-        hint = sprintf("%s: PAN %04X, %s %d, %s", tr("own network"), stt.pan,
-                       tr("Channel"), stt.ch, stt.node == 1 ? "координатор" : "узел");
-    lcd_text(GX + 12, BACK_Y - 48, hint, C.dim, C.bg, 1);
+    let hint = st.zig?.form_msg ?? (stt?.state == 2
+        ? sprintf("%s %04X, %s", tr("own network"), stt.pan,
+                  stt.node == 1 ? "координатор" : "узел")
+        : sprintf("%s: %s", tr("own network"), tr("off")));
+    lcd_text(GX + 12, GY + 5 * 27 + 4, hint, C.dim, C.bg, 1);
 
     let names = [ tr("Form network"), tr("Leave network") ];
     for (let i = 0; i < 2; i++) {

@@ -24,6 +24,7 @@
 #include <time.h>
 #include <sys/file.h>
 #include <signal.h>
+#include <mbedtls/aes.h>
 
 static int fd;
 static unsigned char rx_ack, tx_num;
@@ -147,6 +148,153 @@ static int frame_body(const unsigned char *f, int m, const unsigned char **body)
             return len;
         }
     }
+    return 0;
+}
+
+/* --- Защита эфира ---------------------------------------------------------
+ * По образцу Zigbee: полезная часть шифруется AES-CCM* на общем 128-битном
+ * ключе (у нас он же задаётся в настройках), к кадру добавляется счётчик и
+ * четырёхбайтовая подпись. Соль (nonce) собирается как в стандарте - из адреса
+ * отправителя, счётчика и байта уровня защиты. Заголовок MAC и счётчик идут
+ * открытым текстом, но подписаны: подменить их не выйдет.
+ *
+ * Без ключа маячок работает как раньше, открытым текстом - чтобы аппарат без
+ * настройки не выпадал из сети соседей молча.
+ */
+#define ZSEC_PLAIN 0x00
+#define ZSEC_CCM   0x01
+#define ZSEC_MIC   4
+
+static unsigned char zkey[16];
+static int zkey_ok;
+
+static void zkey_load(void)
+{
+    const char *path = getenv("ZIG_KEY") ? getenv("ZIG_KEY") : "/tmp/.zig_key";
+    char hex[64];
+    FILE *f = fopen(path, "r");
+    zkey_ok = 0;
+    if (!f) return;
+    if (fgets(hex, sizeof hex, f) && strlen(hex) >= 32) {
+        for (int i = 0; i < 16; i++) {
+            char b[3] = { hex[i * 2], hex[i * 2 + 1], 0 };
+            char *end;
+            long v = strtol(b, &end, 16);
+            if (end != b + 2) { fclose(f); return; }
+            zkey[i] = (unsigned char)v;
+        }
+        zkey_ok = 1;
+    }
+    fclose(f);
+}
+
+static void zsec_nonce(unsigned char *n, unsigned int src, unsigned int ctr)
+{
+    memset(n, 0, 13);
+    n[0] = (unsigned char)(src & 0xFF);
+    n[1] = (unsigned char)((src >> 8) & 0xFF);
+    n[2] = (unsigned char)(ctr & 0xFF);
+    n[3] = (unsigned char)((ctr >> 8) & 0xFF);
+    n[4] = (unsigned char)((ctr >> 16) & 0xFF);
+    n[5] = (unsigned char)((ctr >> 24) & 0xFF);
+    n[12] = ZSEC_CCM;
+}
+
+/* CCM* своими руками: в сборке mbedtls на роутере есть только AES, а CCM -
+   это и есть CBC-MAC поверх AES для подписи плюс CTR для шифра. Параметры как
+   в Zigbee: длина поля счётчика 2 байта (значит соль 13 байт), подпись 4. */
+static void ccm_block(mbedtls_aes_context *a, unsigned char *x, const unsigned char *b)
+{
+    unsigned char t[16];
+    for (int i = 0; i < 16; i++) t[i] = x[i] ^ b[i];
+    mbedtls_aes_crypt_ecb(a, MBEDTLS_AES_ENCRYPT, t, x);
+}
+
+static void ccm_tag(mbedtls_aes_context *a, const unsigned char *nonce,
+                    const unsigned char *aad, int aadlen,
+                    const unsigned char *msg, int mlen, unsigned char *tag)
+{
+    unsigned char x[16] = {0}, b[16];
+    int i;
+
+    b[0] = (unsigned char)((aadlen ? 0x40 : 0x00) | (((4 - 2) / 2) << 3) | (2 - 1));
+    memcpy(b + 1, nonce, 13);
+    b[14] = (unsigned char)((mlen >> 8) & 0xFF);
+    b[15] = (unsigned char)(mlen & 0xFF);
+    ccm_block(a, x, b);
+
+    if (aadlen) {
+        int off = 0;
+        memset(b, 0, 16);
+        b[0] = (unsigned char)((aadlen >> 8) & 0xFF);
+        b[1] = (unsigned char)(aadlen & 0xFF);
+        for (i = 0; i < 14 && i < aadlen; i++) b[2 + i] = aad[i];
+        ccm_block(a, x, b);
+        off = i;
+        while (off < aadlen) {
+            memset(b, 0, 16);
+            for (i = 0; i < 16 && off + i < aadlen; i++) b[i] = aad[off + i];
+            ccm_block(a, x, b);
+            off += i;
+        }
+    }
+    for (int off = 0; off < mlen; off += 16) {
+        memset(b, 0, 16);
+        for (i = 0; i < 16 && off + i < mlen; i++) b[i] = msg[off + i];
+        ccm_block(a, x, b);
+    }
+    memcpy(tag, x, ZSEC_MIC);
+}
+
+static void ccm_ctr(mbedtls_aes_context *a, const unsigned char *nonce,
+                    unsigned char *data, int len, unsigned char *s0)
+{
+    unsigned char ctr[16], sblk[16];
+    ctr[0] = (unsigned char)(2 - 1);
+    memcpy(ctr + 1, nonce, 13);
+    ctr[14] = 0; ctr[15] = 0;
+    if (s0) {
+        mbedtls_aes_crypt_ecb(a, MBEDTLS_AES_ENCRYPT, ctr, sblk);
+        memcpy(s0, sblk, 16);
+    }
+    for (int off = 0, blk = 1; off < len; off += 16, blk++) {
+        ctr[14] = (unsigned char)((blk >> 8) & 0xFF);
+        ctr[15] = (unsigned char)(blk & 0xFF);
+        mbedtls_aes_crypt_ecb(a, MBEDTLS_AES_ENCRYPT, ctr, sblk);
+        for (int i = 0; i < 16 && off + i < len; i++) data[off + i] ^= sblk[i];
+    }
+}
+
+static int zsec_seal(unsigned char *buf, int len, const unsigned char *aad, int aadlen,
+                     unsigned int src, unsigned int ctr, unsigned char *tag)
+{
+    mbedtls_aes_context a;
+    unsigned char nonce[13], s0[16], t[ZSEC_MIC];
+    if (!zkey_ok) return -1;
+    zsec_nonce(nonce, src, ctr);
+    mbedtls_aes_init(&a);
+    if (mbedtls_aes_setkey_enc(&a, zkey, 128) != 0) { mbedtls_aes_free(&a); return -1; }
+    ccm_tag(&a, nonce, aad, aadlen, buf, len, t);
+    ccm_ctr(&a, nonce, buf, len, s0);
+    for (int i = 0; i < ZSEC_MIC; i++) tag[i] = t[i] ^ s0[i];
+    mbedtls_aes_free(&a);
+    return 0;
+}
+
+static int zsec_open(unsigned char *buf, int len, const unsigned char *aad, int aadlen,
+                     unsigned int src, unsigned int ctr, const unsigned char *tag)
+{
+    mbedtls_aes_context a;
+    unsigned char nonce[13], s0[16], t[ZSEC_MIC];
+    if (!zkey_ok) return -1;
+    zsec_nonce(nonce, src, ctr);
+    mbedtls_aes_init(&a);
+    if (mbedtls_aes_setkey_enc(&a, zkey, 128) != 0) { mbedtls_aes_free(&a); return -1; }
+    ccm_ctr(&a, nonce, buf, len, s0);
+    ccm_tag(&a, nonce, aad, aadlen, buf, len, t);
+    mbedtls_aes_free(&a);
+    for (int i = 0; i < ZSEC_MIC; i++)
+        if ((unsigned char)(t[i] ^ s0[i]) != tag[i]) return -2;
     return 0;
 }
 
@@ -594,6 +742,7 @@ int main(int argc, char **argv)
 
         signal(SIGTERM, on_term);
         signal(SIGINT, on_term);
+        zkey_load();
 
         d[0] = 1;
         ezsp_cmd(0x83, d, 1);
@@ -617,7 +766,8 @@ int main(int argc, char **argv)
         for (const char *q = me; *q; q++) myid = myid * 31u + (unsigned char)*q;
         myid = (myid & 0x7FFF) | 0x0001;
 
-        struct { char name[24]; int rssi, lqi; long seen; int seq; char tele[320]; } pr[8];
+        struct { char name[24]; int rssi, lqi; long seen; int seq; unsigned int ctr;
+                 char tele[320]; } pr[8];
         int npr = 0;
         memset(pr, 0, sizeof pr);
         long last_tx = 0, last_save = 0;
@@ -634,7 +784,8 @@ int main(int argc, char **argv)
                    пакет по мусору в первых байтах. FCF = кадр данных со
                    сжатым PAN, адреса короткие, получатель широковещательный. */
                 int n = 0;
-                unsigned char body[128];
+                unsigned char body[160];
+                unsigned int ctr = (unsigned int)time(NULL);
                 body[n++] = 0x41;                       /* FCF: данные, сжатый PAN */
                 body[n++] = 0x88;                       /* FCF: адреса короткие */
                 body[n++] = (unsigned char)seq++;
@@ -643,10 +794,26 @@ int main(int argc, char **argv)
                 body[n++] = (unsigned char)(myid & 0xFF);
                 body[n++] = (unsigned char)((myid >> 8) & 0xFF);
                 body[n++] = 0x41;                       /* наша метка полезной части */
-                body[n++] = 0x01;                       /* версия формата */
+                body[n++] = zkey_ok ? ZSEC_CCM : ZSEC_PLAIN;
+                body[n++] = (unsigned char)(ctr & 0xFF);
+                body[n++] = (unsigned char)((ctr >> 8) & 0xFF);
+                body[n++] = (unsigned char)((ctr >> 16) & 0xFF);
+                body[n++] = (unsigned char)((ctr >> 24) & 0xFF);
+                int aadlen = n;                          /* заголовок подписан целиком */
+                int pstart = n;
                 body[n++] = (unsigned char)tl;
                 memcpy(body + n, me, tl); n += tl;
                 memcpy(body + n, tele, tn); n += tn;
+                int plen = n - pstart;
+                if (zkey_ok) {
+                    unsigned char tag[ZSEC_MIC];
+                    if (zsec_seal(body + pstart, plen, body, aadlen, myid, ctr, tag) == 0) {
+                        memcpy(body + n, tag, ZSEC_MIC);
+                        n += ZSEC_MIC;
+                    } else {
+                        body[9] = ZSEC_PLAIN;
+                    }
+                }
                 body[n++] = 0; body[n++] = 0;           /* место под CRC радио */
                 d[0] = (unsigned char)n;
                 memcpy(d + 1, body, n);
@@ -689,28 +856,46 @@ int main(int argc, char **argv)
                 fprintf(stderr, "приём: pn=%d id=0x%02X метка=0x%02X len=%d\n",
                         pn, pn > 2 ? pl[2] : 0, pn > 6 ? pl[6] : 0, pn > 5 ? pl[5] : 0);
             /* Кадр: [lqi, rssi, длина] + MAC-заголовок 9 байт + наша часть */
-            if (pn >= 21 && pl[2] == 0x8E && pl[6] == 0x41 && pl[7] == 0x88
+            if (pn >= 26 && pl[2] == 0x8E && pl[6] == 0x41 && pl[7] == 0x88
                 && pl[15] == 0x41) {
                 int lqi = pl[3], rssi = (signed char)pl[4], len = pl[5];
-                int tl = pl[17];
-                if (tl < 0 || tl > 20) tl = 0;
+                int sec = pl[16];
+                unsigned int src = pl[13] | (pl[14] << 8);
+                unsigned int ctr = (unsigned int)pl[17] | ((unsigned int)pl[18] << 8)
+                                 | ((unsigned int)pl[19] << 16) | ((unsigned int)pl[20] << 24);
+                /* открытая часть: 9 байт MAC + метка + режим + счётчик */
+                int plen = len - 15 - 2 - (sec == ZSEC_CCM ? ZSEC_MIC : 0);
+                unsigned char body[160];
+                if (plen < 2 || plen > (int)sizeof body || 21 + plen > pn) continue;
+                memcpy(body, pl + 21, plen);
+                if (sec == ZSEC_CCM) {
+                    if (!zkey_ok) continue;              /* чужой ключ - молча мимо */
+                    if (zsec_open(body, plen, pl + 6, 15, src, ctr,
+                                  pl + 21 + plen) != 0) continue;
+                } else if (zkey_ok) {
+                    continue;                            /* с ключом открытый текст не принимаем */
+                }
+                int tl = body[0];
+                if (tl < 0 || tl > 20 || tl + 1 > plen) tl = 0;
                 char nm[24];
                 int k = 0;
-                for (; k < tl && 18 + k < pn; k++) {
-                    unsigned char c = pl[18 + k];
+                for (; k < tl; k++) {
+                    unsigned char c = body[1 + k];
                     nm[k] = (c >= 32 && c < 127) ? (char)c : '.';
                 }
                 nm[k] = 0;
                 char mj[320];
-                int tstart = 18 + tl, tlen = len - 14 - tl;
-                if (tlen < 0) tlen = 0;
-                if (tstart + tlen > pn) tlen = pn - tstart;
-                tele_unpack(pl + tstart, tlen, mj, sizeof mj);
+                tele_unpack(body + 1 + tl, plen - 1 - tl, mj, sizeof mj);
                 if (k > 0 && strcmp(nm, me) != 0) {
                     int idx = -1;
                     for (int j = 0; j < npr; j++) if (!strcmp(pr[j].name, nm)) idx = j;
                     if (idx < 0 && npr < 8) { idx = npr++; snprintf(pr[idx].name, sizeof pr[idx].name, "%s", nm); }
+                    /* повтор чужого пакета не принимаем: счётчик обязан расти.
+                       Исключение - сосед долго молчал, у него мог быть перезапуск. */
+                    if (idx >= 0 && sec == ZSEC_CCM && ctr <= pr[idx].ctr
+                        && (long)time(NULL) - pr[idx].seen < 120) continue;
                     if (idx >= 0) {
+                        pr[idx].ctr = ctr;
                         pr[idx].rssi = rssi;
                         pr[idx].lqi = lqi;
                         pr[idx].seen = (long)time(NULL);
@@ -726,7 +911,8 @@ int main(int argc, char **argv)
                 snprintf(tmp, sizeof tmp, "%s.tmp", out);
                 FILE *f = fopen(tmp, "w");
                 if (f) {
-                    fprintf(f, "{\"ok\":1,\"me\":\"%s\",\"ch\":%d,\"ts\":%ld,\"peers\":[", me, ch, now);
+                    fprintf(f, "{\"ok\":1,\"me\":\"%s\",\"ch\":%d,\"enc\":%d,\"ts\":%ld,\"peers\":[",
+                            me, ch, zkey_ok, now);
                     for (int j = 0; j < npr; j++)
                         fprintf(f, "%s{\"name\":\"%s\",\"rssi\":%d,\"lqi\":%d,\"age\":%ld,\"m\":{%s}}",
                                 j ? "," : "", pr[j].name, pr[j].rssi, pr[j].lqi,

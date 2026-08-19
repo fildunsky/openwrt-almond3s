@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=lcd-ui-almond3s
-PKG_RELEASE:=423
+PKG_RELEASE:=429
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -10,7 +10,7 @@ define Package/lcd-ui-almond3s
   SECTION:=utils
   CATEGORY:=Utilities
   TITLE:=LCD dashboard for Securifi Almond 3S
-  DEPENDS:=@TARGET_ramips_mt7621 +kmod-lcd-almond3s +ucode +ucode-mod-fs \
+  DEPENDS:=@TARGET_ramips_mt7621 +kmod-lcd-almond3s +libmbedtls +ucode +ucode-mod-fs \
 	+ucode-mod-socket +ucode-mod-ubus +ucode-mod-uci +ucode-mod-uloop +qrencode
 endef
 
@@ -32,7 +32,8 @@ define Build/Compile
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
 		-o $(PKG_BUILD_DIR)/lcdshot $(PKG_BUILD_DIR)/lcdshot.c
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
-		-o $(PKG_BUILD_DIR)/almond3s-zig $(PKG_BUILD_DIR)/almond3s-zig.c
+		-o $(PKG_BUILD_DIR)/almond3s-zig $(PKG_BUILD_DIR)/almond3s-zig.c \
+		-lmbedcrypto
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
 		-std=c99 -I$(PKG_BUILD_DIR)/vterm/include \
 		-o $(PKG_BUILD_DIR)/almond3s-term \
