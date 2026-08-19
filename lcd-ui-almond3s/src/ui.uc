@@ -6419,15 +6419,12 @@ function svc_hosts() {
 // Нижний ряд: «проверить все» и «назад» рядом, во всю высоту полосы - по
 // маленькой кнопке пальцем попадать неудобно.
 // Габариты те же, что у кнопок меню: BTN_W x BTN_H с тем же отступом.
-let SVC_BAR_Y = LCD_H - BTN_H;
+let SVC_BAR_Y = BACK_Y - 38;
 
 function svc_refresh_btn() {
-    return { x: BTN_PAD, y: SVC_BAR_Y, w: BTN_W, h: BTN_H };
+    return { x: GX, y: SVC_BAR_Y, w: GW, h: 32 };
 }
 
-function svc_back_btn() {
-    return { x: BTN_PAD * 2 + BTN_W, y: SVC_BAR_Y, w: BTN_W, h: BTN_H };
-}
 
 function draw_services_page() {
     let res = st.data?.services;
@@ -6463,30 +6460,21 @@ function draw_services_page() {
 
     // «Пинг» - обычная карточка меню, «назад» - в точности как в меню:
     // своя заливка C.hdr, без нижней грани и с той же надписью.
-    let rb = svc_refresh_btn(), bb = svc_back_btn();
-    let lbl = tr("Ping");
+    let rb = svc_refresh_btn();
     // Идёт фоновая проверка? Снимаем метку, когда svcping перепишет кэш (сменит
-    // mtime) или по таймауту. Пока идёт - метку «Пинг» чуть выше, чтобы под ней
-    // поместилось мелкое «Проверка...».
+    // mtime) или по таймауту.
     let sc = st.svc_check;
     if (sc) {
         let ss = fs.stat("/tmp/lcd_services.json");
         if ((ss && ss.mtime != sc.mt) || (time() - sc.ts) >= 15) { st.svc_check = null; sc = null; }
     }
+    let lbl = sc ? tr("Checking...") : tr("Ping");
     lcd_rect(rb.x, rb.y, rb.w, rb.h, C.btn);
-    lcd_rect(rb.x, rb.y + rb.h - 3, rb.w, 3, C.border);
-    let lbl_y = sc ? (rb.y + 16) : (rb.y + int((rb.h - 14) / 2));
-    lcd_text(rb.x + int((rb.w - tlen(lbl) * 12) / 2), lbl_y, lbl, C.white, C.btn, 2);
-    if (sc) {
-        let ct = tr("Checking...");
-        lcd_text(rb.x + int((rb.w - tlen(ct) * 6) / 2), rb.y + 40, ct, C.cyan, C.btn, 1);
-    }
+    lcd_rect(rb.x, rb.y, 3, rb.h, sc ? C.cyan : C.green);
+    lcd_text(rb.x + int((rb.w - tlen(lbl) * 12) / 2), rb.y + 9, lbl,
+             sc ? C.cyan : C.white, C.btn, 2);
 
-    // «Назад» - в стиле стандартной полосы: красный фон + верхняя подсветка.
-    lcd_rect(bb.x, bb.y, bb.w, bb.h, C.back);
-    lcd_rect(bb.x, bb.y, bb.w, 2, "#D32F2F");
-    lcd_text(bb.x + 20, bb.y + 20, tr("<<< BACK"), C.white, C.back, 2);
-
+    draw_back();
     lcd_flush();
 }
 
@@ -8477,11 +8465,7 @@ function handle_touch(tx, ty, tmove) {
     // этой страницы не годится: левая половина запускает проверку.
     // Порог по видимой полосе, без 6px запаса выше: 3-й ряд карточек
     // (5-6 хостов) кончается на 168, а SVC_BAR_Y-6=166 съедал их низ.
-    if (st.page == "services" && ty >= SVC_BAR_Y) {
-        if (tx >= svc_back_btn().x) {
-            go_page("menu");
-            return;
-        }
+    if (st.page == "services" && ty >= SVC_BAR_Y && ty < BACK_Y) {
         // Фоновая проверка без заглушки: svcping пишет кэш, страница обновится
         // сама, когда статусы приедут. Отклик - мелкая надпись «Проверка...» под
         // кнопкой «Пинг» (внутри неё), снимается по смене mtime кэша.
