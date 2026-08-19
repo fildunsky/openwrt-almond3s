@@ -25,8 +25,15 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <signal.h>
 
 #define PAD_PORT 8099
+
+/* Состояние кнопок кладём в файл, эмулятор читает его каждый кадр - ровно так
+   же, как уже читает тачскрин. Файл-флаг рядом говорит, идёт ли игра: пульт
+   про эмулятор больше ничего не знает и знать не должен. */
+#define PAD_STATE "/tmp/.nes_pad"
+#define PAD_RUN   "/tmp/.nes_run"
 #define MAX_CL   2
 
 static int srv_fd = -1;
@@ -122,7 +129,19 @@ static const char PAGE[] =
 /* Строка состояния - тем же пиксельным шрифтом, что кнопки и логотип:
    она стоит внутри корпуса, и обычный системный шрифт рядом с пиксельным
    выглядел чужеродно. Глифы рисует скрипт - текст меняется на ходу. */
-"#s{flex:0 0 auto;display:flex;justify-content:center;padding-bottom:clamp(6px,1.6vmin,14px)}"
+/* Строка состояния просто по центру корпуса: отступ над ней и под нижним
+   рядом такой же, как по бокам. */
+"#s{flex:0 0 auto;display:flex;align-items:center;justify-content:center;gap:9px;"
+"padding-bottom:clamp(12px,4.5vmin,26px)}"
+/* Лампочка состояния: свечение делаем тенью того же цвета - на
+   тёмном фоне это читается как светодиод. Красная ещё и дышит:
+   связи нет и попытки идут, статичная точка выглядела бы
+   как поломка. */
+".dot{width:10px;height:10px;border-radius:50%;flex:0 0 auto}"
+".dot.g{background:#3FB950;box-shadow:0 0 7px 2px rgba(63,185,80,.85)}"
+".dot.r{background:#F85149;box-shadow:0 0 7px 2px rgba(248,81,73,.85);"
+"animation:bl 1.1s ease-in-out infinite}"
+"@keyframes bl{0%,100%{opacity:1}50%{opacity:.35}}"
 ".st{fill:#fff;shape-rendering:crispEdges;display:block;width:auto;"
 "height:clamp(11px,3.2vmin,18px)}"
 "#pad{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;"
@@ -131,20 +150,29 @@ static const char PAGE[] =
 /* Отступ внутри корпуса одинаковый со всех сторон - иначе кнопки
    липнут к рамке. Он же съедает ширину, поэтому пределы кнопок по
    vw ниже пересчитаны: в книжной ориентации ряд помещается впритык. */
-"padding:clamp(12px,4.5vmin,26px);"
-"--d:clamp(44px,min(30vmin,34vh,16.5vw),128px);"
-"--ab:clamp(50px,min(31vmin,30vh,15vw),124px);--abg:clamp(6px,2vmin,16px)}"
-"#mid{flex:1 1 auto;display:flex;flex-wrap:wrap;align-items:center;align-content:center;"
-"justify-content:space-between;"
-"gap:4px;min-height:0;min-width:0}"
-"#bot{flex:0 0 auto;display:flex;justify-content:center;gap:14px;padding-top:10px}"
+"padding:clamp(12px,4.5vmin,26px);overflow:hidden;"
+/* Пределы по высоте: под ряд остаётся высота минус строка состояния и
+   отступы корпуса. Слева это 2*--d, справа стопка COMBO + A/B, то есть
+   2*--ab с зазором - оба должны влезать, иначе кнопки уходят за рамку. */
+"--d:clamp(40px,min(30vmin,27vh,16.5vw),128px);"
+"--ab:clamp(46px,min(31vmin,25vh,15vw),124px);--abg:clamp(6px,2vmin,16px)}"
+/* Три колонки заданы явно: крестовина, середина (логотип + START/SELECT) и
+   правый блок. На flex это разъезжалось - колонка сжималась ниже
+   содержимого либо уводила соседей на новую строку. Низ крестовины и
+   середины на одной линии, правый блок по центру. */
+"#mid{flex:1 1 auto;display:grid;align-items:end;gap:6px;min-height:0;min-width:0;"
+"grid-template-columns:calc(3 * var(--d)) 1fr calc(2 * var(--ab) + var(--abg))}"
+"#bot{display:flex;justify-content:center;gap:10px}"
 "#dp{flex:0 0 auto;display:grid;grid-template-columns:repeat(3,var(--d));"
-/* Блок стрелок опущен ниже середины: держать большой палец удобнее
-   там, а не по центру корпуса. Отступом, а не прижатием к низу -
-   при переносе строк flex растягивает строку на всю высоту, и
-   прижатая крестовина уезжала от кнопок на пол-экрана. */
-"grid-template-rows:repeat(2,var(--d));margin-top:clamp(8px,7vh,56px)}"
-"#ab{flex:0 0 auto;display:flex;align-items:center;gap:var(--abg)}"
+"grid-template-rows:repeat(2,var(--d))}"
+"#ab{display:flex;align-items:center;gap:var(--abg)}"
+/* Правая колонка: COMBO над парой B и A. Ширина у него ровно как у пары
+   вместе с зазором, высота как у START и SELECT. */
+"#abw{flex:0 0 auto;align-self:center;display:flex;flex-direction:column;"
+"align-items:center;gap:10px}"
+".cb{width:calc(2 * var(--ab) + var(--abg));height:var(--ab);"
+"background:#E8833A;border-color:#5a2d0e;"
+"font-size:clamp(10px,2.5vmin,13px);letter-spacing:2px}"
 "b{display:flex;align-items:center;justify-content:center;"
 "background:#4a5058;border:3px solid #0b0e13;border-radius:3px;color:#fff;"
 "box-shadow:inset 0 4px 0 rgba(255,255,255,.30),inset -4px 0 0 rgba(255,255,255,.18)}"
@@ -155,12 +183,20 @@ static const char PAGE[] =
 ".ab{width:var(--ab);"
 "height:var(--ab);background:#c62828;border-color:#3a0d0d}"
 ".ab .g{width:42%;height:42%}"
-".se{width:clamp(90px,28vmin,130px);height:clamp(34px,min(11vmin,9vh),48px);"
+".se{flex:0 0 auto;width:clamp(58px,16vmin,96px);"
+"height:clamp(30px,min(10vmin,8vh),44px);"
 "font-size:clamp(10px,2.6vmin,13px);letter-spacing:2px;background:#4a5058}"
 ".lg{fill:#21b365;shape-rendering:crispEdges;display:block}"
-"#lmid{flex:1 1 0;min-width:0;display:flex;align-items:center;justify-content:center;"
-"padding:0 10px;"
-"overflow:hidden}"
+/* Середина - колонка: логотип, под ним START и SELECT. Ряд выровнен по
+   нижней границе, поэтому низ этих кнопок ложится на одну линию с низом
+   стрелок и кнопок A/B. */
+/* Колонка тянется на всю высоту ряда: логотип уходит к верху, а START и
+   SELECT остаются внизу, на одной линии со стрелками. */
+"#lmid{min-width:0;align-self:stretch;display:flex;flex-direction:column;"
+"align-items:center;justify-content:flex-end;gap:10px;padding:0 10px}"
+/* Логотип по центру свободного места колонки: он в растягивающейся обёртке,
+   а START и SELECT остаются прижатыми к низу, на линии стрелок. */
+"#lwrap{flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center}"
 "#lmid .lg{width:min(100%,150px);height:auto}"
 /* В книжной ориентации между крестовиной и кнопками остаётся десяток
    пикселей, поэтому надпись переносится на свою строку выше - копию
@@ -168,26 +204,33 @@ static const char PAGE[] =
 /* Нижний ряд центрируется по всей ширине корпуса и в альбомной
    ориентации залезал под правую стрелку. Отступаем слева на крестовину,
    справа на A и B - остаток ровно колонка логотипа, и центр совпадает. */
-"@media(orientation:landscape){#bot,#s{padding-left:calc(3 * var(--d) + 4px);"
-"padding-right:calc(2 * var(--ab) + var(--abg) + 4px)}}"
-"@media(orientation:portrait){#lmid{order:-1;flex:0 0 100%;padding:0 0 6px}"
+
+/* Книжная: логотип уезжает своей строкой наверх, а кнопки прижимаем к низу
+   корпуса - в колонке наверху они оказались бы под большим пальцем не в том
+   месте. */
+"@media(orientation:portrait){#pad{position:relative}"
+"#mid{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between}"
+"#bot{width:auto}"
+"#bot{position:absolute;left:0;right:0;bottom:calc(env(safe-area-inset-bottom) + 14px)}"
+"#lmid{order:-1;flex:0 0 100%;padding:0 0 6px}"
 "#lmid .lg{width:min(42%,160px)}}"
 "</style><div id=pad><div id=s></div><div id=mid>"
 "<div id=dp>"
 "<i></i><b class=d id=U><svg class=g viewBox='0 0 15 8'><rect x='7' y='0' width='1' height='1'/><rect x='6' y='1' width='3' height='1'/><rect x='5' y='2' width='5' height='1'/><rect x='4' y='3' width='7' height='1'/><rect x='3' y='4' width='9' height='1'/><rect x='2' y='5' width='11' height='1'/><rect x='1' y='6' width='13' height='1'/><rect x='0' y='7' width='15' height='1'/></svg></b><i></i>"
 "<b class=d id=L><svg class=g viewBox='0 0 8 15'><rect x='0' y='7' width='1' height='1'/><rect x='1' y='6' width='1' height='3'/><rect x='2' y='5' width='1' height='5'/><rect x='3' y='4' width='1' height='7'/><rect x='4' y='3' width='1' height='9'/><rect x='5' y='2' width='1' height='11'/><rect x='6' y='1' width='1' height='13'/><rect x='7' y='0' width='1' height='15'/></svg></b><b class=d id=D><svg class=g viewBox='0 0 15 8'><rect x='7' y='7' width='1' height='1'/><rect x='6' y='6' width='3' height='1'/><rect x='5' y='5' width='5' height='1'/><rect x='4' y='4' width='7' height='1'/><rect x='3' y='3' width='9' height='1'/><rect x='2' y='2' width='11' height='1'/><rect x='1' y='1' width='13' height='1'/><rect x='0' y='0' width='15' height='1'/></svg></b><b class=d id=R><svg class=g viewBox='0 0 8 15'><rect x='7' y='7' width='1' height='1'/><rect x='6' y='6' width='1' height='3'/><rect x='5' y='5' width='1' height='5'/><rect x='4' y='4' width='1' height='7'/><rect x='3' y='3' width='1' height='9'/><rect x='2' y='2' width='1' height='11'/><rect x='1' y='1' width='1' height='13'/><rect x='0' y='0' width='1' height='15'/></svg></b>"
 "</div>"
-"<div id=lmid><svg class=lg viewBox='0 0 140 41'><rect x='4' y='0' width='12' height='4'/><rect x='24' y='0' width='4' height='4'/><rect x='48' y='0' width='4' height='4'/><rect x='64' y='0' width='4' height='4'/><rect x='76' y='0' width='12' height='4'/><rect x='96' y='0' width='4' height='4'/><rect x='112' y='0' width='4' height='4'/><rect x='120' y='0' width='16' height='4'/><rect x='0' y='4' width='4' height='4'/><rect x='16' y='4' width='4' height='4'/><rect x='24' y='4' width='4' height='4'/><rect x='48' y='4' width='8' height='4'/><rect x='60' y='4' width='8' height='4'/><rect x='72' y='4' width='4' height='4'/><rect x='88' y='4' width='4' height='4'/><rect x='96' y='4' width='4' height='4'/><rect x='112' y='4' width='4' height='4'/><rect x='120' y='4' width='4' height='4'/><rect x='136' y='4' width='4' height='4'/><rect x='0' y='8' width='4' height='4'/><rect x='16' y='8' width='4' height='4'/><rect x='24' y='8' width='4' height='4'/><rect x='48' y='8' width='4' height='4'/><rect x='56' y='8' width='4' height='4'/><rect x='64' y='8' width='4' height='4'/><rect x='72' y='8' width='4' height='4'/><rect x='88' y='8' width='4' height='4'/><rect x='96' y='8' width='8' height='4'/><rect x='112' y='8' width='4' height='4'/><rect x='120' y='8' width='4' height='4'/><rect x='136' y='8' width='4' height='4'/><rect x='0' y='12' width='4' height='4'/><rect x='16' y='12' width='4' height='4'/><rect x='24' y='12' width='4' height='4'/><rect x='48' y='12' width='4' height='4'/><rect x='56' y='12' width='4' height='4'/><rect x='64' y='12' width='4' height='4'/><rect x='72' y='12' width='4' height='4'/><rect x='88' y='12' width='4' height='4'/><rect x='96' y='12' width='4' height='4'/><rect x='104' y='12' width='4' height='4'/><rect x='112' y='12' width='4' height='4'/><rect x='120' y='12' width='4' height='4'/><rect x='136' y='12' width='4' height='4'/><rect x='0' y='16' width='20' height='4'/><rect x='24' y='16' width='4' height='4'/><rect x='48' y='16' width='4' height='4'/><rect x='64' y='16' width='4' height='4'/><rect x='72' y='16' width='4' height='4'/><rect x='88' y='16' width='4' height='4'/><rect x='96' y='16' width='4' height='4'/><rect x='108' y='16' width='8' height='4'/><rect x='120' y='16' width='4' height='4'/><rect x='136' y='16' width='4' height='4'/><rect x='0' y='20' width='4' height='4'/><rect x='16' y='20' width='4' height='4'/><rect x='24' y='20' width='4' height='4'/><rect x='48' y='20' width='4' height='4'/><rect x='64' y='20' width='4' height='4'/><rect x='72' y='20' width='4' height='4'/><rect x='88' y='20' width='4' height='4'/><rect x='96' y='20' width='4' height='4'/><rect x='112' y='20' width='4' height='4'/><rect x='120' y='20' width='4' height='4'/><rect x='136' y='20' width='4' height='4'/><rect x='0' y='24' width='4' height='4'/><rect x='16' y='24' width='4' height='4'/><rect x='24' y='24' width='20' height='4'/><rect x='48' y='24' width='4' height='4'/><rect x='64' y='24' width='4' height='4'/><rect x='76' y='24' width='12' height='4'/><rect x='96' y='24' width='4' height='4'/><rect x='112' y='24' width='4' height='4'/><rect x='120' y='24' width='16' height='4'/><rect x='38' y='34' width='4' height='1'/><rect x='43' y='34' width='5' height='1'/><rect x='50' y='34' width='3' height='1'/><rect x='56' y='34' width='3' height='1'/><rect x='61' y='34' width='1' height='1'/><rect x='65' y='34' width='1' height='1'/><rect x='67' y='34' width='4' height='1'/><rect x='79' y='34' width='1' height='1'/><rect x='86' y='34' width='3' height='1'/><rect x='91' y='34' width='5' height='1'/><rect x='97' y='34' width='5' height='1'/><rect x='37' y='35' width='1' height='1'/><rect x='43' y='35' width='1' height='1'/><rect x='49' y='35' width='1' height='1'/><rect x='53' y='35' width='1' height='1'/><rect x='55' y='35' width='1' height='1'/><rect x='59' y='35' width='1' height='1'/><rect x='61' y='35' width='1' height='1'/><rect x='65' y='35' width='1' height='1'/><rect x='67' y='35' width='1' height='1'/><rect x='71' y='35' width='1' height='1'/><rect x='79' y='35' width='1' height='1'/><rect x='87' y='35' width='1' height='1'/><rect x='91' y='35' width='1' height='1'/><rect x='97' y='35' width='1' height='1'/><rect x='37' y='36' width='1' height='1'/><rect x='43' y='36' width='1' height='1'/><rect x='49' y='36' width='1' height='1'/><rect x='55' y='36' width='1' height='1'/><rect x='59' y='36' width='1' height='1'/><rect x='61' y='36' width='2' height='1'/><rect x='65' y='36' width='1' height='1'/><rect x='67' y='36' width='1' height='1'/><rect x='71' y='36' width='1' height='1'/><rect x='79' y='36' width='1' height='1'/><rect x='87' y='36' width='1' height='1'/><rect x='91' y='36' width='1' height='1'/><rect x='97' y='36' width='1' height='1'/><rect x='38' y='37' width='3' height='1'/><rect x='43' y='37' width='4' height='1'/><rect x='49' y='37' width='1' height='1'/><rect x='55' y='37' width='1' height='1'/><rect x='59' y='37' width='1' height='1'/><rect x='61' y='37' width='1' height='1'/><rect x='63' y='37' width='1' height='1'/><rect x='65' y='37' width='1' height='1'/><rect x='67' y='37' width='1' height='1'/><rect x='71' y='37' width='1' height='1'/><rect x='79' y='37' width='1' height='1'/><rect x='87' y='37' width='1' height='1'/><rect x='91' y='37' width='4' height='1'/><rect x='97' y='37' width='4' height='1'/><rect x='41' y='38' width='1' height='1'/><rect x='43' y='38' width='1' height='1'/><rect x='49' y='38' width='1' height='1'/><rect x='55' y='38' width='1' height='1'/><rect x='59' y='38' width='1' height='1'/><rect x='61' y='38' width='1' height='1'/><rect x='64' y='38' width='2' height='1'/><rect x='67' y='38' width='1' height='1'/><rect x='71' y='38' width='1' height='1'/><rect x='79' y='38' width='1' height='1'/><rect x='87' y='38' width='1' height='1'/><rect x='91' y='38' width='1' height='1'/><rect x='97' y='38' width='1' height='1'/><rect x='41' y='39' width='1' height='1'/><rect x='43' y='39' width='1' height='1'/><rect x='49' y='39' width='1' height='1'/><rect x='53' y='39' width='1' height='1'/><rect x='55' y='39' width='1' height='1'/><rect x='59' y='39' width='1' height='1'/><rect x='61' y='39' width='1' height='1'/><rect x='65' y='39' width='1' height='1'/><rect x='67' y='39' width='1' height='1'/><rect x='71' y='39' width='1' height='1'/><rect x='79' y='39' width='1' height='1'/><rect x='87' y='39' width='1' height='1'/><rect x='91' y='39' width='1' height='1'/><rect x='97' y='39' width='1' height='1'/><rect x='37' y='40' width='4' height='1'/><rect x='43' y='40' width='5' height='1'/><rect x='50' y='40' width='3' height='1'/><rect x='56' y='40' width='3' height='1'/><rect x='61' y='40' width='1' height='1'/><rect x='65' y='40' width='1' height='1'/><rect x='67' y='40' width='4' height='1'/><rect x='79' y='40' width='5' height='1'/><rect x='86' y='40' width='3' height='1'/><rect x='91' y='40' width='1' height='1'/><rect x='97' y='40' width='5' height='1'/></svg></div>"
-"<div id=ab><b class=ab id=B><svg class=g viewBox='0 0 5 7'><rect x='0' y='0' width='1' height='1'/><rect x='0' y='1' width='1' height='1'/><rect x='0' y='2' width='1' height='1'/><rect x='0' y='3' width='1' height='1'/><rect x='0' y='4' width='1' height='1'/><rect x='0' y='5' width='1' height='1'/><rect x='0' y='6' width='1' height='1'/><rect x='1' y='0' width='1' height='1'/><rect x='1' y='3' width='1' height='1'/><rect x='1' y='6' width='1' height='1'/><rect x='2' y='0' width='1' height='1'/><rect x='2' y='3' width='1' height='1'/><rect x='2' y='6' width='1' height='1'/><rect x='3' y='0' width='1' height='1'/><rect x='3' y='3' width='1' height='1'/><rect x='3' y='6' width='1' height='1'/><rect x='4' y='1' width='1' height='1'/><rect x='4' y='2' width='1' height='1'/><rect x='4' y='4' width='1' height='1'/><rect x='4' y='5' width='1' height='1'/></svg></b>"
-"<b class=ab id=A><svg class=g viewBox='0 0 5 7'><rect x='0' y='1' width='1' height='1'/><rect x='0' y='2' width='1' height='1'/><rect x='0' y='3' width='1' height='1'/><rect x='0' y='4' width='1' height='1'/><rect x='0' y='5' width='1' height='1'/><rect x='0' y='6' width='1' height='1'/><rect x='1' y='0' width='1' height='1'/><rect x='1' y='4' width='1' height='1'/><rect x='2' y='0' width='1' height='1'/><rect x='2' y='4' width='1' height='1'/><rect x='3' y='0' width='1' height='1'/><rect x='3' y='4' width='1' height='1'/><rect x='4' y='1' width='1' height='1'/><rect x='4' y='2' width='1' height='1'/><rect x='4' y='3' width='1' height='1'/><rect x='4' y='4' width='1' height='1'/><rect x='4' y='5' width='1' height='1'/><rect x='4' y='6' width='1' height='1'/></svg></b></div>"
+"<div id=lmid><div id=lwrap><svg class=lg viewBox='0 0 140 41'><rect x='4' y='0' width='12' height='4'/><rect x='24' y='0' width='4' height='4'/><rect x='48' y='0' width='4' height='4'/><rect x='64' y='0' width='4' height='4'/><rect x='76' y='0' width='12' height='4'/><rect x='96' y='0' width='4' height='4'/><rect x='112' y='0' width='4' height='4'/><rect x='120' y='0' width='16' height='4'/><rect x='0' y='4' width='4' height='4'/><rect x='16' y='4' width='4' height='4'/><rect x='24' y='4' width='4' height='4'/><rect x='48' y='4' width='8' height='4'/><rect x='60' y='4' width='8' height='4'/><rect x='72' y='4' width='4' height='4'/><rect x='88' y='4' width='4' height='4'/><rect x='96' y='4' width='4' height='4'/><rect x='112' y='4' width='4' height='4'/><rect x='120' y='4' width='4' height='4'/><rect x='136' y='4' width='4' height='4'/><rect x='0' y='8' width='4' height='4'/><rect x='16' y='8' width='4' height='4'/><rect x='24' y='8' width='4' height='4'/><rect x='48' y='8' width='4' height='4'/><rect x='56' y='8' width='4' height='4'/><rect x='64' y='8' width='4' height='4'/><rect x='72' y='8' width='4' height='4'/><rect x='88' y='8' width='4' height='4'/><rect x='96' y='8' width='8' height='4'/><rect x='112' y='8' width='4' height='4'/><rect x='120' y='8' width='4' height='4'/><rect x='136' y='8' width='4' height='4'/><rect x='0' y='12' width='4' height='4'/><rect x='16' y='12' width='4' height='4'/><rect x='24' y='12' width='4' height='4'/><rect x='48' y='12' width='4' height='4'/><rect x='56' y='12' width='4' height='4'/><rect x='64' y='12' width='4' height='4'/><rect x='72' y='12' width='4' height='4'/><rect x='88' y='12' width='4' height='4'/><rect x='96' y='12' width='4' height='4'/><rect x='104' y='12' width='4' height='4'/><rect x='112' y='12' width='4' height='4'/><rect x='120' y='12' width='4' height='4'/><rect x='136' y='12' width='4' height='4'/><rect x='0' y='16' width='20' height='4'/><rect x='24' y='16' width='4' height='4'/><rect x='48' y='16' width='4' height='4'/><rect x='64' y='16' width='4' height='4'/><rect x='72' y='16' width='4' height='4'/><rect x='88' y='16' width='4' height='4'/><rect x='96' y='16' width='4' height='4'/><rect x='108' y='16' width='8' height='4'/><rect x='120' y='16' width='4' height='4'/><rect x='136' y='16' width='4' height='4'/><rect x='0' y='20' width='4' height='4'/><rect x='16' y='20' width='4' height='4'/><rect x='24' y='20' width='4' height='4'/><rect x='48' y='20' width='4' height='4'/><rect x='64' y='20' width='4' height='4'/><rect x='72' y='20' width='4' height='4'/><rect x='88' y='20' width='4' height='4'/><rect x='96' y='20' width='4' height='4'/><rect x='112' y='20' width='4' height='4'/><rect x='120' y='20' width='4' height='4'/><rect x='136' y='20' width='4' height='4'/><rect x='0' y='24' width='4' height='4'/><rect x='16' y='24' width='4' height='4'/><rect x='24' y='24' width='20' height='4'/><rect x='48' y='24' width='4' height='4'/><rect x='64' y='24' width='4' height='4'/><rect x='76' y='24' width='12' height='4'/><rect x='96' y='24' width='4' height='4'/><rect x='112' y='24' width='4' height='4'/><rect x='120' y='24' width='16' height='4'/><rect x='38' y='34' width='4' height='1'/><rect x='43' y='34' width='5' height='1'/><rect x='50' y='34' width='3' height='1'/><rect x='56' y='34' width='3' height='1'/><rect x='61' y='34' width='1' height='1'/><rect x='65' y='34' width='1' height='1'/><rect x='67' y='34' width='4' height='1'/><rect x='79' y='34' width='1' height='1'/><rect x='86' y='34' width='3' height='1'/><rect x='91' y='34' width='5' height='1'/><rect x='97' y='34' width='5' height='1'/><rect x='37' y='35' width='1' height='1'/><rect x='43' y='35' width='1' height='1'/><rect x='49' y='35' width='1' height='1'/><rect x='53' y='35' width='1' height='1'/><rect x='55' y='35' width='1' height='1'/><rect x='59' y='35' width='1' height='1'/><rect x='61' y='35' width='1' height='1'/><rect x='65' y='35' width='1' height='1'/><rect x='67' y='35' width='1' height='1'/><rect x='71' y='35' width='1' height='1'/><rect x='79' y='35' width='1' height='1'/><rect x='87' y='35' width='1' height='1'/><rect x='91' y='35' width='1' height='1'/><rect x='97' y='35' width='1' height='1'/><rect x='37' y='36' width='1' height='1'/><rect x='43' y='36' width='1' height='1'/><rect x='49' y='36' width='1' height='1'/><rect x='55' y='36' width='1' height='1'/><rect x='59' y='36' width='1' height='1'/><rect x='61' y='36' width='2' height='1'/><rect x='65' y='36' width='1' height='1'/><rect x='67' y='36' width='1' height='1'/><rect x='71' y='36' width='1' height='1'/><rect x='79' y='36' width='1' height='1'/><rect x='87' y='36' width='1' height='1'/><rect x='91' y='36' width='1' height='1'/><rect x='97' y='36' width='1' height='1'/><rect x='38' y='37' width='3' height='1'/><rect x='43' y='37' width='4' height='1'/><rect x='49' y='37' width='1' height='1'/><rect x='55' y='37' width='1' height='1'/><rect x='59' y='37' width='1' height='1'/><rect x='61' y='37' width='1' height='1'/><rect x='63' y='37' width='1' height='1'/><rect x='65' y='37' width='1' height='1'/><rect x='67' y='37' width='1' height='1'/><rect x='71' y='37' width='1' height='1'/><rect x='79' y='37' width='1' height='1'/><rect x='87' y='37' width='1' height='1'/><rect x='91' y='37' width='4' height='1'/><rect x='97' y='37' width='4' height='1'/><rect x='41' y='38' width='1' height='1'/><rect x='43' y='38' width='1' height='1'/><rect x='49' y='38' width='1' height='1'/><rect x='55' y='38' width='1' height='1'/><rect x='59' y='38' width='1' height='1'/><rect x='61' y='38' width='1' height='1'/><rect x='64' y='38' width='2' height='1'/><rect x='67' y='38' width='1' height='1'/><rect x='71' y='38' width='1' height='1'/><rect x='79' y='38' width='1' height='1'/><rect x='87' y='38' width='1' height='1'/><rect x='91' y='38' width='1' height='1'/><rect x='97' y='38' width='1' height='1'/><rect x='41' y='39' width='1' height='1'/><rect x='43' y='39' width='1' height='1'/><rect x='49' y='39' width='1' height='1'/><rect x='53' y='39' width='1' height='1'/><rect x='55' y='39' width='1' height='1'/><rect x='59' y='39' width='1' height='1'/><rect x='61' y='39' width='1' height='1'/><rect x='65' y='39' width='1' height='1'/><rect x='67' y='39' width='1' height='1'/><rect x='71' y='39' width='1' height='1'/><rect x='79' y='39' width='1' height='1'/><rect x='87' y='39' width='1' height='1'/><rect x='91' y='39' width='1' height='1'/><rect x='97' y='39' width='1' height='1'/><rect x='37' y='40' width='4' height='1'/><rect x='43' y='40' width='5' height='1'/><rect x='50' y='40' width='3' height='1'/><rect x='56' y='40' width='3' height='1'/><rect x='61' y='40' width='1' height='1'/><rect x='65' y='40' width='1' height='1'/><rect x='67' y='40' width='4' height='1'/><rect x='79' y='40' width='5' height='1'/><rect x='86' y='40' width='3' height='1'/><rect x='91' y='40' width='1' height='1'/><rect x='97' y='40' width='5' height='1'/></svg></div><div id=bot><b class=se id=SE>SELECT</b><b class=se id=ST>START</b></div></div>"
+"<div id=abw><b class=cb id=CB>COMBO</b><div id=ab><b class=ab id=B><svg class=g viewBox='0 0 5 7'><rect x='0' y='0' width='1' height='1'/><rect x='0' y='1' width='1' height='1'/><rect x='0' y='2' width='1' height='1'/><rect x='0' y='3' width='1' height='1'/><rect x='0' y='4' width='1' height='1'/><rect x='0' y='5' width='1' height='1'/><rect x='0' y='6' width='1' height='1'/><rect x='1' y='0' width='1' height='1'/><rect x='1' y='3' width='1' height='1'/><rect x='1' y='6' width='1' height='1'/><rect x='2' y='0' width='1' height='1'/><rect x='2' y='3' width='1' height='1'/><rect x='2' y='6' width='1' height='1'/><rect x='3' y='0' width='1' height='1'/><rect x='3' y='3' width='1' height='1'/><rect x='3' y='6' width='1' height='1'/><rect x='4' y='1' width='1' height='1'/><rect x='4' y='2' width='1' height='1'/><rect x='4' y='4' width='1' height='1'/><rect x='4' y='5' width='1' height='1'/></svg></b>"
+"<b class=ab id=A><svg class=g viewBox='0 0 5 7'><rect x='0' y='1' width='1' height='1'/><rect x='0' y='2' width='1' height='1'/><rect x='0' y='3' width='1' height='1'/><rect x='0' y='4' width='1' height='1'/><rect x='0' y='5' width='1' height='1'/><rect x='0' y='6' width='1' height='1'/><rect x='1' y='0' width='1' height='1'/><rect x='1' y='4' width='1' height='1'/><rect x='2' y='0' width='1' height='1'/><rect x='2' y='4' width='1' height='1'/><rect x='3' y='0' width='1' height='1'/><rect x='3' y='4' width='1' height='1'/><rect x='4' y='1' width='1' height='1'/><rect x='4' y='2' width='1' height='1'/><rect x='4' y='3' width='1' height='1'/><rect x='4' y='4' width='1' height='1'/><rect x='4' y='5' width='1' height='1'/><rect x='4' y='6' width='1' height='1'/></svg></b></div></div>"
 "</div>"
-"<div id=bot><b class=se id=SE>SELECT</b><b class=se id=ST>START</b></div></div>"
+"</div>"
 "<script>"
-"var M={A:1,B:2,SE:4,ST:8,U:16,D:32,L:64,R:128},st=0,ws,s=document.getElementById('s');"
+"var M={A:1,B:2,CB:3,SE:4,ST:8,U:16,D:32,L:64,R:128},st=0,ws,s=document.getElementById('s');"
 "var FT={P:[127,9,9,9,6],L:[127,64,64,64,64],A:[126,17,17,17,126],Y:[7,8,112,8,7],"
 "E:[127,73,73,73,65],R:[127,9,25,41,70],C:[62,65,65,65,34],O:[62,65,65,65,62],"
 "N:[127,4,8,16,127],T:[1,1,127,1,1],I:[0,65,127,65,0],G:[62,65,73,73,122],"
-"D:[127,65,65,65,62],1:[0,66,127,64,0],2:[98,81,73,73,70],'.':[64,0,0,0,0],' ':[0,0,0,0,0]};"
+"D:[127,65,65,65,62],W:[63,64,56,64,63],1:[0,66,127,64,0],2:[98,81,73,73,70],"
+"'.':[64,0,0,0,0],' ':[0,0,0,0,0]};"
 /* Соседние пиксели строки склеиваем в один прямоугольник - разметки втрое
    меньше. Атрибуты без кавычек, зато с закрывающим тегом: самозакрывающийся
    слэш при незакавыченном значении съедается разбором HTML. */
@@ -197,7 +240,7 @@ static const char PAGE[] =
 "var n=1;while(c+n<5&&(g[c+n]&(1<<y)))n++;"
 "o+='<rect x='+(k*6+c)+' y='+y+' width='+n+' height=1></rect>';c+=n}}}"
 "return '<svg class=st viewBox=\"0 0 '+w+' 7\">'+o+'</svg>'}"
-"function say(t){s.innerHTML=pix(t)}"
+"function say(t,ok){s.innerHTML='<i class=\"dot '+(ok?'g':'r')+'\"></i>'+pix(t)}"
 "function send(){if(ws&&ws.readyState==1)ws.send(new Uint8Array([st]))}"
 "function bind(id){var e=document.getElementById(id),m=M[id];"
 "function on(ev){ev.preventDefault();if(st&m)return;st|=m;e.classList.add('on');send()}"
@@ -212,10 +255,11 @@ static const char PAGE[] =
 "document.addEventListener('touchend',function(){if(!document.querySelector('b:active')){"
 "st=0;send();var l=document.querySelectorAll('b.on');for(var i=0;i<l.length;i++)l[i].classList.remove('on')}});"
 "function conn(){ws=new WebSocket('ws://'+location.host+'/ws');ws.binaryType='arraybuffer';"
-"ws.onopen=function(){say('CONNECTED')};"
-"ws.onclose=function(){say('RECONNECTING...');setTimeout(conn,1000)};"
-"ws.onmessage=function(m){var v=new Uint8Array(m.data);if(v.length)say('PLAYER '+v[0])}}"
-"say('CONNECTING...');conn();"
+"ws.onopen=function(){say('CONNECTED',1)};"
+"ws.onclose=function(){say('RECONNECTING...',0);setTimeout(conn,1000)};"
+"ws.onmessage=function(m){var v=new Uint8Array(m.data);if(!v.length)return;"
+"say(v.length>1&&!v[1]?'WAITING...':'PLAYER '+v[0],1)}}"
+"say('CONNECTING...',0);conn();"
 "</script>";
 
 static void cl_close(int i)
@@ -262,6 +306,17 @@ static int claim_slot(int i)
     return want;
 }
 
+static int game_running;
+
+/* Второй байт - идёт ли игра. Страница по нему пишет «жду игру» вместо номера:
+   пульт теперь живёт и до запуска, и между играми. */
+static void pad_status_send(int i)
+{
+    unsigned char f[4] = { 0x82, 2, (unsigned char)(i + 1),
+                           (unsigned char)(game_running ? 1 : 0) };
+    if (cl[i].fd >= 0 && cl[i].ws) send(cl[i].fd, f, 4, MSG_NOSIGNAL);
+}
+
 static void handshake(int i)
 {
     char* k;
@@ -284,9 +339,8 @@ static void handshake(int i)
     send(cl[i].fd, resp, n, MSG_NOSIGNAL);
     cl[i].ws = 1;
     cl[i].len = 0;
-    /* Сообщаем номер игрока - страница покажет его сверху. */
-    unsigned char f[3] = { 0x82, 1, (unsigned char)(i + 1) };
-    send(cl[i].fd, f, 3, MSG_NOSIGNAL);
+    /* Сообщаем номер игрока и идёт ли игра - страница покажет это сверху. */
+    pad_status_send(i);
 }
 
 /* Страница живёт внутри бинаря и меняется вместе с ним, а телефон держал её
@@ -379,4 +433,40 @@ void pad_net_stop(void)
     for (int i = 0; i < MAX_CL; i++) cl_close(i);
     if (srv_fd >= 0) close(srv_fd);
     srv_fd = -1;
+}
+
+/* ---- служба ----
+   Живёт отдельно от эмулятора: оболочка поднимает её при входе в список игр и
+   гасит при выходе в меню. Раньше сервер был внутри эмулятора и умирал вместе
+   с игрой - код на экране настроек показать было можно, а подключиться по нему
+   уже нельзя: сервера в этот момент не существовало. */
+int main(void)
+{
+    int fd, last_run = -1;
+
+    signal(SIGPIPE, SIG_IGN);
+    if (pad_net_init() <= 0) {
+        fprintf(stderr, "almond3s-pad: порт %d занят\n", PAD_PORT);
+        return 1;
+    }
+    fd = open(PAD_STATE, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) { perror(PAD_STATE); return 1; }
+
+    for (;;) {
+        unsigned char b[2];
+
+        pad_net_poll();
+
+        b[0] = (unsigned char)pad_net_state(0);
+        b[1] = (unsigned char)pad_net_state(1);
+        (void)!pwrite(fd, b, sizeof b, 0);
+
+        game_running = (access(PAD_RUN, F_OK) == 0);
+        if (game_running != last_run) {
+            last_run = game_running;
+            for (int i = 0; i < MAX_CL; i++) pad_status_send(i);
+        }
+
+        usleep(4000);   /* 250 Гц: пульту с запасом, процессору незаметно */
+    }
 }

@@ -47,6 +47,9 @@ apk add --allow-untrusted /tmp/kmod-lcd-almond3s-*.apk /tmp/lcd-ui-almond3s-*.ap
 reboot
 ```
 
+`nes-almond3s-*.apk` is the optional NES emulator — install it the same way if
+you want the Games page to run anything.
+
 **A kernel module is tied to the exact kernel build it was compiled against**
 (vermagic). The prebuilt `kmod` will refuse to load on any other OpenWrt
 version — for those, build it from source as described below. `lcd-ui-almond3s` itself
@@ -134,7 +137,8 @@ package on install.
 * **Modem** — operator, phone number, signal ladder, carrier aggregation,
   temperature, and a second page with cell details (TAC, CID, bandwidth,
   pathloss, CQI, MIMO, neighbouring cells)
-* **Traffic** — RX/TX with log-scaled history graphs
+* **Traffic** — RX/TX with a scrolling waveform of the last minutes,
+  download green and upload blue
 * **Info** — uptime, load, memory, battery
 * **SMS** — the inbox read through `5gmodem`'s bridge: multipart messages are
   glued back together, unread ones are marked, and a message opens full-screen
@@ -146,6 +150,14 @@ package on install.
 * **Services** — reachability of YouTube, Telegram, GitHub and others; tapping a
   card rechecks that one service immediately
 * **Weather** — current conditions with a city picker
+* **Games** — a NES emulator (QuickNES) drawing straight to the panel: on-screen
+  buttons on the side margins, a USB keyboard, or a phone browser gamepad served
+  over Wi-Fi (a QR code opens it). Put `.nes` files into `/etc/almond3s/roms`;
+  the package ships none
+* **Settings** — display, screensaver, night schedule, LED, icon editor and panel
+  tuning in one place. The **Widgets** screensaver shows three auto-rotating pages
+  of cards — clock with weather, radio link, and system — each with its own gauges
+  and graphs
 * **Display** — screensaver style and timeout, language, and a 180° screen
   flip (done in the panel's MADCTL register, touch is mirrored with it)
 * **LED** — the white LED above the screen: on/off, and blinking while unread

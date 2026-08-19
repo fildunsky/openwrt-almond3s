@@ -395,6 +395,23 @@ let TR_RU = {
     "buzzer test": "проверка бипера",
     "Factory tones and volume from stock firmware": "Тоны и громкость из заводской прошивки",
     "Blink on SMS": "Мигать при SMS",
+    "Widgets": "Виджеты",
+    "Overview": "Обзор",
+    "Load": "Нагрузка",
+    "1 min": "1 мин",
+    "Machine": "Система",
+    "Memory": "Память",
+    "Disk": "Диск",
+    "Uptime short": "Аптайм",
+    "Operator": "Оператор",
+    "Temp": "Темп",
+    "charging": "заряжается",
+    "online": "на связи",
+    "on battery": "от батареи",
+    "clients": "клиентов",
+    "new msgs": "новых",
+    "signal": "сигнал",
+    "blink on SMS": "мигание при SMS",
     "above the screen": "над экраном",
     "while unread remain": "пока есть непрочитанные",
     "blinking": "мигает",
@@ -562,6 +579,7 @@ let TR_RU = {
     "tap to change": "тап по строке - следующее значение",
     "Gamepad": "Пульт",
     "Settings": "Настройки",
+    "screen, saver, night": "экран, заставка, ночь",
     "LIGHT, %": "ЯРКОСТЬ, %",
     "WARM, %": "ТЕПЛО, %",
     "brightness, warm, language": "яркость, тепло, язык",
@@ -1044,6 +1062,31 @@ function draw_graph_compact(x, y, w, h, data, color, mn, mx, fill) {
     }
 }
 
+function dash_spark(x, y, w, h, data, color, mn, mx) {
+    let n = length(data);
+    if (n < 2 || mx <= mn) return;
+    let cap = int((w - 2) / 2);
+    let from = n > cap ? n - cap : 0, cnt = n - from;
+    if (cnt < 2) return;
+    let slot = (w - 2) / (cnt - 1);
+    let prev = -1, prevx = -1;
+    for (let i = 0; i < cnt; i++) {
+        let v = data[from + i];
+        if (v > mx) v = mx;
+        if (v < mn) v = mn;
+        let px = x + 1 + int(i * slot);
+        let py = y + h - 2 - int((v - mn) * (h - 4) / (mx - mn));
+        if (prev >= 0) {
+            let dy = py - prev, ys = dy > 0 ? prev : py;
+            if (dy != 0) lcd_rect(px, ys, 1, dy > 0 ? dy : -dy, color);
+            lcd_rect(prevx, prev, px - prevx, 1, color);
+        }
+        lcd_rect(px, py, 1, 1, color);
+        prev = py;
+        prevx = px;
+    }
+}
+
 function arr_minmax(arr) {
     if (length(arr) == 0) return { min: 0, max: 1 };
     let mn = 999999, mx = -999999;
@@ -1519,7 +1562,7 @@ function saver_set(v) {
 // Теперь раз в пять минут и на пиксель, и это можно выключить.
 // Вид заставки: full - как раньше (часы, дата, погода), clock - только часы
 // с уровнем и батареей, line - одна строка как в шапке.
-let SAVER_STYLES = [ "full", "clock", "line", "matrix", "logo", "off" ];
+let SAVER_STYLES = [ "full", "clock", "line", "dash", "matrix", "logo", "off" ];
 // Стили-сцены заставки -> индекс сцены в kmod (almond3s-lcd scene N).
 // Матрица = 0, наш баннер-лого = 1. Остальные сцены вырезаны из драйвера.
 let SAVER_SCENE_MAP = { "matrix": 0, "logo": 1 };
@@ -1661,7 +1704,7 @@ function nwarm_cfg() {
 }
 
 function nwarm_btn(i) {
-    return { x: 96 + i * 44, y: 158, w: 40, h: 22 };
+    return { x: 96 + i * 55, y: 158, w: 51, h: 22 };
 }
 
 function nact_btn(i) {
@@ -1710,9 +1753,8 @@ function saver_style_set(v) {
 }
 
 function style_btn(i) {
-    // Шесть стилей в один ряд (4 обычных + Матрица + Лого): у́же кнопки, чтобы
-    // не двигать блоки Shift/Night ниже.
-    return { x: 8 + i * 52, y: 96, w: 48, h: 30 };
+    let c = i % 4, r = int(i / 4);
+    return { x: GX + c * 78, y: 96 + r * 34, w: 70, h: 30 };
 }
 
 function burnin_cfg() {
@@ -1742,6 +1784,7 @@ function style_label(v) {
     if (v == "full")   return tr("Weather");
     if (v == "clock")  return tr("Clock");
     if (v == "line")   return tr("Line");
+    if (v == "dash")   return tr("Widgets");
     if (v == "matrix") return tr("Matrix");
     if (v == "logo")   return tr("Logo");
     return tr("Off");
@@ -1755,16 +1798,16 @@ function saver_label(v) {
 
 // Страница «Экран»: карточка таймаута и кнопки шага - три равных блока в ряд.
 function saver_box() {
-    return { x: 10, y: 32, w: 96, h: 42 };
+    return { x: GX, y: 32, w: 96, h: 42 };
 }
 
 function saver_btn(which) {
-    return which > 0 ? { x: 112, y: 32, w: 96, h: 42 }
-                     : { x: 214, y: 32, w: 96, h: 42 };
+    return which > 0 ? { x: GX + 104, y: 32, w: 96, h: 42 }
+                     : { x: GX + 208, y: 32, w: 96, h: 42 };
 }
 
 function svshift_btn() {
-    return { x: 10, y: 150, w: 300, h: 36 };
+    return { x: GX, y: 166, w: GW, h: 36 };
 }
 
 function svnight_btn() {
@@ -2083,40 +2126,48 @@ let WIFI_ST_DEF = [
 // хойстит. Буквы в плашке - дырки в белом прямоугольнике, начертание взято
 // из шрифта интерфейса, поэтому читается так же, как обычный текст.
 let VPN_ST_DEF = [
-    ".....................",
-    "#####################",
-    "#####################",
-    "##.###.#....##.###.##",
-    "##.###.#.###.#.###.##",
-    "##.###.#.###.#..##.##",
-    "##.###.#....##.#.#.##",
-    "##.###.#.#####.##..##",
-    "###.#.##.#####.###.##",
-    "####.###.#####.###.##",
-    "#####################",
-    "#####################",
-    ".....................",
-    ".....................",
+    "..............",
+    "..............",
+    ".############.",
+    "##############",
+    "#.#.#..##.##.#",
+    "#.#.#.#.#.##.#",
+    "#.#.#.#.#.##.#",
+    "#.#.#..##..#.#",
+    "#.#.#.###.#..#",
+    "##.##.###.##.#",
+    "##############",
+    ".############.",
+    "..............",
+    "..............",
 ];
 let MOON_ST_DEF = [
-    ".....................",
-    ".......#####.........",
-    "......####...........",
-    ".....####............",
-    "....####.............",
-    "....####.............",
-    "....####.............",
-    "....####.............",
-    "....####.............",
-    "....####.............",
-    ".....####............",
-    "......####...........",
-    ".......#####.........",
-    ".....................",
+    "..............",
+    ".......###....",
+    "......##......",
+    ".....##.......",
+    "....###.......",
+    "....###.......",
+    "....###.......",
+    "....###.......",
+    "....###.......",
+    "....###.......",
+    ".....##.......",
+    "......##......",
+    ".......###....",
+    "..............",
 ];
 
 // Один отрисовщик на все значки статус-строки: правки из редактора лежат в
 // MICON_CUSTOM и перекрывают вшитый арт.
+// Ширина значка: у правки из редактора своя, у вшитой - по арту. Раньше в
+// раскладке стояло жёсткое 21, и обрезанный полумесяц оставил бы после себя
+// дыру в полстроки.
+function st_icon_w(name, def) {
+    let cu = MICON_CUSTOM[name];
+    return cu ? cu.w : length(def[0]);
+}
+
 function draw_st_icon(x, y, name, def, col) {
     let cu = MICON_CUSTOM[name];
     if (cu) {
@@ -2250,13 +2301,22 @@ function uplink_kind() {
 // Значок VPN в статус-строке: белая плашка со словом внутри. Состояние
 // спрашиваем у того же vpn_clash.sh, что и страница VPN, но не на каждом
 // тике - запрос идёт в API михомо, это форк и сетевой вызов.
+let clash_pid = 0;
+
 function clash_running() {
     if (!vpn_present()) return false;
-    let p = fs.popen(SCRIPTS + "/vpn_clash.sh status 2>/dev/null", "r");
+    if (clash_pid > 0) {
+        let c = fs.readfile(sprintf("/proc/%d/comm", clash_pid));
+        if (c && trim(c) == "clash") return true;
+        clash_pid = 0;
+    }
+    let p = fs.popen("pidof clash 2>/dev/null", "r");
     if (!p) return false;
-    let out = p.read("all") ?? "";
+    let out = trim(p.read("all") ?? "");
     p.close();
-    return index(out, "\"running\":1") >= 0;
+    if (out == "") return false;
+    clash_pid = int(+split(out, " ")[0]);
+    return clash_pid > 0;
 }
 
 
@@ -2340,14 +2400,16 @@ function draw_status_row(y, o) {
         draw_alarm_icon(bell_x, y + 2, mono ?? C.yellow);
 
     // Справа налево: плашка VPN, за ней полумесяц ночного режима.
-    let cur = st.alarm_on ? bell_x - 6 : bell_x + 14;
+    // Правый край группы. 11, а не 14: замер показал, что плашка вставала в
+    // 3 px от процентов, тогда как все прочие зазоры в строке по 6.
+    let cur = st.alarm_on ? bell_x - 9 : bell_x + 11;
     if (st.vpn_on) {
-        cur -= 21;
+        cur -= st_icon_w("vpn", VPN_ST_DEF);
         draw_st_icon(cur, y + 1, "vpn", VPN_ST_DEF, "#FFFFFF");
         cur -= 5;
     }
     if (night_now()) {
-        cur -= 21;
+        cur -= st_icon_w("moon", MOON_ST_DEF);
         draw_st_icon(cur, y + 1, "moon", MOON_ST_DEF, mono ?? "#8B949E");
     }
 }
@@ -3920,7 +3982,6 @@ function menu_items() {
     let nc = type(d?.wifi?.clients) == "array" ? length(d.wifi.clients) : 0;
     let rx_last = length(hist.rx) > 0 ? hist.rx[length(hist.rx) - 1] : 0;
     let tx_last = length(hist.tx) > 0 ? hist.tx[length(hist.tx) - 1] : 0;
-    let lc = led_cfg();
     let bt = d?.battery, bp = int(+(bt?.percent ?? -1));
     let ns = int(d?.sms_new ?? 0);
     let it = [];
@@ -3933,7 +3994,6 @@ function menu_items() {
     push(it, { label: tr("Speedtest"), sub: speedtest_sub(), icon: "bolt", ic: C.cyan, act: "speedtest" });
     push(it, { label: tr("Traffic"), sub: sprintf("R:%s T:%s", fmt_bytes(rx_last), fmt_bytes(tx_last)), icon: "traffic", ic: C.cyan, act: "traffic" });
     push(it, { label: tr("SMS"), sub: ns > 0 ? sprintf(tr("%d new"), ns) : tr("inbox"), sc: ns > 0 ? C.green : C.gray, icon: "sms", ic: C.white, act: "sms" });
-    push(it, { label: tr("LED"), sub: led_blinking ? tr("blinking") : (lc.on ? tr("on") : tr("off")), sc: (lc.on || led_blinking) ? C.green : C.gray, icon: "led", ic: C.yellow, act: "led" });
     push(it, { label: tr("Weather"), sub: weather_sub(), icon: "weather", ic: C.yellow, act: "weather" });
     push(it, { label: tr("Alarm"), sub: alarm_sub(), icon: "sound", ic: C.cyan, act: "alarm" });
     push(it, { label: tr("Battery"), sub: bp >= 0 ? sprintf("%d%%", bp) : "--", sc: bt?.charging ? C.green : C.gray, icon: "bolt", ic: "#FFA930", act: "battery" });
@@ -3942,7 +4002,10 @@ function menu_items() {
     // занимает место. Сама страница жива и открывается через /tmp/.lcd_goto,
     // так что вернуть её - это одна строка.
     push(it, { label: tr("Games"), sub: games_sub(), icon: "game", ic: C.green, act: "games" });
-    push(it, { label: tr("Settings"), sub: sprintf("%d%%", bright_cfg()), icon: "display", ic: C.cyan, act: "settings" });
+    // Подпись - о содержимом раздела. Раньше здесь показывалась яркость: она
+    // осталась от плитки «Экран», на месте которой встал этот раздел, и на
+    // «Настройках» процент висел без пояснения, к чему он относится.
+    push(it, { label: tr("Settings"), sub: tr("screen, saver, night"), icon: "display", ic: C.cyan, act: "settings" });
     push(it, { label: tr("Info"), sub: fmt_uptime(d?.uptime), icon: "info", ic: C.cyan, act: "info" });
     push(it, { label: tr("Modem Reset"), sub: tr("LTE restart"), sc: "#F0A868", bg: "#3A2208", icon: "reset", ic: C.orange, act: "reset", line: C.orange });
     push(it, { label: tr("Power"), sub: tr("System"), sc: "#F0B0B8", bg: C.back, icon: "reboot", ic: "#F0B0B8", act: "power", line: "#D32F2F" });
@@ -3980,7 +4043,8 @@ function draw_nav_tile() {
 }
 
 function draw_menu() {
-    if (st.halting) return;   // идёт выключение/ребут - не рисовать поверх заставки
+    if (st.halting) return;
+
     lcd_clear(C.bg);
     draw_header();
     let items = menu_items();
@@ -4471,12 +4535,13 @@ let SETTINGS = [
     { label: "Display",      sub: "brightness, warm, language", act: "display" },
     { label: "Saver",        sub: "timeout and look",           act: "saver" },
     { label: "Night",        sub: "schedule and actions",       act: "night" },
+    { label: "LED",          sub: "above the screen",           act: "led" },
     { label: "Editor",       sub: "pixel art",                  act: "iconedit" },
     { label: "Panel tuning", sub: "driver debug",               act: "debug" },
 ];
 
 function settings_btn(i) {
-    return { x: GX, y: 30 + i * 34, w: GW, h: 30 };
+    return { x: GX, y: 28 + i * 29, w: GW, h: 26 };
 }
 
 function draw_settings_page() {
@@ -4488,8 +4553,17 @@ function draw_settings_page() {
         lcd_rect(b.x, b.y, b.w, b.h, C.widget);
         lcd_rect(b.x, b.y, 3, b.h, C.accent);
         lcd_text(b.x + 12, b.y + 4, tr(SETTINGS[i].label), C.white, C.widget, 1);
-        lcd_text(b.x + 12, b.y + 17, tr(SETTINGS[i].sub), C.gray, C.widget, 1);
-        lcd_text(b.x + b.w - 18, b.y + 10, ">", C.gray, C.widget, 2);
+        let sub = tr(SETTINGS[i].sub);
+        if (SETTINGS[i].act == "led") {
+            let lc = led_cfg();
+            if (led_blinking) sub = tr("blinking");
+            else {
+                sub = lc.on ? tr("on") : tr("off");
+                if (lc.sms) sub += ", " + tr("blink on SMS");
+            }
+        }
+        lcd_text(b.x + 12, b.y + 16, sub, C.gray, C.widget, 1);
+        lcd_text(b.x + b.w - 18, b.y + 8, ">", C.gray, C.widget, 2);
     }
 
     draw_back();
@@ -4595,7 +4669,7 @@ function draw_saver_page() {
 
 // Часы ночного режима - отдельной страницей: открывается тапом по «Ночь».
 function led_row(i) {
-    return { x: 20, y: 44 + i * 56, w: 280, h: 44 };
+    return { x: GX, y: 44 + i * 56, w: GW, h: 44 };
 }
 
 // ===== Будильник =====
@@ -5265,18 +5339,18 @@ function draw_battery_page() {
 }
 
 function games_btn(i) {
-    return { x: 8, y: 28 + i * 34, w: 304, h: 30 };
+    return { x: 8, y: 26 + i * 32, w: 304, h: 30 };
 }
 
 // Листалка: ромов стало много, на страницу помещается четыре.
 function games_arrow(dir) {
-    return { x: dir < 0 ? 112 : 224, y: 172, w: 88, h: 28 };
+    return { x: dir < 0 ? 112 : 224, y: 158, w: 88, h: 28 };
 }
 
 // Кнопка настроек живёт между стрелками листалки: отдельной строки на неё в
 // списке нет, а место посередине всё равно занимал только счётчик страниц.
 function games_cfg_btn() {
-    return { x: 8, y: 172, w: 96, h: 28 };
+    return { x: 8, y: 158, w: 96, h: 28 };
 }
 
 // Переключатели эмулятора лежат в файлах: он перечитывает их на живую, без
@@ -5521,14 +5595,18 @@ function draw_games_page() {
 
     }
 
-    // Подсказка, когда ромов нет или эмулятор не поставлен.
-    let y = 28 + (length(roms) + 1) * 34 + 6;
+    // Путь к ромам показываем ВСЕГДА, мелко и приглушённо. Раньше он всплывал
+    // только когда список пуст - то есть ровно тогда, когда его уже некуда
+    // положить, а при полном списке узнать место было неоткуда.
+    lcd_text(10, 192, ROM_DIRS[0], C.dim, C.bg, 1);
+
+    // Подсказка, когда ромов нет или эмулятор не поставлен. Путь тут больше не
+    // дублируем - он строкой ниже.
+    let y = 26 + (length(roms) + 1) * 32 + 6;
     if (!fs.stat(NES_BIN))
         lcd_text(12, y, tr("emulator not installed"), C.dim, C.bg, 1);
-    else if (!length(roms)) {
+    else if (!length(roms))
         lcd_text(12, y, tr("Put .nes into"), C.dim, C.bg, 1);
-        lcd_text(12, y + 12, ROM_DIRS[0], C.gray, C.bg, 1);
-    }
 
     draw_back();
     lcd_flush();
@@ -7149,71 +7227,21 @@ function draw_traffic_zoom(i) {
 
     lcd_text(12, 34, "RX", C.green, C.bg, 2);
     lcd_text(44, 30, fmt_bytes(rx_last) + "/s", C.white, C.bg, 3);
-    lcd_text(12, 66, "TX", C.red, C.bg, 2);
+    lcd_text(12, 66, "TX", C.cyan, C.bg, 2);
     lcd_text(44, 62, fmt_bytes(tx_last) + "/s", C.white, C.bg, 3);
 
     let rm = arr_minmax(hrx);
     let tm = arr_minmax(htx);
     let mx = rm.max > tm.max ? rm.max : tm.max;
-    if (mx < 10240) mx = 10240;
+    if (mx < 512) mx = 512;
     let gy = 96, gh = 100, gx = 12, gw = 296;
-    draw_graph_compact(gx, gy, gw, gh, hrx, C.green, 0, mx, true);
-    let n = length(htx);
-    if (n >= 2) {
-        let pts = n > HIST_LEN ? HIST_LEN : n;
-        let start = n - pts;
-        let step_x = (gw - 2) / (pts - 1);
-        let prev_px = -1, prev_py = -1;
-        for (let k = 0; k < pts; k++) {
-            let val = htx[start + k];
-            let px = gx + 1 + int(k * step_x);
-            let py = gy + gh - 1 - int(log_frac(val, mx) * (gh - 2) / 1000);
-            if (py < gy) py = gy;
-            if (py > gy + gh - 1) py = gy + gh - 1;
-            let sw = int(step_x); if (sw < 1) sw = 1;
-            if (px + sw > gx + gw - 1) sw = gx + gw - 1 - px;
-            if (sw < 1) sw = 1;
-            lcd_rect(px, py, sw, 1, C.red);
-            if (prev_px >= 0) {
-                let dy = py - prev_py;
-                let ys = dy > 0 ? prev_py : py;
-                if (dy != 0) lcd_rect(px, ys, 1, (dy > 0 ? dy : -dy), C.red);
-            }
-            prev_px = px; prev_py = py;
-        }
-    }
+    lcd_rect(gx, gy, gw, gh, "#0B1220");
+    dash_spark(gx, gy, gw, gh, htx, C.cyan, 0, mx);
+    dash_spark(gx, gy, gw, gh, hrx, C.green, 0, mx);
     draw_back();
     lcd_flush();
 }
 
-// Линия TX поверх графика RX: своя, потому что draw_graph_compact рисует
-// заливку, а TX нужен контуром. gtop/gbot - границы графика внутри карточки.
-function traffic_tx_line(cx, cw, y, gtop, gbot, data, mx) {
-    let n = length(data);
-    if (n < 2) return;
-    let pts = n > HIST_LEN ? HIST_LEN : n;
-    let start = n - pts;
-    let step_x = ((cw - 8) - 2) / (pts - 1);
-    let span = gbot - gtop;
-    let prev_px = -1, prev_py = -1;
-    for (let i = 0; i < pts; i++) {
-        let val = data[start + i];
-        let px = cx + 5 + int(i * step_x);
-        let py = y + gbot - int(log_frac(val, mx) * span / 1000);
-        if (py < y + gtop) py = y + gtop;
-        if (py > y + gbot) py = y + gbot;
-        let sw = int(step_x); if (sw < 1) sw = 1;
-        if (px + sw > cx + cw - 5) sw = cx + cw - 5 - px;
-        if (sw < 1) sw = 1;
-        lcd_rect(px, py, sw, 1, C.red);
-        if (prev_px >= 0) {
-            let dy = py - prev_py;
-            let ys = dy > 0 ? prev_py : py;
-            if (dy != 0) lcd_rect(px, ys, 1, (dy > 0 ? dy : -dy), C.red);
-        }
-        prev_px = px; prev_py = py;
-    }
-}
 
 function draw_traffic_page() {
     if (st.tzoom != null) { draw_traffic_zoom(st.tzoom); return; }
@@ -7235,15 +7263,16 @@ function draw_traffic_page() {
     lcd_text(cx + 10, y1 + 6, "MODEM - wwan0", C.gray, C.widget, 1);
     lcd_text(cx + 10, y1 + 20, "RX", C.green, C.widget, 1);
     lcd_text(cx + 32, y1 + 20, fmt_bytes(rx_last) + "/s", C.white, C.widget, 1);
-    lcd_text(cx + 165, y1 + 20, "TX", C.red, C.widget, 1);
+    lcd_text(cx + 165, y1 + 20, "TX", C.cyan, C.widget, 1);
     lcd_text(cx + 187, y1 + 20, fmt_bytes(tx_last) + "/s", C.white, C.widget, 1);
 
     let rm = arr_minmax(hist.rx);
     let tm = arr_minmax(hist.tx);
     let mx1 = rm.max > tm.max ? rm.max : tm.max;
-    if (mx1 < 10240) mx1 = 10240;
-    draw_graph_compact(cx + 4, y1 + GTOP, cw - 8, GBOT - GTOP, hist.rx, C.green, 0, mx1, true);
-    traffic_tx_line(cx, cw, y1, GTOP, GBOT, hist.tx, mx1);
+    if (mx1 < 512) mx1 = 512;
+    lcd_rect(cx + 4, y1 + GTOP, cw - 8, GBOT - GTOP, "#0B1220");
+    dash_spark(cx + 4, y1 + GTOP, cw - 8, GBOT - GTOP, hist.tx, C.cyan, 0, mx1);
+    dash_spark(cx + 4, y1 + GTOP, cw - 8, GBOT - GTOP, hist.rx, C.green, 0, mx1);
 
     // WAN / Ethernet
     let wan_rx = length(hist.wan_rx) > 0 ? hist.wan_rx[length(hist.wan_rx) - 1] : 0;
@@ -7253,15 +7282,16 @@ function draw_traffic_page() {
     lcd_text(cx + 10, y2 + 6, sprintf(tr("UPLINK - %s"), default_iface() ?? "none"), C.gray, C.widget, 1);
     lcd_text(cx + 10, y2 + 20, "RX", C.green, C.widget, 1);
     lcd_text(cx + 32, y2 + 20, fmt_bytes(wan_rx) + "/s", C.white, C.widget, 1);
-    lcd_text(cx + 165, y2 + 20, "TX", C.red, C.widget, 1);
+    lcd_text(cx + 165, y2 + 20, "TX", C.cyan, C.widget, 1);
     lcd_text(cx + 187, y2 + 20, fmt_bytes(wan_tx) + "/s", C.white, C.widget, 1);
 
     let brm = arr_minmax(hist.wan_rx);
     let btm = arr_minmax(hist.wan_tx);
     let mx2 = brm.max > btm.max ? brm.max : btm.max;
-    if (mx2 < 10240) mx2 = 10240;
-    draw_graph_compact(cx + 4, y2 + GTOP, cw - 8, GBOT - GTOP, hist.wan_rx, C.green, 0, mx2, true);
-    traffic_tx_line(cx, cw, y2, GTOP, GBOT, hist.wan_tx, mx2);
+    if (mx2 < 512) mx2 = 512;
+    lcd_rect(cx + 4, y2 + GTOP, cw - 8, GBOT - GTOP, "#0B1220");
+    dash_spark(cx + 4, y2 + GTOP, cw - 8, GBOT - GTOP, hist.wan_tx, C.cyan, 0, mx2);
+    dash_spark(cx + 4, y2 + GTOP, cw - 8, GBOT - GTOP, hist.wan_rx, C.green, 0, mx2);
 
     draw_back();
     lcd_flush();
@@ -7344,6 +7374,24 @@ function page_sig() {
     return base + sprintf("|%d", st.frame);
 }
 
+// Пульт в браузере - отдельная служба: она живёт дольше игры, поэтому код с
+// экрана настроек можно отсканировать заранее, а соединение не рвётся при
+// выходе из игры. Держим её ровно пока открыт раздел «Игры».
+//
+// setsid обязателен: на время игры оболочка останавливается целиком, и без
+// отвязки служба ушла бы вместе с ней. Второй запуск безвреден - служба сама
+// выходит, если порт уже занят.
+function pad_start() {
+    /* setsid обязателен: на время игры оболочка останавливается целиком, и без
+       отвязки служба ушла бы вместе с ней. Второй запуск безвреден - служба
+       сама выходит, если порт уже занят. */
+    system("/usr/bin/setsid /usr/libexec/almond3s/almond3s-pad >/dev/null 2>&1 </dev/null &");
+}
+
+function pad_stop() {
+    system("killall almond3s-pad >/dev/null 2>&1");
+}
+
 function draw_current() {
     // Идёт выключение/перезагрузка - на экране заставка «Выключаю...» /
     // «Перезагружаюсь...», и перерисовывать поверх неё нельзя: reboot лишь
@@ -7351,6 +7399,19 @@ function draw_current() {
     // гасит службы - без этого гварда таймеры успевали нарисовать меню
     // поверх заставки, и пользователь видел интерфейс перед ребутом.
     if (st.halting) return;
+
+    // Пульт держим включённым на всех страницах раздела «Игры», включая экран
+    // с QR-кодами: сканировать код имеет смысл только когда сервер уже слушает.
+    // Проверяем здесь, а не в go_page: служебный переход по /tmp/.lcd_goto его
+    // не вызывает, да и вернуться в раздел можно разными путями.
+    {
+        let want = (st.page == "games" || st.page == "gset" ||
+                    st.page == "gqr"   || st.page == "gkeys");
+        if (want != st.pad_on) {
+            st.pad_on = want;
+            if (want) pad_start(); else pad_stop();
+        }
+    }
 
     // Пока на экране заставка, страницы не рисуем. Иначе длинная операция
     // (переключение аплинка занимает секунды) заканчивалась уже под заставкой
@@ -7403,6 +7464,407 @@ function draw_current() {
 //  SCREENSAVER
 // =============================================
 
+let DASH_PING_HOST = "77.88.8.8";
+let DASH_CW = 72, DASH_CH = 50, DASH_G = 6, DASH_MX = 7, DASH_MY = 7;
+let DASH_PAGE_SECS = 10;
+
+let DASH_PAGES = [
+    { title: "Overview", tiles: [
+        { k: "clock",   c: 0, r: 0, cw: 2, ch: 2 },
+        { k: "weather", c: 2, r: 0, cw: 2, ch: 1 },
+        { k: "batt",    c: 2, r: 1, cw: 1, ch: 1 },
+        { k: "wifi",    c: 3, r: 1, cw: 1, ch: 1 },
+        { k: "sig",     c: 0, r: 2, cw: 2, ch: 1 },
+        { k: "ping",    c: 2, r: 2, cw: 1, ch: 1 },
+        { k: "sms",     c: 3, r: 2, cw: 1, ch: 1 },
+        { k: "traffic", c: 0, r: 3, cw: 4, ch: 1 },
+    ] },
+    { title: "Modem", tiles: [
+        { k: "oper",    c: 0, r: 0, cw: 2, ch: 1 },
+        { k: "rsrp",    c: 2, r: 0, cw: 1, ch: 1 },
+        { k: "sinr",    c: 3, r: 0, cw: 1, ch: 1 },
+        { k: "rsrq",    c: 0, r: 1, cw: 1, ch: 1 },
+        { k: "csq",     c: 1, r: 1, cw: 1, ch: 1 },
+        { k: "band",    c: 2, r: 1, cw: 1, ch: 1 },
+        { k: "mtemp",   c: 3, r: 1, cw: 1, ch: 1 },
+        { k: "grsrp",   c: 0, r: 2, cw: 4, ch: 1 },
+        { k: "mip",     c: 0, r: 3, cw: 2, ch: 1 },
+        { k: "apn",     c: 2, r: 3, cw: 2, ch: 1 },
+    ] },
+    { title: "Machine", tiles: [
+        { k: "cpu",     c: 0, r: 0, cw: 2, ch: 1 },
+        { k: "mem",     c: 2, r: 0, cw: 1, ch: 1 },
+        { k: "disk",    c: 3, r: 0, cw: 1, ch: 1 },
+        { k: "vpn",     c: 0, r: 1, cw: 2, ch: 1 },
+        { k: "lan",     c: 2, r: 1, cw: 2, ch: 1 },
+        { k: "gping",   c: 0, r: 2, cw: 4, ch: 1 },
+        { k: "ver",     c: 0, r: 3, cw: 2, ch: 1 },
+        { k: "up",      c: 2, r: 3, cw: 1, ch: 1 },
+        { k: "load",    c: 3, r: 3, cw: 1, ch: 1 },
+    ] },
+];
+
+let dash_vpn = { ts: 0, node: "", group: "", cc: "" };
+
+function dash_vpn_now() {
+    let now = time();
+    if (now - dash_vpn.ts < 20) return dash_vpn;
+    dash_vpn.ts = now;
+    dash_vpn.node = ""; dash_vpn.group = ""; dash_vpn.cc = "";
+    if (!st.vpn_on) return dash_vpn;
+    let raw = vpn_sh("groups");
+    if (!raw) return dash_vpn;
+    try {
+        let px = json(raw)?.proxies ?? {};
+        for (let name in px) {
+            let e = px[name];
+            if (e?.hidden || name == "GLOBAL") continue;
+            if (type(e?.all) != "array" || length(e.all) == 0) continue;
+            let nw = e?.now ?? "";
+            if (nw == "") continue;
+            let fl = vpn_flag(nw);
+            dash_vpn.cc = fl[0];
+            dash_vpn.node = fl[1];
+            dash_vpn.group = vpn_flag(name)[1];
+            break;
+        }
+    } catch(e) {}
+    return dash_vpn;
+}
+
+function dash_date() {
+    let t = localtime();
+    if (!t) return "--";
+    let M = lang() == "ru" ? MONTHS_RU : MONTHS_EN;
+    return sprintf("%d %s", t.mday, M[clampi(t.mon, 1, 12) - 1]);
+}
+
+function dash_page() {
+    return int(time() / DASH_PAGE_SECS) % length(DASH_PAGES);
+}
+
+
+function dash_box(t) {
+    return {
+        x: DASH_MX + t.c * (DASH_CW + DASH_G) + (st.ox ?? 0),
+        y: DASH_MY + t.r * (DASH_CH + DASH_G) + (st.oy ?? 0),
+        w: t.cw * DASH_CW + (t.cw - 1) * DASH_G,
+        h: t.ch * DASH_CH + (t.ch - 1) * DASH_G,
+    };
+}
+
+let A_CYAN = "#58A6FF", A_GREEN = "#3FB950", A_ORANGE = "#E8853A",
+    A_PURPLE = "#A371F7", A_TEAL = "#39C5CF", A_PINK = "#DB61A2";
+
+function dash_card(b, o, acc) {
+    lcd_rect(b.x, b.y, b.w, b.h, o.card);
+    lcd_rect(b.x, b.y, 3, b.h, o.mono ?? (acc ?? C.dim));
+}
+
+function dash_lab(b, o, s) {
+    lcd_text(b.x + 12, b.y + 6, s, o.dim, o.card, 1);
+}
+
+function dash_right(b, o, y, s, col) {
+    lcd_text(b.x + b.w - 11 - tlen(s) * 6, y, s, o.mono ?? (col ?? o.dim), o.card, 1);
+}
+
+function dash_val(b, o, s, col) {
+    let sz = (tlen(s) * 12 <= b.w - 24) ? 2 : 1;
+    lcd_text(b.x + 12, b.y + (sz == 2 ? 19 : 22), s, o.mono ?? (col ?? o.fg), o.card, sz);
+}
+
+function dash_sub(b, o, s) {
+    lcd_text(b.x + 12, b.y + b.h - 13, s, o.dim, o.card, 1);
+}
+
+function dash_bar(b, o, pct, col) {
+    let bw = b.w - 24, fw = int(bw * clampi(pct, 0, 100) / 100);
+    lcd_rect(b.x + 12, b.y + b.h - 12, bw, 5, o.mono ? "#0A2A16" : C.btn);
+    if (fw > 0) lcd_rect(b.x + 12, b.y + b.h - 12, fw, 5, o.mono ?? col);
+}
+
+function dash_simple(b, o, acc, label, val, sub, col) {
+    dash_card(b, o, acc);
+    dash_lab(b, o, label);
+    dash_val(b, o, val, col);
+    if (sub != null && sub != "") dash_sub(b, o, sub);
+}
+
+function dash_gauge(b, o, acc, label, val, pct, col) {
+    dash_card(b, o, acc);
+    dash_lab(b, o, label);
+    dash_val(b, o, val, col);
+    dash_bar(b, o, pct, col);
+}
+
+function dash_sig_pct(d) {
+    let sp = int(+(d?.lte?.signal ?? 0));
+    if (sp > 0) return clampi(sp, 0, 100);
+    let rsrp = int(+(d?.lte?.rsrp ?? d?.uqmi?.rsrp ?? 0));
+    return rsrp != 0 ? clampi(int(MET.rsrp.bar(rsrp)), 0, 100) : -1;
+}
+
+function dash_lvl_col(pct) {
+    return pct < 0 ? C.dim : (pct >= 60 ? C.green : (pct >= 30 ? C.orange : C.red));
+}
+
+function dash_tile(t, d, o) {
+    let b = dash_box(t);
+
+    if (t.k == "clock") {
+        dash_card(b, o, A_CYAN);
+        lcd_text(b.x + 12, b.y + 14, clock_str(), o.fg, o.card, 4);
+        lcd_text(b.x + 12, b.y + 56, dash_date(), o.dim, o.card, 2);
+        lcd_text(b.x + 12, b.y + 82, fmt_uptime(d?.uptime), o.dim, o.card, 1);
+        return;
+    }
+
+    if (t.k == "batt" || t.k == "batt2") {
+        let bt = d?.battery, pc = int(+(bt?.percent ?? -1));
+        let col = pc < 0 ? C.dim : (pc >= 40 ? C.green : (pc >= 15 ? C.orange : C.red));
+        dash_gauge(b, o, col, tr("Battery"), pc >= 0 ? sprintf("%d%%", pc) : "--", pc, col);
+        if (t.k == "batt2")
+            dash_right(b, o, b.y + 6, bt?.charging ? tr("charging") : tr("on battery"));
+        return;
+    }
+
+    if (t.k == "wifi") {
+        let nc = type(d?.wifi?.clients) == "array" ? length(d.wifi.clients) : 0;
+        dash_simple(b, o, A_TEAL, "Wi-Fi", sprintf("%d", nc), tr("clients"), nc > 0 ? A_TEAL : o.dim);
+        return;
+    }
+
+    if (t.k == "sig") {
+        let pct = dash_sig_pct(d), col = dash_lvl_col(pct);
+        let rsrp = int(+(d?.lte?.rsrp ?? 0));
+        dash_gauge(b, o, col, tcut(d?.lte?.operator ?? tr("no network"), 14),
+                   pct >= 0 ? sprintf("%d%%", pct) : "--", pct >= 0 ? pct : 0, col);
+        let badge = trim(sprintf("%s %s", d?.lte?.mode ?? "", d?.lte?.band ?? ""));
+        if (badge != "") dash_right(b, o, b.y + 6, badge, A_CYAN);
+        if (rsrp != 0) dash_right(b, o, b.y + 21, sprintf("%d dBm", rsrp));
+        return;
+    }
+
+    if (t.k == "traffic") {
+        dash_card(b, o, A_GREEN);
+        let rx = length(hist.rx) > 0 ? hist.rx[length(hist.rx) - 1] : 0;
+        let tx = length(hist.tx) > 0 ? hist.tx[length(hist.tx) - 1] : 0;
+        lcd_text(b.x + 12, b.y + 8, fmt_bytes(rx) + "/s", o.mono ?? C.green, o.card, 2);
+        lcd_text(b.x + 12, b.y + 28, fmt_bytes(tx) + "/s", o.mono ?? C.cyan, o.card, 2);
+        let gx = b.x + 100, gy = b.y + 5, gw = b.w - 112, gh = b.h - 10;
+        let rm = arr_minmax(hist.rx), tm = arr_minmax(hist.tx);
+        let mx = rm.max > tm.max ? rm.max : tm.max;
+        if (mx < 512) mx = 512;
+        dash_spark(gx, gy, gw, gh, hist.tx, o.mono ?? C.cyan, 0, mx);
+        dash_spark(gx, gy, gw, gh, hist.rx, o.mono ?? C.green, 0, mx);
+        return;
+    }
+
+    if (t.k == "vpn") {
+        let v = dash_vpn_now();
+        let on = st.vpn_on == true && v.node != "";
+        dash_card(b, o, on ? A_PURPLE : C.dim);
+        dash_lab(b, o, "VPN");
+        if (on) {
+            let vx = b.x + 12;
+            if (v.cc != "" && !o.mono) { draw_cflag(vx, b.y + 20, v.cc); vx += 20; }
+            lcd_text(vx, b.y + 20, tcut(v.node, int((b.w - (vx - b.x) - 12) / 6)),
+                     o.mono ?? A_PURPLE, o.card, 1);
+            dash_sub(b, o, tcut(v.group, 22));
+        } else {
+            dash_val(b, o, tr("off"), o.dim);
+        }
+        return;
+    }
+
+    if (t.k == "ping") {
+        let ms = int(+(d?.ping?.google_ms ?? -1));
+        let col = ms < 0 ? C.dim : (ms < 80 ? C.green : (ms < 250 ? C.orange : C.red));
+        dash_simple(b, o, A_TEAL, tr("Ping"), ms >= 0 ? sprintf("%d", ms) : "--", DASH_PING_HOST, col);
+        return;
+    }
+
+    if (t.k == "sms") {
+        let n = int(+(d?.sms_new ?? 0));
+        dash_simple(b, o, n > 0 ? A_ORANGE : C.dim, "SMS", sprintf("%d", n), tr("new msgs"), n > 0 ? A_ORANGE : o.dim);
+        return;
+    }
+
+    if (t.k == "oper") {
+        dash_simple(b, o, A_CYAN, tr("Operator"), tcut(d?.lte?.operator ?? "--", 22),
+                    tcut(sprintf("%s  %s", d?.lte?.mode ?? "", d?.lte?.modem ?? ""), 22), o.fg);
+        return;
+    }
+
+    if (t.k == "rsrp") {
+        let v = int(+(d?.lte?.rsrp ?? 0));
+        dash_simple(b, o, A_GREEN, "RSRP", v != 0 ? sprintf("%d", v) : "--", "dBm",
+                    dash_lvl_col(v != 0 ? clampi(int(MET.rsrp.bar(v)), 0, 100) : -1));
+        return;
+    }
+
+    if (t.k == "rsrq") {
+        let v = int(+(d?.lte?.rsrq ?? 0));
+        dash_simple(b, o, A_PURPLE, "RSRQ", v != 0 ? sprintf("%d", v) : "--", "dB", o.fg);
+        return;
+    }
+
+    if (t.k == "sinr") {
+        let v = int(+(d?.lte?.sinr ?? 0));
+        dash_simple(b, o, A_TEAL, "SINR", sprintf("%d", v), "dB",
+                    v >= 10 ? C.green : (v >= 0 ? C.orange : C.red));
+        return;
+    }
+
+    if (t.k == "csq") {
+        let v = int(+(d?.lte?.csq ?? 0));
+        dash_simple(b, o, A_PINK, "CSQ", sprintf("%d", v), "0-31", o.fg);
+        return;
+    }
+
+    if (t.k == "mtemp") {
+        let v = int(+(d?.lte?.temp ?? 0));
+        dash_simple(b, o, A_ORANGE, tr("Temp"), v != 0 ? sprintf("%d°C", v) : "--", tr("Modem"),
+                    v >= 70 ? C.orange : o.fg);
+        return;
+    }
+
+    if (t.k == "band") {
+        dash_simple(b, o, A_CYAN, "Band", tcut(d?.lte?.band ?? "--", 4),
+                    sprintf("PCI %d", int(+(d?.lte?.pci ?? 0))), A_CYAN);
+        return;
+    }
+
+    if (t.k == "grsrp") {
+        dash_card(b, o, A_GREEN);
+        dash_lab(b, o, "RSRP");
+        let mm = arr_minmax(hist.rsrp);
+        let lo = mm.min < 0 ? mm.min - 2 : -120, hi = mm.max < 0 ? mm.max + 2 : -60;
+        if (hi <= lo) hi = lo + 10;
+        dash_right(b, o, b.y + 6, sprintf("%d..%d dBm", lo, hi));
+        dash_spark(b.x + 12, b.y + 16, b.w - 24, b.h - 22, hist.rsrp, o.mono ?? A_GREEN, lo, hi);
+        return;
+    }
+
+    if (t.k == "gping") {
+        dash_card(b, o, A_TEAL);
+        dash_lab(b, o, tr("Ping"));
+        let mm = arr_minmax(hist.ping);
+        let hi = mm.max > 20 ? mm.max : 20;
+        dash_right(b, o, b.y + 6, sprintf("0..%d ms", hi));
+        dash_spark(b.x + 12, b.y + 16, b.w - 24, b.h - 22, hist.ping, o.mono ?? A_TEAL, 0, hi);
+        return;
+    }
+
+    if (t.k == "mip") {
+        dash_simple(b, o, A_TEAL, "IP", tcut(d?.lte?.ip ?? "--", 22), tr("Modem"), o.fg);
+        return;
+    }
+
+    if (t.k == "apn") {
+        dash_simple(b, o, A_PURPLE, "APN", tcut(d?.lte?.apn ?? "--", 22),
+                    tcut(sprintf("%s %s", tr("online"), d?.lte?.conn_time ?? ""), 22), o.fg);
+        return;
+    }
+
+    if (t.k == "cpu") {
+        let busy = int(+(d?.cpu_busy ?? -1));
+        let col = busy >= 85 ? A_ORANGE : A_CYAN;
+        let cores = type(d?.cpu_core_busy) == "array" ? d.cpu_core_busy : [];
+        let n = length(cores);
+        if (n < 1 || b.w < 120) {
+            dash_gauge(b, o, A_CYAN, "CPU", busy >= 0 ? sprintf("%d%%", busy) : "--",
+                       busy, col);
+            return;
+        }
+        dash_card(b, o, A_CYAN);
+        dash_lab(b, o, "CPU");
+        dash_val(b, o, busy >= 0 ? sprintf("%d%%", busy) : "--", col);
+        let bwid = 8, gap = 4, gh = 26;
+        let x0 = b.x + b.w - 12 - n * bwid - (n - 1) * gap, y0 = b.y + 11;
+        for (let i = 0; i < n; i++) {
+            let v = clampi(int(+(cores[i] ?? 0)), 0, 100);
+            let fh = int(gh * v / 100), bx = x0 + i * (bwid + gap);
+            lcd_rect(bx, y0, bwid, gh, o.mono ? "#0A2A16" : C.btn);
+            if (fh > 0)
+                lcd_rect(bx, y0 + gh - fh, bwid, fh,
+                         o.mono ?? (v >= 85 ? A_ORANGE : A_CYAN));
+            lcd_text(bx + 1, y0 + gh + 4, sprintf("%d", i), o.dim, o.card, 1);
+        }
+        return;
+    }
+
+    if (t.k == "mem") {
+        let tot = int(+(d?.mem_total_mb ?? 0)), fr = int(+(d?.mem_free_mb ?? 0));
+        let used = tot > 0 ? int((tot - fr) * 100 / tot) : -1;
+        dash_gauge(b, o, A_GREEN, tr("Memory"), used >= 0 ? sprintf("%d%%", used) : "--", used,
+                   used >= 85 ? C.orange : C.cyan);
+        return;
+    }
+
+    if (t.k == "disk") {
+        let tot = int(+(d?.storage?.total_kb ?? 0)), fr = int(+(d?.storage?.free_kb ?? 0));
+        let used = tot > 0 ? int((tot - fr) * 100 / tot) : -1;
+        dash_gauge(b, o, A_TEAL, tr("Disk"), used >= 0 ? sprintf("%d%%", used) : "--", used,
+                   used >= 85 ? C.orange : C.cyan);
+        return;
+    }
+
+    if (t.k == "up") {
+        dash_simple(b, o, A_ORANGE, tr("Uptime short"), fmt_uptime(d?.uptime), "", o.fg);
+        return;
+    }
+
+    if (t.k == "load") {
+        let la = +(d?.cpu_load ?? 0);
+        let nc = int(+(d?.cpu_cores ?? 1)); if (nc < 1) nc = 1;
+        dash_simple(b, o, A_PURPLE, tr("Load"), sprintf("%.2f", la), tr("1 min"),
+                    la > nc ? C.orange : o.fg);
+        return;
+    }
+
+    if (t.k == "weather") {
+        let w2 = d?.weather;
+        dash_card(b, o, A_ORANGE);
+        dash_lab(b, o, w2 ? tcut(city_name(w2.city) ?? tr("Weather"), 16) : tr("Weather"));
+        if (w2) {
+            lcd_text(b.x + 12, b.y + 19, tcut(w2.temp ?? "?", 5), o.mono ?? A_ORANGE, o.card, 2);
+            dash_sub(b, o, tcut(wcond_tr(w2.desc ?? ""), 18));
+            if (!o.mono) draw_weather_icon(b.x + b.w - 36, b.y + 13, w2.desc ?? "", 1, null);
+        } else {
+            dash_val(b, o, "--", o.dim);
+        }
+        return;
+    }
+
+    if (t.k == "lan") {
+        dash_simple(b, o, A_CYAN, "LAN", tcut(d?.lan?.ip ?? "--", 22), tcut(d?.lan?.mac ?? "", 22), o.fg);
+        return;
+    }
+
+    if (t.k == "ver") {
+        let bi = board_info();
+        dash_simple(b, o, A_PINK, tcut(bi?.model ?? "OpenWrt", 22),
+                    tcut(bi?.release?.version ?? "--", 22), tcut(bi?.kernel ?? "", 22), o.fg);
+        return;
+    }
+}
+
+function draw_dash_saver(o) {
+    let d = st.data;
+    let pg = dash_page(), page = DASH_PAGES[pg];
+    for (let i = 0; i < length(page.tiles); i++)
+        dash_tile(page.tiles[i], d, o);
+
+    let ox = st.ox ?? 0, oy = st.oy ?? 0;
+    lcd_text(10 + ox, 230 + oy, tr(page.title), o.dim, o.bg, 1);
+    for (let i = 0; i < length(DASH_PAGES); i++) {
+        let dx = LCD_W - 10 - (length(DASH_PAGES) - i) * 12 + ox;
+        lcd_rect(dx, 230 + oy, 7, 7, i == pg ? (o.mono ?? C.white) : (o.mono ? "#0A2A16" : C.dim));
+    }
+}
+
 function draw_screensaver() {
     if (st.halting) return;
     if (st.saver_scene != null) return;   // сцену рисует kmod, ui.uc не вмешивается
@@ -7428,6 +7890,15 @@ function draw_screensaver() {
     let row_o = { bg: bg, mono: night ? primary : null,
                   empty: night ? "#0A2A16" : C.dim,
                   no_sig: !fl.sig, no_batt: !fl.batt, no_env: !fl.env };
+
+    if (style == "dash") {
+        draw_dash_saver({ card: night ? "#07140C" : C.widget, bg: bg,
+                          line: night ? "#123D22" : C.border,
+                          fg: primary, dim: secondary,
+                          mono: night ? primary : null });
+        lcd_flush();
+        return;
+    }
 
     // Режим «строка»: та самая шапка, прижатая к верху экрана. Часы белые.
     if (style == "line") {
@@ -8184,7 +8655,6 @@ function handle_touch(tx, ty, tmove) {
             case "speedtest": speedtest_read(); st.spd_poll = int(+(st.spd?.running ?? 0)) > 0; go_page("speedtest"); return;
             case "traffic":   go_page("traffic"); return;
             case "sms":       st.sms_pg = 0; st.sms_i = -1; sms_refresh(); go_page("sms"); return;
-            case "led":       go_page("led"); return;
             case "settings":  go_page("settings"); return;
             case "display":   go_page("display"); return;
             case "saver":     go_page("saver"); return;
@@ -9048,7 +9518,8 @@ function handle_touch(tx, ty, tmove) {
             let sb = style_btn(i);
             if (in_rect(tx, ty, sb.x, sb.y, sb.w, sb.h)) {
                 saver_style_set(SAVER_STYLES[i]);
-                if (saver_scene_of(SAVER_STYLES[i]) != null || SAVER_STYLES[i] == "off") {
+                if (saver_scene_of(SAVER_STYLES[i]) != null || SAVER_STYLES[i] == "off"
+                    || SAVER_STYLES[i] == "dash") {
                     // Сцена (Матрица/Лого) или «Выкл»: просто выбираем, без
                     // подменю - у выключенной заставки настраивать нечего.
                     draw_saver_page();
@@ -9346,6 +9817,7 @@ function main() {
     // Настройки панели живут в параметрах модуля и после перезагрузки
     // сбросились бы: восстанавливаем выбранное.
     gset_apply_all();
+    pad_stop();   /* могла остаться от прошлого сеанса: падение или снятие питания */
 
     // Wait for lcd_drv splash logo
     system("sleep 3");
@@ -9376,6 +9848,7 @@ function main() {
     // на «Сеть», и выглядело это как «страница сама перескакивает».
     refresh_data();
     st.alarm_on = alarm_is_on();   // статус-иконка будильника с первого кадра
+    st.vpn_on = clash_running();   // и значок VPN тоже - до первого кадра
     st.page = "lte";
     draw_current();
 
@@ -9462,11 +9935,7 @@ function main() {
             refresh_data();
             st.alarm_on = alarm_is_on();   // статус-иконка будильника
             night_tick();
-            st.vpn_tick = (st.vpn_tick ?? 99) + 1;
-            if (st.vpn_tick >= 5) {          // ~раз в 10 с, чаще незачем
-                st.vpn_tick = 0;
-                st.vpn_on = clash_running();
-            }
+            st.vpn_on = clash_running();
             // Матрица-заставка: снизу живой logread (kmsg после буста молчит).
             // Срезаем дату+facility, режем по ширине, фоном чтоб не блокировать.
             if (st.saver_scene == 0)
@@ -9543,6 +10012,11 @@ function main() {
                           "|" + int(+(st.data?.battery?.percent ?? 0)) +
                           "|" + sig_state().bars +
                           "|" + int(st.data?.sms_new ?? 0);
+                if (saver_style() == "dash")
+                    sig += sprintf("|%d|%d|%s|%s", dash_page(),
+                                   int(+(st.data?.cpu_busy ?? 0)),
+                                   fmt_bytes(length(hist.rx) > 0 ? hist.rx[length(hist.rx) - 1] : 0),
+                                   fmt_bytes(length(hist.tx) > 0 ? hist.tx[length(hist.tx) - 1] : 0));
                 if (sig != st.saver_sig) {
                     st.saver_sig = sig;
                     draw_screensaver();

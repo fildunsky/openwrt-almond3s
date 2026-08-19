@@ -47,13 +47,17 @@ define Build/Compile
 		$(PKG_BUILD_DIR)/core_quicknes.cpp \
 		$(PKG_BUILD_DIR)/almond_platform.cpp \
 		$(PKG_BUILD_DIR)/almond_cxx.cpp \
-		$(PKG_BUILD_DIR)/almond_pad.cpp
+		$(PKG_BUILD_DIR)/pad_file.cpp
+	$(TARGET_CXX) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -Os -w \
+		-nostdlib++ -static-libgcc \
+		-o $(PKG_BUILD_DIR)/almond3s-pad $(PKG_BUILD_DIR)/almond_pad.cpp
 endef
 
 define Package/nes-almond3s/install
 	$(INSTALL_DIR) $(1)/usr/libexec/almond3s
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/nes-quick $(1)/usr/libexec/almond3s/nes-quick
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/keygrab $(1)/usr/libexec/almond3s/keygrab
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/almond3s-pad $(1)/usr/libexec/almond3s/almond3s-pad
 	$(INSTALL_DIR) $(1)/etc/almond3s/roms
 endef
 

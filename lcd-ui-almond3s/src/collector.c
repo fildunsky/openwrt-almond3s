@@ -147,6 +147,37 @@ static int cpu_busy_pct(void)
     return pct;
 }
 
+static int cpu_core_busy(int *out, int max)
+{
+    static unsigned long long pidle[8], ptotal[8];
+    FILE *fp = fopen("/proc/stat", "r");
+    char line[256];
+    int n = 0;
+    if (!fp) return 0;
+    while (n < max && fgets(line, sizeof line, fp)) {
+        unsigned long long v[8] = {0}, total = 0, idle;
+        int idx, pct = -1;
+        if (sscanf(line, "cpu%d %llu %llu %llu %llu %llu %llu %llu %llu", &idx,
+                   &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]) < 5)
+            continue;
+        if (idx < 0 || idx >= 8) continue;
+        for (int i = 0; i < 8; i++) total += v[i];
+        idle = v[3] + v[4];
+        if (ptotal[idx] && total > ptotal[idx]) {
+            unsigned long long dt = total - ptotal[idx];
+            unsigned long long di = idle - pidle[idx];
+            pct = (int)((dt - di) * 100 / dt);
+            if (pct < 0) pct = 0;
+            if (pct > 100) pct = 100;
+        }
+        pidle[idx] = idle;
+        ptotal[idx] = total;
+        out[n++] = pct;
+    }
+    fclose(fp);
+    return n;
+}
+
 static int cpu_core_count(void)
 {
     static int n = 0;
@@ -840,11 +871,15 @@ static int get_lte_from_5gmodem(struct lte_info *li) {
         if (!li->neighbors[0]) strcpy(li->neighbors, "[]");
     }
 
+    li->pci    = m5g_int(buf, "pci");
+    li->rssi   = m5g_int(buf, "rssi");
+    li->earfcn = m5g_int(buf, "earfcn");
+
     nb = strstr(buf, "\"neighbors\":");
     if (nb) {
-        li->pci    = m5g_int(nb, "pci");
-        li->rssi   = m5g_int(nb, "rssi");
-        li->earfcn = m5g_int(nb, "earfcn");
+        if (!li->pci)    li->pci    = m5g_int(nb, "pci");
+        if (!li->rssi)   li->rssi   = m5g_int(nb, "rssi");
+        if (!li->earfcn) li->earfcn = m5g_int(nb, "earfcn");
     }
 
     return 1;
@@ -1139,6 +1174,17 @@ int main(void) {
         google_ping = (ping_buf[0] && atof(ping_buf)>0) ? (int)atof(ping_buf) : -1;
 
         /* Format JSON */
+        char core_json[96];
+        {
+            int cb[8], cn = cpu_core_busy(cb, 8), off = 1;
+            core_json[0] = '[';
+            for (int i = 0; i < cn && off < (int)sizeof(core_json) - 8; i++)
+                off += snprintf(core_json + off, sizeof(core_json) - off,
+                                i ? ",%d" : "%d", cb[i]);
+            core_json[off] = ']';
+            core_json[off + 1] = 0;
+        }
+
         len = snprintf(json, sizeof(json),
             "{\"ts\":%ld,"
             "\"lte\":{\"csq\":%d,\"ber\":%d,\"rsrp\":%d,\"rsrq\":%d,"
@@ -1167,7 +1213,8 @@ int main(void) {
             "\"storage\":{\"free_kb\":%ld,\"total_kb\":%ld},"
             "\"lan\":{\"ip\":\"%s\",\"mac\":\"%s\"},"
             "\"uptime\":%ld,\"mem_free_mb\":%ld,\"mem_total_mb\":%ld,"
-            "\"cpu_load\":%.2f,\"cpu_busy\":%d,\"cpu_cores\":%d}\n",
+            "\"cpu_load\":%.2f,\"cpu_busy\":%d,\"cpu_cores\":%d,"
+            "\"cpu_core_busy\":%s}\n",
             (long)time(NULL),
             li.csq,li.ber,li.rsrp,li.rsrq,li.sinr,li.rssi,li.pci,
             li.band,li.mode,li.oper,li.ip,li.modem,li.temp,li.signal_pct,li.nca,
@@ -1190,7 +1237,7 @@ int main(void) {
             ovl_free, ovl_total, lan_ip, lan_mac,
             si.uptime, (si.freeram + si.bufferram)/1024/1024,
             si.totalram/1024/1024, si.loads[0]/65536.0,
-            cpu_busy_pct(), cpu_core_count());
+            cpu_busy_pct(), cpu_core_count(), core_json);
 
         /* snprintf возвращает «сколько БЫ записал»: если JSON перерастёт буфер,
          * len окажется больше реального содержимого, и write()/fwrite() ниже
