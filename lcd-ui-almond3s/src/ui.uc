@@ -10089,6 +10089,10 @@ function main() {
     refresh_data();
     st.alarm_on = alarm_is_on();   // статус-иконка будильника с первого кадра
     st.vpn_on = clash_running();   // и значок VPN тоже - до первого кадра
+    // Стек Zigbee после сброса чипа (в том числе по питанию) спит, пока ему не
+    // скажут networkInit. Поднятая сеть иначе перестаёт отвечать на запросы
+    // маяка, и соседи её не видят. Делаем это фоном при старте службы.
+    system(sprintf("%s state > /tmp/lcd_zig_state.json 2>/dev/null &", ZIG_BIN));
     st.page = "lte";
     draw_current();
 

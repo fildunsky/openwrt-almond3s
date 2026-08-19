@@ -320,8 +320,17 @@ static int form(int pan, int channel, int power, const unsigned char *key)
         if (pn >= 4 && pl[2] == 0x1E) { fst = pl[3]; }
         if (pn >= 4 && pl[2] == 0x19) { fst = 0; break; }                 /* stackStatusHandler */
     }
-    printf("{\"ok\":%d,\"security\":%d,\"form\":%d,\"pan\":%d,\"ch\":%d}\n",
-           fst == 0 ? 1 : 0, st, fst, pan, channel);
+    int pj = -1;
+    if (fst == 0) {
+        unsigned char d1[1] = { 0xFF };
+        ezsp_cmd(0x22, d1, 1);
+        for (int i = 0; i < 6; i++) {
+            int pn = ezsp_read(pl, sizeof pl, 700);
+            if (pn >= 4 && pl[2] == 0x22) { pj = pl[3]; break; }
+        }
+    }
+    printf("{\"ok\":%d,\"security\":%d,\"form\":%d,\"permit\":%d,\"pan\":%d,\"ch\":%d}\n",
+           fst == 0 ? 1 : 0, st, fst, pj, pan, channel);
     return fst == 0;
 }
 
@@ -380,11 +389,15 @@ int main(int argc, char **argv)
     int proto = 0, stype = 0, sver = 0;
     if (!ezsp_version(&proto, &stype, &sver)) die("нет ответа EZSP");
 
-    int init = network_init();
-    /* Стеку нужно мгновение, чтобы доложить о поднятой сети. */
-    if (init == 0) {
-        unsigned char pl[64];
-        for (int i = 0; i < 4; i++) ezsp_read(pl, sizeof pl, 400);
+    int init = -1;
+    int scanning = !strcmp(cmd, "escan") || !strcmp(cmd, "ascan");
+    if (!scanning) {
+        init = network_init();
+        /* Стеку нужно мгновение, чтобы доложить о поднятой сети. */
+        if (init == 0) {
+            unsigned char pl[64];
+            for (int i = 0; i < 4; i++) ezsp_read(pl, sizeof pl, 400);
+        }
     }
 
     if (!strcmp(cmd, "info")) {
@@ -415,6 +428,10 @@ int main(int argc, char **argv)
     } else {
         die("неизвестная команда");
     }
+    /* Скан начинается со сброса чипа, а он роняет поднятую сеть: после скана
+       поднимаем её обратно, иначе аппарат перестаёт отвечать на маяки соседей
+       и сам становится невидимым. */
+    if (scanning) network_init();
     close(fd);
     return 0;
 }
