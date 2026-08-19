@@ -414,9 +414,42 @@ int main(int argc, char **argv)
 
     int prof = set_cfg(0x0C, 2);      /* stack profile: ZigBee PRO */
     set_cfg(0x0D, 5);                 /* security level */
+    /* Режим передатчика: у модуля с внешним усилителем нулевой (обычный) путь
+       не работает. 0 обычный, 1 boost, 2 альтернативный выход, 3 оба. */
+    const char *txm = getenv("ZIG_TXMODE");
+    int txmode = txm ? atoi(txm) : 3;
+    int txst = set_cfg(0x17, txmode);
+
+    /* Заводской сервер зовёт setRadioPower - попробуем и мы. Идентификатор
+       кадра берём из окружения, чтобы перебирать без пересборки. */
+    if (getenv("ZIG_RHO")) {
+        unsigned char d[3] = { 0x0E, 1, (unsigned char)atoi(getenv("ZIG_RHO")) }, pl[64];
+        ezsp_cmd(0xAB, d, 3);
+        for (int i = 0; i < 6; i++) {
+            int pn = ezsp_read(pl, sizeof pl, 600);
+            if (pn >= 4 && pl[2] == 0xAB) { fprintf(stderr, "radioHoldOff=%d -> %d\n", d[2], pl[3]); break; }
+        }
+    }
+
+    const char *rp = getenv("ZIG_RPOW");
+    int rp_id = getenv("ZIG_RPID") ? (int)strtol(getenv("ZIG_RPID"), NULL, 0) : 0x99;
+    int rp_st = -2;
+    if (rp) {
+        unsigned char d[1] = { (unsigned char)atoi(rp) }, pl[64];
+        ezsp_cmd((unsigned char)rp_id, d, 1);
+        for (int i = 0; i < 6; i++) {
+            int pn = ezsp_read(pl, sizeof pl, 600);
+            if (pn >= 4) { rp_st = (pl[2] == rp_id) ? pl[3] : -3; break; }
+        }
+        fprintf(stderr, "setRadioPower(id=0x%02X) -> %d\n", rp_id, rp_st);
+    }
 
     int init = -1;
-    int scanning = !strcmp(cmd, "escan") || !strcmp(cmd, "ascan");
+    /* mfglib работает только на неподнятом стеке, поэтому «tone» тоже без
+       networkInit - как и сканы. */
+    int scanning = !strcmp(cmd, "escan") || !strcmp(cmd, "ascan")
+                || !strcmp(cmd, "tone") || !strcmp(cmd, "listen")
+                || !strcmp(cmd, "send");
     if (!scanning) {
         init = network_init();
         /* Стеку нужно мгновение, чтобы доложить о поднятой сети. */
@@ -428,8 +461,9 @@ int main(int argc, char **argv)
 
     if (!strcmp(cmd, "info")) {
         printf("{\"ok\":1,\"ash\":%d,\"reset\":%d,\"ezsp\":%d,\"stack_type\":%d,"
-               "\"netinit\":%d,\"profile\":%d,\"stack\":\"%d.%d.%d.%d\"}\n",
-               ver, reason, proto, stype, init, prof,
+               "\"netinit\":%d,\"profile\":%d,\"txmode\":%d,\"txstatus\":%d,"
+               "\"stack\":\"%d.%d.%d.%d\"}\n",
+               ver, reason, proto, stype, init, prof, txmode, txst,
                (sver >> 12) & 15, (sver >> 8) & 15, (sver >> 4) & 15, sver & 15);
     } else if (!strcmp(cmd, "escan")) {
         unsigned int mk = argc > 3 ? (1u << atoi(argv[3])) : 0x07FFF800u;
@@ -449,6 +483,106 @@ int main(int argc, char **argv)
                 key[i] = (unsigned char)strtol(b, NULL, 16);
             }
         form(pan, ch, pw, key);
+    } else if (!strcmp(cmd, "listen") || !strcmp(cmd, "send")) {
+        /* Заводская библиотека умеет и передавать, и принимать сырые пакеты в
+           том же диапазоне. Стек для этого не нужен - а он у нас и не передаёт. */
+        int ch = argc > 2 ? atoi(argv[2]) : 20;
+        int sec = argc > 3 ? atoi(argv[3]) : 10;
+        int sending = !strcmp(cmd, "send");
+        const char *text = argc > 4 ? argv[4] : "ALMOND";
+        unsigned char pl[128], d[130];
+        int r_start = -1, r_ch = -1;
+
+        d[0] = (unsigned char)(sending ? 0 : 1);      /* rxCallback */
+        ezsp_cmd(0x83, d, 1);
+        for (int i = 0; i < 6; i++) {
+            int pn = ezsp_read(pl, sizeof pl, 600);
+            if (pn >= 4 && pl[2] == 0x83) { r_start = pl[3]; break; }
+        }
+        d[0] = (unsigned char)ch;
+        ezsp_cmd(0x8A, d, 1);
+        for (int i = 0; i < 6; i++) {
+            int pn = ezsp_read(pl, sizeof pl, 600);
+            if (pn >= 4 && pl[2] == 0x8A) { r_ch = pl[3]; break; }
+        }
+        if (sending) {
+            d[0] = 0; d[1] = 3;
+            ezsp_cmd(0x8C, d, 2);
+            ezsp_read(pl, sizeof pl, 600);
+        }
+
+        printf("{\"ok\":%d,\"start\":%d,\"channel\":%d,\"ch\":%d,\"mode\":\"%s\"}\n",
+               (r_start == 0 && r_ch == 0) ? 1 : 0, r_start, r_ch, ch,
+               sending ? "send" : "listen");
+
+        time_t t0 = time(NULL);
+        int seq = 0, heard = 0;
+        while (time(NULL) - t0 < sec) {
+            if (sending) {
+                int tl = (int)strlen(text);
+                if (tl > 100) tl = 100;
+                d[0] = (unsigned char)(tl + 4);        /* метка, номер, текст, 2 байта CRC */
+                d[1] = 0x41;                            /* метка «свой» */
+                d[2] = (unsigned char)seq++;
+                memcpy(d + 3, text, tl);
+                d[3 + tl] = 0; d[4 + tl] = 0;
+                ezsp_cmd(0x89, d, tl + 5);
+                for (int i = 0; i < 3; i++) {
+                    int pn = ezsp_read(pl, sizeof pl, 300);
+                    if (pn >= 4 && pl[2] == 0x89) {
+                        printf("{\"sent\":%d,\"status\":%d}\n", seq, pl[3]);
+                        break;
+                    }
+                }
+                sleep(1);
+            } else {
+                int pn = ezsp_read(pl, sizeof pl, 900);
+                if (pn >= 6 && pl[2] == 0x8E) {
+                    int lqi = pl[3], rssi = (signed char)pl[4], len = pl[5];
+                    char txt[64] = "";
+                    int show = len > 2 ? len - 2 : 0;      /* хвост - CRC радио */
+                    for (int k = 0; k < show && k < 40 && 6 + k < pn; k++) {
+                        unsigned char c = pl[6 + k];
+                        txt[k] = (c >= 32 && c < 127) ? (char)c : '.';
+                    }
+                    printf("{\"heard\":1,\"lqi\":%d,\"rssi\":%d,\"len\":%d,\"data\":\"%s\"}\n",
+                           lqi, rssi, len, txt);
+                    heard++;
+                }
+            }
+        }
+        if (!sending) printf("{\"done\":1,\"heard\":%d}\n", heard);
+        ezsp_cmd(0x84, NULL, 0);
+        ezsp_read(pl, sizeof pl, 600);
+    } else if (!strcmp(cmd, "getval")) {
+        unsigned char pl[64], d[1] = { (unsigned char)(argc > 2 ? strtol(argv[2], NULL, 0) : 0x0E) };
+        int stt = -1, len = 0;
+        char hex[64] = "";
+        ezsp_cmd(0xAA, d, 1);
+        for (int i = 0; i < 6; i++) {
+            int pn = ezsp_read(pl, sizeof pl, 700);
+            if (pn >= 5 && pl[2] == 0xAA) {
+                stt = pl[3]; len = pl[4];
+                for (int k = 0; k < len && k < 16 && 5 + k < pn; k++)
+                    snprintf(hex + strlen(hex), sizeof hex - strlen(hex), "%02X", pl[5 + k]);
+                break;
+            }
+        }
+        printf("{\"ok\":%d,\"id\":%d,\"status\":%d,\"len\":%d,\"value\":\"%s\"}\n",
+               stt == 0 ? 1 : 0, d[0], stt, len, hex);
+    } else if (!strcmp(cmd, "setval")) {
+        unsigned char pl[64], d[3];
+        d[0] = (unsigned char)(argc > 2 ? strtol(argv[2], NULL, 0) : 0x0E);
+        d[1] = 1;
+        d[2] = (unsigned char)(argc > 3 ? strtol(argv[3], NULL, 0) : 0);
+        int stt = -1;
+        ezsp_cmd(0xAB, d, 3);
+        for (int i = 0; i < 6; i++) {
+            int pn = ezsp_read(pl, sizeof pl, 700);
+            if (pn >= 4 && pl[2] == 0xAB) { stt = pl[3]; break; }
+        }
+        printf("{\"ok\":%d,\"id\":%d,\"v\":%d,\"status\":%d}\n",
+               stt == 0 ? 1 : 0, d[0], d[2], stt);
     } else if (!strcmp(cmd, "cfg")) {
         /* getConfigurationValue по всем идентификаторам: ищем нули там, где
            стеку нужны буферы и профиль - без них передача невозможна. */
