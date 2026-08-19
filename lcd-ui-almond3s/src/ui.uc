@@ -396,6 +396,19 @@ let TR_RU = {
     "Factory tones and volume from stock firmware": "Тоны и громкость из заводской прошивки",
     "Blink on SMS": "Мигать при SMS",
     "Widgets": "Виджеты",
+    "Air": "Эфир",
+    "Networks": "Сети",
+    "Scanning...": "Сканирую...",
+    "quietest": "тише всего",
+    "no networks found": "сетей не найдено",
+    "PAN ID": "PAN ID",
+    "Channel": "Канал",
+    "TX power": "Мощность",
+    "Form network": "Поднять сеть",
+    "Leave network": "Выйти из сети",
+    "random": "случайный",
+    "chip silent": "чип молчит",
+    "own network": "своя сеть",
     "Overview": "Обзор",
     "Load": "Нагрузка",
     "1 min": "1 мин",
@@ -4001,6 +4014,7 @@ function menu_items() {
     // Зигби из меню убран: пока модулем ничего не управляется, плитка только
     // занимает место. Сама страница жива и открывается через /tmp/.lcd_goto,
     // так что вернуть её - это одна строка.
+    push(it, { label: tr("Zigbee"), sub: "EM357", icon: "zigbee", ic: C.cyan, act: "zigbee" });
     push(it, { label: tr("Games"), sub: games_sub(), icon: "game", ic: C.green, act: "games" });
     // Подпись - о содержимом раздела. Раньше здесь показывалась яркость: она
     // осталась от плитки «Экран», на месте которой встал этот раздел, и на
@@ -5613,28 +5627,201 @@ function draw_games_page() {
 }
 
 
+let ZIG_BIN = "/usr/libexec/almond3s/almond3s-zig";
+let ZIG_ESCAN = "/tmp/lcd_zig_escan.json";
+let ZIG_ASCAN = "/tmp/lcd_zig_ascan.json";
+let ZIG_INFO  = "/tmp/lcd_zig_info.json";
+
+function zig_cfg() {
+    let g = function(k, d) {
+        let v = ucur ? ucur.get("almond3s", "zigbee", k) : null;
+        return (v == null || v == "") ? d : v;
+    };
+    return {
+        pan:   clampi(int(+g("pan", 6699)), 1, 65534),
+        ch:    clampi(int(+g("channel", 15)), 11, 26),
+        power: clampi(int(+g("power", 8)), -8, 20),
+        key:   g("key", "30313233343536373839404142434445"),
+    };
+}
+
+function zig_set(k, v) {
+    if (!ucur) return;
+    if (ucur.get("almond3s", "zigbee") == null)
+        ucur.set("almond3s", "zigbee", "zigbee");
+    ucur.set("almond3s", "zigbee", k, sprintf("%s", v));
+    ucur.commit("almond3s");
+}
+
+function zig_json(path) {
+    let raw = fs.readfile(path);
+    if (!raw) return null;
+    try { return json(raw); } catch (e) { return null; }
+}
+
+// Скан идёт секунды и держит порт, поэтому запускаем фоном в файл, а страница
+// подхватывает результат по смене mtime - как проверка сервисов.
+function zig_run(cmd, out, arg) {
+    st.zig ??= {};
+    st.zig.busy = time();
+    st.zig.cmd = cmd;
+    let st0 = fs.stat(out);
+    st.zig.mt = st0 ? st0.mtime : 0;
+    system(sprintf("%s %s %s > %s 2>/dev/null &", ZIG_BIN, cmd, arg ?? "", out));
+}
+
+function zig_busy() {
+    let z = st.zig;
+    if (!z || !z.busy) return false;
+    let out = z.cmd == "ascan" ? ZIG_ASCAN : (z.cmd == "escan" ? ZIG_ESCAN : ZIG_INFO);
+    let ss = fs.stat(out);
+    if ((ss && ss.mtime != z.mt) || (time() - z.busy) > 30) { z.busy = 0; return false; }
+    return true;
+}
+
+function zig_btn(i) {
+    let w = int((GW - 2 * GG) / 3);
+    return { x: GX + i * (w + GG), y: BACK_Y - 38, w: w, h: 32 };
+}
+
 function draw_zigbee_page() {
     lcd_clear(C.bg);
     draw_header(tr("Zigbee"));
+    st.zig ??= { mode: "escan" };
+    let z = st.zig, cfg = zig_cfg();
 
-    let cx = GX, cw = GW;
-    let y1 = GY;
-    gcard(cx, y1, cw, 50, C.accent);
-    lcd_text(cx + 12, y1 + 6, "Silicon Labs EM357", C.white, C.widget, 1);
-    lcd_text(cx + 12, y1 + 20, "EZSP v4, EmberZNet 5.1.0", C.gray, C.widget, 1);
-    lcd_text(cx + 12, y1 + 34, "/dev/ttyS2, 57600 8N1", C.gray, C.widget, 1);
+    let info = zig_json(ZIG_INFO);
+    let head = info?.ok ? sprintf("EM357  EZSP v%d  %s", info.ezsp, info.stack ?? "")
+                        : tr("chip silent");
+    lcd_rect(GX, GY, GW, 26, C.widget);
+    lcd_rect(GX, GY, 3, 26, info?.ok ? C.green : C.dim);
+    lcd_text(GX + 12, GY + 9, head, C.white, C.widget, 1);
+    lcd_text(GX + GW - 11 - tlen(sprintf("PAN %04X  CH %d", cfg.pan, cfg.ch)) * 6, GY + 9,
+             sprintf("PAN %04X  CH %d", cfg.pan, cfg.ch), C.gray, C.widget, 1);
 
-    let y2 = y1 + 50 + GG;
-    gcard(cx, y2, cw, 40, C.yellow);
-    lcd_text(cx + 12, y2 + 8, tr("Not joined to any network"), C.white, C.widget, 1);
-    lcd_text(cx + 12, y2 + 22, tr("Modern software needs EZSP 8+"), C.gray, C.widget, 1);
+    let ay = GY + 32, ah = BACK_Y - 44 - ay;
+    lcd_rect(GX, ay, GW, ah, C.widget);
 
-    let y3 = y2 + 40 + GG;
-    gcard(cx, y3, cw, 52, C.gray);
-    lcd_text(cx + 12, y3 + 6, tr("UPGRADE PATH"), C.gray, C.widget, 1);
-    lcd_text(cx + 12, y3 + 20, tr("Flash EmberZNet 6.7.10 over SWD"), C.white, C.widget, 1);
-    lcd_text(cx + 12, y3 + 34, tr("header J5705, see ZIGBEE.md"), C.gray, C.widget, 1);
+    if (zig_busy()) {
+        lcd_text(GX + int((GW - tlen(tr("Scanning...")) * 12) / 2), ay + int(ah / 2) - 7,
+                 tr("Scanning..."), C.cyan, C.widget, 2);
+    } else if (z.mode == "escan") {
+        let d = zig_json(ZIG_ESCAN);
+        let chans = type(d?.channels) == "array" ? d.channels : [];
+        if (length(chans) == 0) {
+            lcd_text(GX + 12, ay + 12, tr("Air"), C.gray, C.widget, 1);
+            lcd_text(GX + 12, ay + 28, tr("no data"), C.dim, C.widget, 2);
+        } else {
+            let best = null, worst = null;
+            for (let c in chans) {
+                if (best == null || c.rssi < best.rssi) best = c;
+                if (worst == null || c.rssi > worst.rssi) worst = c;
+            }
+            let lo = best.rssi - 4, hi = worst.rssi + 2;
+            if (hi - lo < 10) { lo = hi - 10; }
+            let bw = int((GW - 16) / length(chans));
+            let base = ay + ah - 16;
+            let top = ay + 16;
+            for (let i = 0; i < length(chans); i++) {
+                let c = chans[i];
+                let v = clampi(int((c.rssi - lo) * 100 / (hi - lo)), 3, 100);
+                let h = int((base - top) * v / 100);
+                let x = GX + 8 + i * bw;
+                let col = (c.ch == best.ch) ? C.green : (v > 55 ? C.orange : C.cyan);
+                if (h > 0) lcd_rect(x, base - h, bw - 2, h, col);
+                if ((c.ch % 2) == 1)
+                    lcd_text(x - 1, base + 4, sprintf("%d", c.ch), C.dim, C.widget, 1);
+            }
+            lcd_text(GX + 12, ay + 5, sprintf("%s: %d (%d dBm)", tr("quietest"),
+                     best.ch, best.rssi), C.green, C.widget, 1);
+        }
+    } else {
+        let d = zig_json(ZIG_ASCAN);
+        let nets = type(d?.networks) == "array" ? d.networks : [];
+        lcd_text(GX + 12, ay + 6, tr("Networks"), C.gray, C.widget, 1);
+        if (length(nets) == 0) {
+            lcd_text(GX + 12, ay + 24, tr("no networks found"), C.dim, C.widget, 1);
+        } else {
+            for (let i = 0; i < length(nets) && i < 5; i++) {
+                let n = nets[i], y = ay + 22 + i * 18;
+                lcd_text(GX + 12, y, sprintf("PAN %04X", n.pan), C.white, C.widget, 1);
+                lcd_text(GX + 90, y, sprintf("%s %d", tr("Channel"), n.ch), C.gray, C.widget, 1);
+                lcd_text(GX + 170, y, sprintf("LQI %d", n.lqi), C.gray, C.widget, 1);
+                lcd_text(GX + 240, y, sprintf("%d dBm", n.rssi), C.cyan, C.widget, 1);
+            }
+        }
+    }
 
+    let labels = [ tr("Air"), tr("Networks"), tr("Settings") ];
+    for (let i = 0; i < 3; i++) {
+        let b = zig_btn(i);
+        let on = (i == 0 && z.mode == "escan") || (i == 1 && z.mode == "ascan");
+        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+        lcd_rect(b.x, b.y, 3, b.h, on ? C.green : C.border);
+        lcd_text(b.x + int((b.w - tlen(labels[i]) * 6) / 2), b.y + 12, labels[i],
+                 on ? C.white : C.gray, C.widget, 1);
+    }
+
+    draw_back();
+    lcd_flush();
+}
+
+let ZIG_POWERS = [ -8, 0, 3, 8, 20 ];
+
+function zigset_row(i) {
+    return { x: GX, y: GY + i * 34, w: GW, h: 30 };
+}
+
+function zigset_pm(i, plus) {
+    let r = zigset_row(i);
+    return { x: plus ? r.x + r.w - 40 : r.x + r.w - 84, y: r.y + 2, w: 38, h: 26 };
+}
+
+function zigset_act(i) {
+    return { x: GX + i * (int((GW - GG) / 2) + GG), y: BACK_Y - 38,
+             w: int((GW - GG) / 2), h: 32 };
+}
+
+function draw_zigset_page() {
+    lcd_clear(C.bg);
+    draw_header(tr("Zigbee"));
+    let c = zig_cfg();
+    let rows = [
+        [ tr("PAN ID"), sprintf("%04X", c.pan) ],
+        [ tr("Channel"), sprintf("%d", c.ch) ],
+        [ tr("TX power"), sprintf("%d dBm", c.power) ],
+    ];
+    for (let i = 0; i < length(rows); i++) {
+        let r = zigset_row(i);
+        lcd_rect(r.x, r.y, r.w, r.h, C.widget);
+        lcd_rect(r.x, r.y, 3, r.h, C.cyan);
+        lcd_text(r.x + 12, r.y + 11, rows[i][0], C.gray, C.widget, 1);
+        lcd_text(r.x + 100, r.y + 8, rows[i][1], C.white, C.widget, 2);
+        let m = zigset_pm(i, false), pl = zigset_pm(i, true);
+        lcd_rect(m.x, m.y, m.w, m.h, C.btn);
+        lcd_text(m.x + 15, m.y + 6, "-", C.accent, C.btn, 2);
+        lcd_rect(pl.x, pl.y, pl.w, pl.h, C.btn);
+        lcd_text(pl.x + 13, pl.y + 6, "+", C.accent, C.btn, 2);
+    }
+
+    let stt = zig_json("/tmp/lcd_zig_state.json");
+    if (stt != null && st.zig?.form_msg && (time() - (st.zig.msg_ts ?? 0)) > 3)
+        st.zig.form_msg = null;
+    let hint = sprintf("%s: %s", tr("own network"), tr("off"));
+    if (st.zig?.form_msg) hint = st.zig.form_msg;
+    else if (stt?.state == 2)
+        hint = sprintf("%s: PAN %04X, %s %d, %s", tr("own network"), stt.pan,
+                       tr("Channel"), stt.ch, stt.node == 1 ? "координатор" : "узел");
+    lcd_text(GX + 12, GY + 3 * 34 + 8, hint, C.dim, C.bg, 1);
+
+    let names = [ tr("Form network"), tr("Leave network") ];
+    for (let i = 0; i < 2; i++) {
+        let b = zigset_act(i);
+        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+        lcd_rect(b.x, b.y, 3, b.h, i == 0 ? C.green : C.red);
+        lcd_text(b.x + int((b.w - tlen(names[i]) * 6) / 2), b.y + 12, names[i],
+                 C.white, C.widget, 1);
+    }
     draw_back();
     lcd_flush();
 }
@@ -7299,6 +7486,15 @@ function page_sig() {
     let nc = type(d.wifi?.clients) == "array" ? length(d.wifi.clients) : 0;
     let base = sprintf("%s|%d|%s|%d|%s", st.page, st.mpg, clock_str(),
                        int(+(d.sms_new ?? 0)), uplink_kind());
+    if (st.page == "zigset") {
+        let f = fs.stat("/tmp/lcd_zig_state.json");
+        return base + sprintf("|%d|%d", f ? f.mtime : 0, st.zig?.form_msg ? 1 : 0);
+    }
+    if (st.page == "zigbee") {
+        let e = fs.stat(ZIG_ESCAN), a = fs.stat(ZIG_ASCAN);
+        return base + sprintf("|%s|%d|%d|%d", st.zig?.mode ?? "escan",
+                              zig_busy() ? 1 : 0, e ? e.mtime : 0, a ? a.mtime : 0);
+    }
     switch (st.page) {
     case "dashboard":
         return base + sprintf("|%J|%s|%s", netpri_list(), l.ip ?? "", d.wan_ip ?? "");
@@ -7433,6 +7629,7 @@ function draw_current() {
     case "debug":     draw_debug_page(); break;
     case "iconedit":  draw_iconedit_page(); break;
     case "zigbee":    draw_zigbee_page(); break;
+    case "zigset":    draw_zigset_page(); break;
     case "games":     draw_games_page(); break;
     case "gset":      draw_gset_page(); break;
     case "gqr":       draw_gqr_page(); break;
@@ -8461,6 +8658,62 @@ function handle_touch(tx, ty, tmove) {
         return;
     }
 
+    if (st.page == "zigbee" && ty < BACK_Y) {
+        st.zig ??= { mode: "escan" };
+        for (let i = 0; i < 3; i++) {
+            let b = zig_btn(i);
+            if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
+            if (i == 2) {
+                system(sprintf("%s state > /tmp/lcd_zig_state.json 2>/dev/null &", ZIG_BIN));
+                st.zig.form_msg = null;
+                go_page("zigset");
+                return;
+            }
+            st.zig.mode = (i == 0) ? "escan" : "ascan";
+            zig_run(st.zig.mode, i == 0 ? ZIG_ESCAN : ZIG_ASCAN, i == 0 ? "3" : "5");
+            draw_zigbee_page();
+            return;
+        }
+        return;
+    }
+
+    if (st.page == "zigset" && ty < BACK_Y) {
+        let c = zig_cfg();
+        for (let i = 0; i < 3; i++) {
+            let m = zigset_pm(i, false), pl = zigset_pm(i, true);
+            let hit = in_rect(tx, ty, m.x, m.y, m.w, m.h) ? -1 :
+                      (in_rect(tx, ty, pl.x, pl.y, pl.w, pl.h) ? 1 : 0);
+            if (hit == 0) continue;
+            if (i == 0) zig_set("pan", clampi(c.pan + hit, 1, 65534));
+            if (i == 1) zig_set("channel", clampi(c.ch + hit, 11, 26));
+            if (i == 2) {
+                let idx = 0;
+                for (let k = 0; k < length(ZIG_POWERS); k++)
+                    if (ZIG_POWERS[k] == c.power) idx = k;
+                idx = clampi(idx + hit, 0, length(ZIG_POWERS) - 1);
+                zig_set("power", ZIG_POWERS[idx]);
+            }
+            draw_zigset_page();
+            return;
+        }
+        for (let i = 0; i < 2; i++) {
+            let b = zigset_act(i);
+            if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
+            st.zig ??= {};
+            if (i == 0)
+                system(sprintf("%s form %d %d %d %s >/dev/null 2>&1; %s state > /tmp/lcd_zig_state.json 2>/dev/null &",
+                               ZIG_BIN, c.pan, c.ch, c.power, c.key, ZIG_BIN));
+            else
+                system(sprintf("%s leave >/dev/null 2>&1; %s state > /tmp/lcd_zig_state.json 2>/dev/null &",
+                               ZIG_BIN, ZIG_BIN));
+            st.zig.form_msg = tr("Scanning...");
+            st.zig.msg_ts = time();
+            draw_zigset_page();
+            return;
+        }
+        return;
+    }
+
     // У сервисов внизу две кнопки, поэтому общее правило «низ - назад» для
     // этой страницы не годится: левая половина запускает проверку.
     // Порог по видимой полосе, без 6px запаса выше: 3-й ряд карточек
@@ -8647,7 +8900,10 @@ function handle_touch(tx, ty, tmove) {
             case "battery":   go_page("battery"); return;
             case "iconedit":  ed_armed = false; go_page("iconedit"); return;
             case "term":      term_start(); go_page("term"); return;
-            case "zigbee":    go_page("zigbee"); return;
+            case "zigbee":
+                if (!fs.stat(ZIG_INFO)) zig_run("info", ZIG_INFO);
+                go_page("zigbee");
+                return;
             case "games":     go_page("games"); return;
             case "info":      go_page("info"); return;
             case "reset":     menu_do_reset(); return;
