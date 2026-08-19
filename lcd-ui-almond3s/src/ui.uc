@@ -5771,8 +5771,11 @@ function draw_zigbee_page() {
     let z = st.zig;
 
     let info = zig_json(ZIG_INFO);
+    let pj = zig_json(ZIG_PEERS);
+    // Пока работает маячок, опросить чип нельзя - порт занят. Тогда берём
+    // строку, которую маячок сам записал при старте.
     let head = info?.ok ? sprintf("EM357  EZSP v%d  %s", info.ezsp, info.stack ?? "")
-                        : tr("chip silent");
+             : (pj?.chip ?? tr("chip silent"));
     lcd_rect(GX, GY, GW, 26, C.widget);
     lcd_rect(GX, GY, 3, 26, info?.ok ? C.green : C.dim);
     lcd_text(GX + 12, GY + 9, head, C.white, C.widget, 1);

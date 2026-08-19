@@ -911,8 +911,10 @@ int main(int argc, char **argv)
                 snprintf(tmp, sizeof tmp, "%s.tmp", out);
                 FILE *f = fopen(tmp, "w");
                 if (f) {
-                    fprintf(f, "{\"ok\":1,\"me\":\"%s\",\"ch\":%d,\"enc\":%d,\"ts\":%ld,\"peers\":[",
-                            me, ch, zkey_ok, now);
+                    fprintf(f, "{\"ok\":1,\"me\":\"%s\",\"ch\":%d,\"enc\":%d,"
+                               "\"chip\":\"EM357 EZSP v%d %d.%d.%d.%d\",\"ts\":%ld,\"peers\":[",
+                            me, ch, zkey_ok, proto, (sver >> 12) & 15, (sver >> 8) & 15,
+                            (sver >> 4) & 15, sver & 15, now);
                     for (int j = 0; j < npr; j++)
                         fprintf(f, "%s{\"name\":\"%s\",\"rssi\":%d,\"lqi\":%d,\"age\":%ld,\"m\":{%s}}",
                                 j ? "," : "", pr[j].name, pr[j].rssi, pr[j].lqi,
