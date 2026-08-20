@@ -299,6 +299,7 @@ static int zsec_open(unsigned char *buf, int len, const unsigned char *aad, int 
 #define T_CA   0x14
 #define T_MODE 0x15
 #define T_VNODE 0x16
+#define T_NODE 0x17
 
 static const struct { unsigned char id; const char *key; } TELE_STR[] = {
     { T_OPER, "oper" }, { T_BAND, "band" }, { T_CA, "ca" },
@@ -311,8 +312,10 @@ static const struct { unsigned char id; const char *key; int width; } TELE[] = {
     { T_DISK, "disk", 1 }, { T_UP, "up", 2 }, { T_WIFI, "wifi", 1 },
     { T_PING, "ping", 2 }, { T_SMS, "sms", 1 }, { T_RX, "rx", 4 },
     { T_TX, "tx", 4 }, { T_TEMP, "temp", 1 }, { T_VPN, "vpn", 1 },
-    { T_RSRQ, "rsrq", 1 }, { T_SINR, "sinr", 1 },
+    { T_RSRQ, "rsrq", 1 }, { T_SINR, "sinr", 1 }, { T_NODE, "node", 1 },
 };
+
+static int my_node;
 
 #define TELE_MODEM "/tmp/5gmodem_tele.json"
 #define TELE_SELF  "/tmp/almond_tele.json"
@@ -398,6 +401,11 @@ static int tele_pack(unsigned char *out, int max)
         n = tele_pack_from(self, out, n, max);
     if (tele_slurp(mp, modem, sizeof modem, TELE_STALE) > 0)
         n = tele_pack_from(modem, out, n, max);
+    if (my_node > 0 && n + 3 <= max) {
+        out[n++] = T_NODE;
+        out[n++] = 1;
+        out[n++] = (unsigned char)my_node;
+    }
     return n;
 }
 
@@ -909,8 +917,23 @@ static int cmd_exec(const char *action)
 
 struct peer_ent { char name[24]; int rssi, lqi; unsigned int src; long seen;
                   char part[4][160]; unsigned char raw[4][72]; int rawlen[4]; };
-static struct peer_ent pr[8];
+#define PEER_MAX 16
+static struct peer_ent pr[PEER_MAX];
 static int npr;
+
+static int peer_slot(const char *nm)
+{
+    for (int j = 0; j < npr; j++) if (!strcmp(pr[j].name, nm)) return j;
+    int idx;
+    if (npr < PEER_MAX) idx = npr++;
+    else {
+        idx = 0;
+        for (int j = 1; j < npr; j++) if (pr[j].seen < pr[idx].seen) idx = j;
+    }
+    memset(&pr[idx], 0, sizeof pr[idx]);
+    snprintf(pr[idx].name, sizeof pr[idx].name, "%s", nm);
+    return idx;
+}
 
 #define ZCL_EP        1
 #define ZCL_PROFILE   0x0104
@@ -1066,12 +1089,7 @@ static void mesh_rx(const unsigned char *pl, int pn, const char *me)
                 if (!strcmp(nm, me)) return;
                 char mj[320];
                 tele_unpack(v + 1 + tl, blen - 1 - tl, mj, sizeof mj);
-                int idx = -1;
-                for (int j = 0; j < npr; j++) if (!strcmp(pr[j].name, nm)) idx = j;
-                if (idx < 0 && npr < 8) {
-                    idx = npr++;
-                    snprintf(pr[idx].name, sizeof pr[idx].name, "%s", nm);
-                }
+                int idx = peer_slot(nm);
                 if (idx >= 0) {
                     pr[idx].rssi = rssi;
                     pr[idx].lqi = lqi;
@@ -1309,6 +1327,7 @@ int main(int argc, char **argv)
         long last_save = 0, last_relay = 0;
         int seq = 0;
         int coord = node_type() == 1;
+        my_node = coord ? 1 : 2;
         long last_tx = (long)time(NULL) - period;
 
         while (!stop_flag) {
@@ -1404,8 +1423,9 @@ int main(int argc, char **argv)
                 FILE *f = fopen(tmp, "w");
                 if (f) {
                     fprintf(f, "{\"ok\":1,\"me\":\"%s\",\"mode\":\"mesh\",\"enc\":1,"
+                               "\"node\":%d,"
                                "\"chip\":\"EM357 EZSP v%d %d.%d.%d.%d\",\"ts\":%ld,\"peers\":[",
-                            me, proto, (sver >> 12) & 15, (sver >> 8) & 15,
+                            me, my_node, proto, (sver >> 12) & 15, (sver >> 8) & 15,
                             (sver >> 4) & 15, sver & 15, now);
                     for (int j = 0; j < npr; j++) {
                         char all[560] = "";
@@ -1888,10 +1908,7 @@ int main(int argc, char **argv)
                     char act[24]; memcpy(act, body + o2, al); act[al] = 0;
                     if (strcmp(dname, me) != 0) { continue; }
                     if (sec != ZSEC_CCM) { continue; }
-                    int idx = -1;
-                    for (int j = 0; j < npr; j++) if (!strcmp(pr[j].name, sname)) idx = j;
-                    if (idx < 0 && npr < 8) { idx = npr++;
-                        snprintf(pr[idx].name, sizeof pr[idx].name, "%s", sname); }
+                    int idx = peer_slot(sname);
                     if (idx >= 0) {
                         if (ctr <= pr[idx].cmd_ctr && (long)time(NULL) - pr[idx].cmd_seen < 300) continue;
                         pr[idx].cmd_ctr = ctr;
@@ -1914,9 +1931,7 @@ int main(int argc, char **argv)
                 char mj[320];
                 tele_unpack(body + 1 + tl, plen - 1 - tl, mj, sizeof mj);
                 if (k > 0 && strcmp(nm, me) != 0) {
-                    int idx = -1;
-                    for (int j = 0; j < npr; j++) if (!strcmp(pr[j].name, nm)) idx = j;
-                    if (idx < 0 && npr < 8) { idx = npr++; snprintf(pr[idx].name, sizeof pr[idx].name, "%s", nm); }
+                    int idx = peer_slot(nm);
                     if (idx >= 0 && sec == ZSEC_CCM && ctr <= pr[idx].ctr
                         && (long)time(NULL) - pr[idx].seen < 120) continue;
                     if (idx >= 0) {

@@ -411,6 +411,59 @@ static void fb_text(int x, int y, const char *s, uint16_t fg, uint16_t bg, int s
         fb_char(cx[i], cy[i], cps[i], fg, bg, scale, 1);
 }
 
+static void flush_cmd(void);
+
+static uint16_t fb_prev[320 * 240];
+static uint16_t fb_mix[320 * 240];
+static int fb_prev_ok;
+
+static void snap_cmd(void)
+{
+    memcpy(fb_prev, fb, FB_SIZE);
+    fb_prev_ok = 1;
+}
+
+/* Растворение: на панель уходит смесь снятого кадра и текущего в пропорции
+ * a/16. Кадр строится целиком и пишется одной операцией - драйвер выводит
+ * панель только по записи полного кадра с нулевого смещения. */
+static void blend_cmd(int a)
+{
+    int i, total = 0, n;
+    if (!fb_prev_ok) { flush_cmd(); return; }
+    if (a < 0) a = 0;
+    if (a > 16) a = 16;
+    for (i = 0; i < 320 * 240; i++) {
+        uint16_t o = fb_prev[i], w = fb[i];
+        int r = ((((o >> 11) & 31) * (16 - a)) + (((w >> 11) & 31) * a)) >> 4;
+        int g = ((((o >> 5) & 63) * (16 - a)) + (((w >> 5) & 63) * a)) >> 4;
+        int b = (((o & 31) * (16 - a)) + ((w & 31) * a)) >> 4;
+        fb_mix[i] = (uint16_t)((r << 11) | (g << 5) | b);
+    }
+    lseek(lcd_fd, 0, SEEK_SET);
+    while (total < FB_SIZE) {
+        n = write(lcd_fd, (char *)fb_mix + total, FB_SIZE - total);
+        if (n <= 0) break;
+        total += n;
+    }
+}
+
+/* Растворение целиком здесь, а не восемью командами из интерфейса: панель
+ * обновляется около 25 раз в секунду, и кадры, посланные подряд без пауз, до
+ * неё не доезжают - виден только последний. Пауза между шагами обязательна. */
+static void dissolve_cmd(int steps, int ms)
+{
+    int k;
+    if (!fb_prev_ok) { flush_cmd(); return; }
+    if (steps < 2) steps = 2;
+    if (steps > 32) steps = 32;
+    if (ms < 0) ms = 0;
+    if (ms > 200) ms = 200;
+    for (k = 1; k <= steps; k++) {
+        blend_cmd(k * 16 / steps);
+        if (k < steps && ms) usleep((useconds_t)ms * 1000);
+    }
+}
+
 static void flush_cmd(void)
 {
     int total = 0, n;
@@ -528,6 +581,18 @@ static void handle_cmd(const char *json)
     }
     else if (!strcmp(cmd, "flush")) {
         flush_cmd();
+        return;
+    }
+    else if (!strcmp(cmd, "snap")) {
+        snap_cmd();
+        return;
+    }
+    else if (!strcmp(cmd, "blend")) {
+        blend_cmd(json_int(json, "a", 16));
+        return;
+    }
+    else if (!strcmp(cmd, "dissolve")) {
+        dissolve_cmd(json_int(json, "steps", 8), json_int(json, "ms", 40));
         return;
     }
     else if (!strcmp(cmd, "fps")) {
