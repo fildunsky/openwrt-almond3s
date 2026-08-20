@@ -699,7 +699,8 @@ struct lte_info {
     char modem[40], ip[48];
     int temp;
     int signal_pct, therm, simslot, roaming, nca;
-    int cid, enbid, mcc, mnc, reg;
+    int cid, enbid, mcc, reg;
+    char mnc[8];
     char conn_time[24], rx[16], tx[16], apn[32], fw[24], phone[24];
     /* Информация о соте - как на одноимённой странице 5gmodem. */
     char lac[24], tac[24], cid_hex[24], bandwidth[24], pathloss[16], txpower[16];
@@ -710,14 +711,12 @@ struct lte_info {
 };
 
 /* ======== LTE via luci-app-5gmodem ======== */
-#define M5G_SH      "/usr/share/5gmodem/5gmodem.sh"
 #define M5G_PERIOD  10
 /* 8.8.8.8 в России часто недоступен, и каждый цикл упирался в полный таймаут
    -W2. Яндексовский резолвер отвечает всегда, проверка связности от этого не
    хуже. Внешний IP меняется редко - незачем ходить за ним каждый круг. */
 #define PING_HOST   "77.88.8.8"
 #define EXTIP_PERIOD 60
-#define M5G_BUF     8192
 
 static int m5g_str(const char *json, const char *key, char *out, int outlen) {
     char pat[64];
@@ -739,150 +738,165 @@ static int m5g_str(const char *json, const char *key, char *out, int outlen) {
     return out[0] ? 1 : 0;
 }
 
-static int m5g_int(const char *json, const char *key) {
-    char buf[32];
-    if (!m5g_str(json, key, buf, sizeof(buf))) return 0;
-    return atoi(buf);
+
+
+#define TELE_FILE   "/tmp/5gmodem_tele.json"
+#define TELE_CELL   "/tmp/5gmodem_tele_cell.json"
+#define TELE_STALE  90
+
+static int tele_state;
+static int tele_modem;
+
+static int tele_num(const char *json, const char *key, int *ok) {
+    char pat[48];
+    const char *p;
+    if (ok) *ok = 0;
+    snprintf(pat, sizeof(pat), "\"%s\":", key);
+    p = strstr(json, pat);
+    if (!p) return 0;
+    p += strlen(pat);
+    while (*p == ' ') p++;
+    if (*p == '"') return 0;
+    if (ok) *ok = 1;
+    return atoi(p);
 }
 
-static void m5g_bands(const char *mode, char *out, int outlen) {
-    const char *p = strstr(mode, " | ");
-    int o = 0;
+static void tele_apply(struct lte_info *li) {
+    static char buf[2048];
+    struct stat sb;
+    FILE *f;
+    size_t got;
+    int ok;
 
-    out[0] = 0;
-    if (!p) return;
-    p += 3;
-    while (*p && o < outlen - 1) {
-        if (*p == 'B' && p[1] >= '0' && p[1] <= '9') {
-            if (o) out[o++] = '+';
-            while (*p && *p != ' ' && o < outlen - 1) out[o++] = *p++;
-            continue;
-        }
-        p++;
-    }
-    out[o] = 0;
+    tele_state = 0;
+    tele_modem = 0;
+    if (stat(TELE_FILE, &sb) != 0) return;
+    if (time(NULL) - sb.st_mtime > TELE_STALE) { tele_state = -1; return; }
+    f = fopen(TELE_FILE, "r");
+    if (!f) return;
+    got = fread(buf, 1, sizeof(buf) - 1, f);
+    buf[got] = 0;
+    fclose(f);
+    tele_state = 1;
+
+    li->signal_pct = tele_num(buf, "sig", &ok);
+    if (ok) tele_modem = 1;
+    if (strstr(buf, "\"rsrp\":") || strstr(buf, "\"oper\":")) tele_modem = 1;
+    li->rsrp = tele_num(buf, "rsrp", &ok);
+    li->rsrq = tele_num(buf, "rsrq", &ok);
+    li->sinr = tele_num(buf, "sinr", &ok);
+    li->temp = tele_num(buf, "temp", &ok);
+
+    m5g_str(buf, "oper", li->oper, sizeof(li->oper));
+    m5g_str(buf, "mode", li->mode, sizeof(li->mode));
+    if (!m5g_str(buf, "ca", li->band, sizeof(li->band)))
+        m5g_str(buf, "band", li->band, sizeof(li->band));
+
 }
 
-static int get_lte_from_5gmodem(struct lte_info *li) {
-    static char buf[M5G_BUF];
-    char mode[128], tmp[64];
-    const char *nb;
-    char *sep;
+static void tele_clear(struct lte_info *li) {
+    li->signal_pct = 0;
+    li->csq = li->rssi = li->nca = 0;
+    li->rsrp = li->rsrq = li->sinr = li->temp = 0;
+    li->oper[0] = 0;
+    li->mode[0] = 0;
+    li->band[0] = 0;
+}
 
-    memset(li, 0, sizeof(*li));
+static void tele_cell(struct lte_info *li) {
+    static char buf[4096];
+    struct stat sb;
+    FILE *f;
+    size_t got;
+    int ok, v;
+    char sv[80];
 
-    if (run_cmd_all(M5G_SH " cached 10 2>/dev/null", buf, sizeof(buf)) <= 0)
-        return 0;
-    if (!strstr(buf, "\"csq\""))
-        return 0;
+    if (stat(TELE_CELL, &sb) != 0) return;
+    if (time(NULL) - sb.st_mtime > TELE_STALE) return;
+    f = fopen(TELE_CELL, "r");
+    if (!f) return;
+    got = fread(buf, 1, sizeof(buf) - 1, f);
+    buf[got] = 0;
+    fclose(f);
 
-    m5g_str(buf, "operator_name", li->oper, sizeof(li->oper));
-    m5g_str(buf, "modem", li->modem, sizeof(li->modem));
-    m5g_str(buf, "ipaddr", li->ip, sizeof(li->ip));
+    v = tele_num(buf, "pci", &ok);     if (ok) li->pci = v;
+    v = tele_num(buf, "earfcn", &ok);  if (ok) li->earfcn = v;
+    v = tele_num(buf, "enb", &ok);     if (ok) li->enbid = v;
+    v = tele_num(buf, "cid", &ok);     if (ok) li->cid = v;
+    v = tele_num(buf, "mcc", &ok);     if (ok) li->mcc = v;
+    v = tele_num(buf, "csq", &ok);     if (ok) li->csq = v;
+    v = tele_num(buf, "rssi", &ok);    if (ok) li->rssi = v;
+    v = tele_num(buf, "nca", &ok);     if (ok) li->nca = v;
+    v = tele_num(buf, "roaming", &ok); if (ok) li->roaming = v;
+    v = tele_num(buf, "simslot", &ok); if (ok) li->simslot = v;
+    v = tele_num(buf, "therm", &ok);   if (ok) li->therm = v;
+    v = tele_num(buf, "tac", &ok);     if (ok) snprintf(li->tac, sizeof(li->tac), "%d", v);
+    v = tele_num(buf, "lac", &ok);     if (ok) snprintf(li->lac, sizeof(li->lac), "%d", v);
+    v = tele_num(buf, "pathloss", &ok);
+    if (ok) snprintf(li->pathloss, sizeof(li->pathloss), "%d", v);
+    v = tele_num(buf, "cqi", &ok);
+    if (ok) snprintf(li->cqi, sizeof(li->cqi), "%d", v);
 
-    li->csq  = m5g_int(buf, "csq");
-    li->rsrp = m5g_int(buf, "rsrp");
-    li->rsrq = m5g_int(buf, "rsrq");
-    li->sinr = m5g_int(buf, "sinr");
+    v = tele_num(buf, "conn_time", &ok);
+    if (ok)
+        snprintf(li->conn_time, sizeof(li->conn_time), "%dd, %02d:%02d:%02d",
+                 v / 86400, (v % 86400) / 3600, (v % 3600) / 60, v % 60);
 
-    if (m5g_str(buf, "mtemp", tmp, sizeof(tmp)))
-        li->temp = atoi(tmp);
+    if (m5g_str(buf, "mnc", sv, sizeof(sv)))
+        snprintf(li->mnc, sizeof(li->mnc), "%s", sv);
+    if (m5g_str(buf, "apn", sv, sizeof(sv)))
+        snprintf(li->apn, sizeof(li->apn), "%s", sv);
+    if (m5g_str(buf, "wan_ip", sv, sizeof(sv)))
+        snprintf(li->ip, sizeof(li->ip), "%s", sv);
+    if (m5g_str(buf, "modem", sv, sizeof(sv)))
+        snprintf(li->modem, sizeof(li->modem), "%s", sv);
+    if (m5g_str(buf, "cid_hex", sv, sizeof(sv)))
+        snprintf(li->cid_hex, sizeof(li->cid_hex), "%s", sv);
+    if (m5g_str(buf, "fw", sv, sizeof(sv)))
+        snprintf(li->fw, sizeof(li->fw), "%s", sv);
+    if (m5g_str(buf, "phone", sv, sizeof(sv)))
+        snprintf(li->phone, sizeof(li->phone), "%s", sv);
+    if (m5g_str(buf, "bandwidth", sv, sizeof(sv)))
+        snprintf(li->bandwidth, sizeof(li->bandwidth), "%s", sv);
+    if (m5g_str(buf, "txpower", sv, sizeof(sv)))
+        snprintf(li->txpower, sizeof(li->txpower), "%s", sv);
+    if (m5g_str(buf, "mimo", sv, sizeof(sv)))
+        snprintf(li->mimo, sizeof(li->mimo), "%s", sv);
+    if (m5g_str(buf, "rxdiv", sv, sizeof(sv)))
+        snprintf(li->rxdiv, sizeof(li->rxdiv), "%s", sv);
+    if (m5g_str(buf, "antports", sv, sizeof(sv)))
+        snprintf(li->antports, sizeof(li->antports), "%s", sv);
+    if (m5g_str(buf, "uecat", sv, sizeof(sv)))
+        snprintf(li->uecat, sizeof(li->uecat), "%s", sv);
+    if (m5g_str(buf, "volte", sv, sizeof(sv)))
+        snprintf(li->volte, sizeof(li->volte), "%s", sv);
 
-    li->signal_pct = m5g_int(buf, "signal");
-    li->cid        = m5g_int(buf, "cid_dec");
-    li->enbid      = m5g_int(buf, "enbid");
-    li->mcc        = m5g_int(buf, "operator_mcc");
-    li->mnc        = m5g_int(buf, "operator_mnc");
-    li->reg        = m5g_int(buf, "registration");
-    li->therm      = m5g_int(buf, "mtherm");
-    li->simslot    = m5g_int(buf, "simslot");
-    li->roaming    = m5g_int(buf, "roaming");
-
-    m5g_str(buf, "conn_time", li->conn_time, sizeof(li->conn_time));
-    m5g_str(buf, "rx", li->rx, sizeof(li->rx));
-    m5g_str(buf, "tx", li->tx, sizeof(li->tx));
-    m5g_str(buf, "iface_apn", li->apn, sizeof(li->apn));
-    m5g_str(buf, "firmware", li->fw, sizeof(li->fw));
-    m5g_str(buf, "phone", li->phone, sizeof(li->phone));
-
-    m5g_str(buf, "lac_dec",   li->lac,       sizeof(li->lac));
-    m5g_str(buf, "tac_dec",   li->tac,       sizeof(li->tac));
-    m5g_str(buf, "cid_hex",   li->cid_hex,   sizeof(li->cid_hex));
-    m5g_str(buf, "bandwidth", li->bandwidth, sizeof(li->bandwidth));
-    m5g_str(buf, "pathloss",  li->pathloss,  sizeof(li->pathloss));
-    m5g_str(buf, "txpower",   li->txpower,   sizeof(li->txpower));
-    m5g_str(buf, "cqi",       li->cqi,       sizeof(li->cqi));
-    m5g_str(buf, "uecat",     li->uecat,     sizeof(li->uecat));
-    m5g_str(buf, "volte",     li->volte,     sizeof(li->volte));
-    m5g_str(buf, "pmimo",     li->mimo,      sizeof(li->mimo));
-    m5g_str(buf, "rxdiv",     li->rxdiv,     sizeof(li->rxdiv));
-    m5g_str(buf, "antports",  li->antports,  sizeof(li->antports));
-    m5g_str(buf, "s1band",    li->s1band,    sizeof(li->s1band));
-    m5g_str(buf, "s2band",    li->s2band,    sizeof(li->s2band));
-    m5g_str(buf, "s3band",    li->s3band,    sizeof(li->s3band));
-    li->s1pci    = m5g_int(buf, "s1pci");
-    li->s2pci    = m5g_int(buf, "s2pci");
-    li->s3pci    = m5g_int(buf, "s3pci");
-    li->s1earfcn = m5g_int(buf, "s1earfcn");
-    li->s2earfcn = m5g_int(buf, "s2earfcn");
-    li->s3earfcn = m5g_int(buf, "s3earfcn");
-
-    if (m5g_str(buf, "mode", mode, sizeof(mode))) {
-        const char *b;
-        m5g_bands(mode, li->band, sizeof(li->band));
-        for (b = li->band; *b; b++)
-            if (*b == '+') li->nca++;
-        if (li->band[0]) li->nca++;
-        /* 5gmodem отдаёт режим как "LTE | B7 (FDD 2600 MHz)", а на простом LTE
-         * без агрегации - как "LTE |": хвост пустой, но палка остаётся. Режем
-         * по первой палке и подчищаем пробелы, иначе она уезжала на экран. */
-        sep = strchr(mode, '|');
-        if (sep) *sep = 0;
-        {
-            size_t n = strlen(mode);
-            while (n > 0 && (mode[n - 1] == ' ' || mode[n - 1] == '\t'))
-                mode[--n] = 0;
-        }
-        snprintf(li->mode, sizeof(li->mode), "%s", mode);
-    }
-
-    /* Массив соседей отдаём на экран как есть: там уже band/pci/rsrp/rsrq. */
     {
-        const char *ns = strstr(buf, "\"neighbors\":");
-        const char *o = ns ? strchr(ns, '[') : NULL;
-        const char *c = o ? strchr(o, ']') : NULL;
-        if (o && c) {
-            size_t len = (size_t)(c - o) + 1;
-            if (len < sizeof(li->neighbors)) {
-                memcpy(li->neighbors, o, len);
-                li->neighbors[len] = 0;
-            } else {
-                /* Массив длиннее буфера: берём сколько влезло и обрезаем по
-                 * последней целой записи, иначе экран получит битый JSON.
-                 * Рисуем всё равно только шесть первых сот. */
-                size_t max = sizeof(li->neighbors) - 2;
-                memcpy(li->neighbors, o, max);
-                li->neighbors[max] = 0;
-                char *last = strrchr(li->neighbors, '}');
-                if (last) { last[1] = ']'; last[2] = 0; }
-                else strcpy(li->neighbors, "[]");
-            }
+        const char *keys[3] = { "\"s1\"", "\"s2\"", "\"s3\"" };
+        char *bands[3] = { li->s1band, li->s2band, li->s3band };
+        int sizes[3] = { (int)sizeof(li->s1band), (int)sizeof(li->s2band), (int)sizeof(li->s3band) };
+        int *pcis[3] = { &li->s1pci, &li->s2pci, &li->s3pci };
+        int *earf[3] = { &li->s1earfcn, &li->s2earfcn, &li->s3earfcn };
+        for (int i = 0; i < 3; i++) {
+            const char *o = strstr(buf, keys[i]);
+            if (!o) continue;
+            o = strchr(o, '{');
+            if (!o) continue;
+            if (m5g_str(o, "band", sv, sizeof(sv))) snprintf(bands[i], (size_t)sizes[i], "%s", sv);
+            v = tele_num(o, "pci", &ok);    if (ok) *pcis[i] = v;
+            v = tele_num(o, "earfcn", &ok); if (ok) *earf[i] = v;
         }
-        if (!li->neighbors[0]) strcpy(li->neighbors, "[]");
     }
 
-    li->pci    = m5g_int(buf, "pci");
-    li->rssi   = m5g_int(buf, "rssi");
-    li->earfcn = m5g_int(buf, "earfcn");
-
-    nb = strstr(buf, "\"neighbors\":");
-    if (nb) {
-        if (!li->pci)    li->pci    = m5g_int(nb, "pci");
-        if (!li->rssi)   li->rssi   = m5g_int(nb, "rssi");
-        if (!li->earfcn) li->earfcn = m5g_int(nb, "earfcn");
+    {
+        const char *nb = strstr(buf, "\"nbrs\":");
+        const char *o = nb ? strchr(nb, '[') : NULL;
+        const char *e = o ? strchr(o, ']') : NULL;
+        if (o && e && (size_t)(e - o + 1) < sizeof(li->neighbors)) {
+            memcpy(li->neighbors, o, (size_t)(e - o + 1));
+            li->neighbors[e - o + 1] = 0;
+        }
     }
-
-    return 1;
 }
 
 static void get_lte_info_ext(struct lte_info *li) {
@@ -962,19 +976,35 @@ static void get_lte_info_ext(struct lte_info *li) {
 static void lte_poll(struct lte_info *li) {
     static struct lte_info cache;
     static time_t last = 0;
-    static int have_5g = -1;
     time_t now = time(NULL);
-
-    if (have_5g < 0)
-        have_5g = (access(M5G_SH, X_OK) == 0);
+    int have_5g = (access(TELE_FILE, R_OK) == 0);
 
     if (last && now - last < M5G_PERIOD) {
         *li = cache;
         return;
     }
 
-    if (!have_5g || !get_lte_from_5gmodem(li))
+    if (!have_5g)
         get_lte_info_ext(li);
+
+    {
+        static struct lte_info good;
+        static int have_good = 0;
+        static int miss = 0;
+
+        tele_apply(li);
+        if (tele_state == 1 && tele_modem) {
+            tele_cell(li);
+            good = *li;
+            have_good = 1;
+            miss = 0;
+        } else if (have_good && ++miss < 3) {
+            *li = good;
+        } else {
+            tele_clear(li);
+            have_good = 0;
+        }
+    }
 
     cache = *li;
     last = now;
@@ -1187,13 +1217,14 @@ int main(void) {
 
         len = snprintf(json, sizeof(json),
             "{\"ts\":%ld,"
+            "\"tele\":{\"src\":%d,\"modem\":%d},"
             "\"lte\":{\"csq\":%d,\"ber\":%d,\"rsrp\":%d,\"rsrq\":%d,"
             "\"sinr\":%d,\"rssi\":%d,\"pci\":%d,"
             "\"band\":\"%s\",\"mode\":\"%s\",\"operator\":\"%s\",\"ip\":\"%s\","
             "\"modem\":\"%s\",\"temp\":%d,\"signal\":%d,\"nca\":%d,"
             "\"conn_time\":\"%s\",\"rx\":\"%s\",\"tx\":\"%s\",\"apn\":\"%s\","
             "\"fw\":\"%s\",\"therm\":%d,\"simslot\":%d,\"roaming\":%d,"
-            "\"cid\":%d,\"enbid\":%d,\"mcc\":%d,\"mnc\":%d,\"earfcn\":%d,"
+            "\"cid\":%d,\"enbid\":%d,\"mcc\":%d,\"mnc\":\"%s\",\"earfcn\":%d,"
             "\"reg\":%d,"
             "\"phone\":\"%s\","
             "\"cell\":{\"lac\":\"%s\",\"tac\":\"%s\",\"cid_hex\":\"%s\","
@@ -1216,6 +1247,7 @@ int main(void) {
             "\"cpu_load\":%.2f,\"cpu_busy\":%d,\"cpu_cores\":%d,"
             "\"cpu_core_busy\":%s}\n",
             (long)time(NULL),
+            tele_state, tele_modem,
             li.csq,li.ber,li.rsrp,li.rsrq,li.sinr,li.rssi,li.pci,
             li.band,li.mode,li.oper,li.ip,li.modem,li.temp,li.signal_pct,li.nca,
             li.conn_time,li.rx,li.tx,li.apn,li.fw,li.therm,li.simslot,li.roaming,

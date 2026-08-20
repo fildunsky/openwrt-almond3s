@@ -30,38 +30,10 @@ GEO="/tmp/lcd_weather.geo"   # кэш координат Open-Meteo: "city<TAB>l
 DISPLAY_CITY=$(printf '%s' "$CITY" | tr -cd '\11\12\15\40-\176')
 
 # curl (http1.1 обязателен: сборка виснет по HTTP/2), фолбэк на wget. -k/-f.
-clash_proxy() {
-    [ -f /opt/clash/config.yaml ] || return 1
-    pidof clash >/dev/null 2>&1 || return 1
-    CP=$(sed -n 's/^mixed-port:[[:space:]]*\([0-9][0-9]*\).*/\1/p' /opt/clash/config.yaml | head -n1)
-    [ -n "$CP" ] || return 1
-    printf 'http://127.0.0.1:%s' "$CP"
-}
-
-DEAD="/tmp/.lcd_weather_direct_dead"
-
-direct_dead() {
-    [ -f "$DEAD" ] || return 1
-    [ -n "$(find "$DEAD" -mmin -60 2>/dev/null)" ] || { rm -f "$DEAD"; return 1; }
-    return 0
-}
+. /etc/almond3s/scripts/netfetch.sh
 
 fetch() {
-    PX=$(clash_proxy)
-    if command -v curl >/dev/null 2>&1; then
-        if ! direct_dead; then
-            curl --http1.1 -k -s -f --max-time 8 "$1" && return 0
-            [ -n "$PX" ] && : > "$DEAD"
-        fi
-        [ -n "$PX" ] && curl --http1.1 -k -s -f --max-time 20 -x "$PX" "$1" && return 0
-        return 1
-    fi
-    if ! direct_dead; then
-        wget --no-check-certificate -q -T 8 -O - "$1" && return 0
-        [ -n "$PX" ] && : > "$DEAD"
-    fi
-    [ -n "$PX" ] && http_proxy="$PX" https_proxy="$PX" \
-        wget --no-check-certificate -q -T 20 -O - "$1"
+	nf_fetch "$1" 8
 }
 
 if [ "$PROVIDER" = wttr ]; then

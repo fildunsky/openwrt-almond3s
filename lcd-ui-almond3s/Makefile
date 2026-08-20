@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=lcd-ui-almond3s
-PKG_RELEASE:=430
+PKG_RELEASE:=473
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -35,6 +35,8 @@ define Build/Compile
 		-o $(PKG_BUILD_DIR)/almond3s-zig $(PKG_BUILD_DIR)/almond3s-zig.c \
 		-lmbedcrypto
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
+		-o $(PKG_BUILD_DIR)/almond3s-mqtt $(PKG_BUILD_DIR)/almond3s-mqtt.c
+	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
 		-std=c99 -I$(PKG_BUILD_DIR)/vterm/include \
 		-o $(PKG_BUILD_DIR)/almond3s-term \
 		$(PKG_BUILD_DIR)/almond3s-term.c $(PKG_BUILD_DIR)/vterm/src/*.c \
@@ -52,10 +54,14 @@ define Package/lcd-ui-almond3s/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/collector $(1)/usr/libexec/almond3s/collector
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/almond3s-term $(1)/usr/libexec/almond3s/almond3s-term
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/almond3s-zig $(1)/usr/libexec/almond3s/almond3s-zig
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/almond3s-mqtt $(1)/usr/libexec/almond3s/almond3s-mqtt
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/ui.uc $(1)/usr/libexec/almond3s/ui.uc
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/almond3s-lcd.init $(1)/etc/init.d/almond3s-lcd
+	$(INSTALL_BIN) ./files/almond3s-mqtt.init $(1)/etc/init.d/almond3s-mqtt
 	$(INSTALL_DIR) $(1)/etc/almond3s/scripts
+	$(INSTALL_BIN) ./files/netfetch.sh $(1)/etc/almond3s/scripts/netfetch.sh
+	$(INSTALL_BIN) ./files/zig_join.sh $(1)/etc/almond3s/scripts/zig_join.sh
 	$(INSTALL_BIN) ./files/weather_fetch.sh $(1)/etc/almond3s/scripts/weather_fetch.sh
 	$(INSTALL_BIN) ./files/weather_geo.sh $(1)/etc/almond3s/scripts/weather_geo.sh
 	$(INSTALL_BIN) ./files/svcping.sh $(1)/etc/almond3s/scripts/svcping.sh
@@ -111,6 +117,15 @@ grep -q svcping /etc/crontabs/root 2>/dev/null || \
 # Заводим секцию будильника, если её нет: config - conffile, при апгрейде новая
 # секция не подмешивается в существующий пользовательский конфиг (уходит в
 # .apk-new), поэтому создаём её здесь с дефолтами.
+if ! uci -q get almond3s.mqtt >/dev/null 2>&1; then
+	uci set almond3s.mqtt=mqtt
+	uci set almond3s.mqtt.enabled='0'
+	uci set almond3s.mqtt.host=''
+	uci set almond3s.mqtt.port='1883'
+	uci set almond3s.mqtt.prefix='almond3s'
+	uci set almond3s.mqtt.period='60'
+	uci commit almond3s
+fi
 if ! uci -q get almond3s.alarm >/dev/null 2>&1; then
 	uci set almond3s.alarm=alarm
 	uci set almond3s.alarm.enabled='0'

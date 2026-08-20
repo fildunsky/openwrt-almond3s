@@ -9,9 +9,7 @@ CU=$(printf '%s' "$NAME" | tr ' ' '+')
 URL="https://geocoding-api.open-meteo.com/v1/search?name=${CU}&count=6&language=ru&format=json"
 
 R=""
-if command -v curl >/dev/null 2>&1; then
-    R=$(curl --http1.1 -k -s -f --max-time 15 "$URL")
-fi
-[ -n "$R" ] || R=$(wget --no-check-certificate -q -T 15 -O - "$URL")
+. /etc/almond3s/scripts/netfetch.sh
+R=$(nf_fetch "$URL" 15)
 [ -n "$R" ] || R='{"results":[]}'
 printf '%s' "$R" > "$TMP" && mv "$TMP" "$OUT"
