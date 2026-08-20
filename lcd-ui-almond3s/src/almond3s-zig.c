@@ -648,6 +648,19 @@ static int scan(int active, int duration, unsigned int mask)
     return items;
 }
 
+static int mfg_power(int mode, int pw)
+{
+    unsigned char d[3] = { (unsigned char)(mode & 0xFF),
+                           (unsigned char)((mode >> 8) & 0xFF),
+                           (unsigned char)(signed char)pw }, pl[64];
+    ezsp_cmd(0x8C, d, 3);
+    for (int i = 0; i < 6; i++) {
+        int pn = ezsp_read(pl, sizeof pl, 600);
+        if (pn >= 4 && pl[2] == 0x8C) return pl[3];
+    }
+    return -1;
+}
+
 static int join_net(int pan, int channel, int power, const unsigned char *key)
 {
     unsigned char par[64], pl[64];
@@ -1111,7 +1124,7 @@ int main(int argc, char **argv)
     int prof = set_cfg(0x0C, 2);
     set_cfg(0x0D, 5);
     const char *txm = getenv("ZIG_TXMODE");
-    int txmode = txm ? atoi(txm) : 0;
+    int txmode = txm ? atoi(txm) : 1;
     int txst = set_cfg(0x17, txmode);
 
     int cca = getenv("ZIG_CCA") ? atoi(getenv("ZIG_CCA")) : -20;
@@ -1122,6 +1135,25 @@ int main(int argc, char **argv)
         for (int i = 0; i < 6; i++) {
             int pn = ezsp_read(cpl, sizeof cpl, 600);
             if (pn >= 4 && cpl[2] == 0xAB) { cca_st = cpl[3]; break; }
+        }
+    }
+
+    const char *gp = getenv("ZIG_GPIO");
+    if (gp) {
+        char buf[128];
+        snprintf(buf, sizeof buf, "%s", gp);
+        for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
+            int pin = -1, cfg = -1, out = 0;
+            if (sscanf(tok, "%d:%x:%d", &pin, &cfg, &out) < 2) continue;
+            unsigned char d[3] = { (unsigned char)pin, (unsigned char)cfg, (unsigned char)out }, pl[64];
+            ezsp_cmd(0xAC, d, 3);
+            for (int i = 0; i < 6; i++) {
+                int pn = ezsp_read(pl, sizeof pl, 600);
+                if (pn >= 4 && pl[2] == 0xAC) {
+                    fprintf(stderr, "нога %d режим 0x%X -> статус %d\n", pin, cfg, pl[3]);
+                    break;
+                }
+            }
         }
     }
 
@@ -1688,6 +1720,7 @@ int main(int argc, char **argv)
             int pn = ezsp_read(pl, sizeof pl, 600);
             if (pn >= 4 && pl[2] == 0x8A) { r_ch = pl[3]; break; }
         }
+        mfg_power(txmode, getenv("ZIG_POWER") ? atoi(getenv("ZIG_POWER")) : 3);
         if (r_start != 0 || r_ch != 0) {
             printf("{\"ok\":0,\"start\":%d,\"channel\":%d}\n", r_start, r_ch);
             return 1;
@@ -1941,18 +1974,9 @@ int main(int argc, char **argv)
         }
         if (sending) {
             int pw = getenv("ZIG_POWER") ? atoi(getenv("ZIG_POWER")) : 3;
-            int pmode = getenv("ZIG_PMODE") ? atoi(getenv("ZIG_PMODE")) : 0;
-            d[0] = (unsigned char)(pmode & 0xFF);
-            d[1] = (unsigned char)((pmode >> 8) & 0xFF);
-            d[2] = (unsigned char)(signed char)pw;
-            ezsp_cmd(0x8C, d, 3);
-            for (int i = 0; i < 4; i++) {
-                int pn = ezsp_read(pl, sizeof pl, 400);
-                if (pn >= 4 && pl[2] == 0x8C) {
-                    fprintf(stderr, "мощность %d -> статус %d\n", pw, pl[3]);
-                    break;
-                }
-            }
+            int pmode = getenv("ZIG_PMODE") ? atoi(getenv("ZIG_PMODE")) : txmode;
+            fprintf(stderr, "мощность %d режим %d -> статус %d\n",
+                    pw, pmode, mfg_power(pmode, pw));
         }
 
         printf("{\"ok\":%d,\"start\":%d,\"channel\":%d,\"ch\":%d,\"mode\":\"%s\"}\n",
@@ -2105,15 +2129,17 @@ int main(int argc, char **argv)
         ezsp_cmd(0x8A, d, 1);
         for (int i = 0; i < 6; i++) { int pn = ezsp_read(pl, sizeof pl, 600);
             if (pn >= 4 && pl[2] == 0x8A) { r_ch = pl[3]; break; } }
-        d[0] = 0; d[1] = 3;
-        ezsp_cmd(0x8C, d, 2);
-        for (int i = 0; i < 6; i++) { int pn = ezsp_read(pl, sizeof pl, 600);
-            if (pn >= 4 && pl[2] == 0x8C) { r_pow = pl[3]; break; } }
+        int tmode = argc > 4 ? atoi(argv[4]) : txmode;
+        int tpow = argc > 5 ? atoi(argv[5])
+                            : (getenv("ZIG_POWER") ? atoi(getenv("ZIG_POWER")) : 3);
+        r_pow = mfg_power(tmode, tpow);
         ezsp_cmd(0x85, NULL, 0);
         for (int i = 0; i < 6; i++) { int pn = ezsp_read(pl, sizeof pl, 600);
             if (pn >= 4 && pl[2] == 0x85) { r_tone = pl[3]; break; } }
-        printf("{\"ok\":%d,\"start\":%d,\"channel\":%d,\"power\":%d,\"tone\":%d,\"ch\":%d,\"sec\":%d}\n",
-               r_tone == 0 ? 1 : 0, r_start, r_ch, r_pow, r_tone, ch, sec);
+        printf("{\"ok\":%d,\"start\":%d,\"channel\":%d,\"power\":%d,\"tone\":%d,\"ch\":%d,\"sec\":%d,"
+               "\"mode\":%d,\"dbm\":%d}\n",
+               r_tone == 0 ? 1 : 0, r_start, r_ch, r_pow, r_tone, ch, sec, tmode, tpow);
+        fflush(stdout);
         time_t t0 = time(NULL);
         while (time(NULL) - t0 < sec) ezsp_read(pl, sizeof pl, 500);
         ezsp_cmd(0x86, NULL, 0);

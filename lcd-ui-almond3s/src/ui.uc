@@ -5787,11 +5787,11 @@ function zig_beacon_start() {
         fs.unlink(ZIG_KEYFILE);
     }
     if (zig_mode() == "mesh")
-        system(sprintf("setsid %s mesh 30 %s >/dev/null 2>&1 </dev/null &",
-                       ZIG_BIN, zig_name()));
+        system(sprintf("ZIG_POWER=%d setsid %s mesh 30 %s >/dev/null 2>&1 </dev/null &",
+                       c.power, ZIG_BIN, zig_name()));
     else
-        system(sprintf("setsid %s beacon %d 10 %s >/dev/null 2>&1 </dev/null &",
-                       ZIG_BIN, c.ch, zig_name()));
+        system(sprintf("ZIG_POWER=%d setsid %s beacon %d 10 %s >/dev/null 2>&1 </dev/null &",
+                       c.power, ZIG_BIN, c.ch, zig_name()));
 }
 
 function zig_set(k, v) {
@@ -6092,7 +6092,7 @@ function draw_zigpeer_page() {
     }
     lcd_flush();
 }
-let ZIG_POWERS = [ -8, 0, 3, 8, 20 ];
+let ZIG_POWERS = [ -8, 0, 3, 5, 8 ];
 
 function zigset_row(i) {
     return { x: GX, y: GY + i * 27, w: GW, h: 24 };
