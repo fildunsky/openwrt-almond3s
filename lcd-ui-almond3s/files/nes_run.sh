@@ -55,6 +55,7 @@ kill $TOUCHD 2>/dev/null
 for q in $(ps w | grep "[a]lmond3s-lcd daemon" | awk "{print \$1}"); do kill $q 2>/dev/null; done
 sleep 1
 rm -f /tmp/.lcd_touch /tmp/.lcd_touch.move
+
 /etc/init.d/almond3s-lcd start >/dev/null 2>&1
 
 # Возвращаем туда, откуда игру и запускали - в список игр, а не на стартовую

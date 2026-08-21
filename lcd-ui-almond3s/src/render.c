@@ -86,6 +86,64 @@ static void fb_rect(int x, int y, int w, int h, uint16_t c)
             fb[j * LCD_W + i] = c;
 }
 
+/* Прямоугольник со скруглёнными углами: рисуем построчно, у крайних строк
+ * отступая от краёв «лесенкой» ins = r, r-1, ... 1. Угловые пиксели просто НЕ
+ * трогаем - под ними уже лежит то, что нарисовано раньше (градиент-подложка
+ * под карточкой, сама карточка под акцентной полоской), поэтому скругление
+ * получается бесплатно и без знания цвета фона. */
+/* Та же лесенка, но отступаем ТОЛЬКО слева и высоту не режем: так рисуется
+ * акцентная полоска карточки (right=0) и крайние деления батарейки (right=1).
+ * Край повторяет закругление плашки, поэтому цвет доходит до самого угла, а не
+ * обрывается за пару строк до него. */
+static void fb_rect_round_side(int x, int y, int w, int h, uint16_t c, int r, int right)
+{
+    int j;
+    if (w < 0 || h < 0) return;
+    if (r < 1) { fb_rect(x, y, w, h, c); return; }
+    if (r > h / 2) r = h / 2;
+    for (j = 0; j < h; j++) {
+        int ins = 0;
+        if (j < r) ins = r - j;
+        else if (j >= h - r) ins = r - (h - 1 - j);
+        if (ins >= w) continue;
+        fb_rect(right ? x : x + ins, y + j, w - ins, 1, c);
+    }
+}
+
+/* Узкая полоса, ИДУЩАЯ вдоль скруглённого края: не обрезаем по ширине, а
+ * сдвигаем всю полосу вслед за лесенкой. Обрезка годится, пока радиус меньше
+ * ширины полосы; на радиусе 3-4 трёхпиксельная акцентная полоска обрезалась
+ * в ноль, и в углу снова показывался цвет плашки. */
+static void fb_band_round_left(int x, int y, int w, int h, uint16_t c, int r)
+{
+    int j;
+    if (w < 0 || h < 0) return;
+    if (r < 1) { fb_rect(x, y, w, h, c); return; }
+    if (r > h / 2) r = h / 2;
+    for (j = 0; j < h; j++) {
+        int ins = 0;
+        if (j < r) ins = r - j;
+        else if (j >= h - r) ins = r - (h - 1 - j);
+        fb_rect(x + ins, y + j, w, 1, c);
+    }
+}
+
+static void fb_rect_round(int x, int y, int w, int h, uint16_t c, int r)
+{
+    int j;
+    if (w < 0 || h < 0) return;
+    if (r < 1) { fb_rect(x, y, w, h, c); return; }
+    if (r > w / 2) r = w / 2;
+    if (r > h / 2) r = h / 2;
+    if (r < 1) { fb_rect(x, y, w, h, c); return; }
+    for (j = 0; j < h; j++) {
+        int ins = 0;
+        if (j < r) ins = r - j;
+        else if (j >= h - r) ins = r - (h - 1 - j);
+        fb_rect(x + ins, y + j, w - 2 * ins, 1, c);
+    }
+}
+
 /* Вертикальный градиент: цвет c0 сверху -> c1 снизу, интерполяция по строкам.
  * Считаем в компонентах RGB565 - для мягкой подложки точности хватает, а строка
  * заливается одним цветом, так что стоимость почти как у fb_rect. */
@@ -248,6 +306,89 @@ static const struct fz_glyph *fz_find(const struct fz_glyph *g, int n, unsigned 
 
 /* Символ шрифтом Flipper в клетке 6x8: фон клетки, базовая линия на 7-й
    строке, как у 5x7. Вернуть 0, если глифа нет - вызывающий нарисует 5x7. */
+/* Кернинг для шрифта Flipper - ТОЛЬКО для пар с точкой и запятой. У них одна
+ * колонка чернил на уровне базовой линии, и расстояние на глаз определяется не
+ * шириной клетки соседа, а тем, где у соседа чернила В ЭТИХ строках: после «7»
+ * точка казалась далёкой (низ семёрки уходит влево), перед «1» - прижатой (у
+ * единицы полноширинная ножка). Цифры и двоеточие не кернируем: они держат
+ * табличный шаг, иначе крупные часы дёргались бы при смене времени. */
+static int fz_ink_left(const struct fz_glyph *g, int row)
+{
+    int top = 7 - g->h - g->y, bpr = (g->w + 7) / 8, c;
+    int lr = row - top;
+    if (lr < 0 || lr >= g->h) return -1;
+    for (c = 0; c < g->w; c++)
+        if (fz_hax_bits[g->off + lr * bpr + c / 8] & (0x80 >> (c % 8)))
+            return g->x + c;
+    return -1;
+}
+
+static int fz_ink_right(const struct fz_glyph *g, int row)
+{
+    int top = 7 - g->h - g->y, bpr = (g->w + 7) / 8, c;
+    int lr = row - top;
+    if (lr < 0 || lr >= g->h) return -1;
+    for (c = g->w - 1; c >= 0; c--)
+        if (fz_hax_bits[g->off + lr * bpr + c / 8] & (0x80 >> (c % 8)))
+            return g->x + c;
+    return -1;
+}
+
+static int fb_tabular(unsigned cp);
+static int fz_kernable(unsigned cp);
+
+/* Кернировать можно всё, кроме пар «цифра-цифра» и им подобных: те держат
+ * табличный шаг, иначе крупные часы дёргались бы при смене времени. Пробел
+ * не трогаем - он и есть расстояние. */
+static int fz_kern_pair(unsigned a, unsigned b)
+{
+    if (a == ' ' || b == ' ') return 0;
+    /* Двоеточию метрика выставлена руками и симметрично: двигать его нельзя.
+     * Рядом с частой «ш» подтянутая колонка читается как слипшееся, а в часах
+     * сдвиг вообще недопустим - цифры разъедутся. */
+    if (a == ':' || b == ':' || a == ';' || b == ';') return 0;
+    /* Точка и запятая кернируются ВСЕГДА, в том числе после цифр: там зазор
+     * зависит от того, где у цифры чернила у базовой линии. Раньше они
+     * попадали под общий запрет для «цифра-цифра» и оставались далеко. */
+    if (fz_kernable(a) || fz_kernable(b)) return 1;
+    if (fb_tabular(a) && fb_tabular(b)) return 0;
+    return 1;
+}
+
+static int fz_kernable(unsigned cp)
+{
+    return cp == '.' || cp == ',';
+}
+
+/* Возвращает, на сколько колонок сдвинуть правый глиф: положительное -
+ * подтянуть, отрицательное - оттолкнуть. want - сколько пустых колонок надо
+ * оставить: перед точкой хватает одной (она должна липнуть к своему числу), а
+ * после неё нужна вторая, иначе «.1» читается слитно - у единицы под точкой
+ * лежит полноширинная ножка. */
+static int fz_kern(const struct fz_glyph *gp, const struct fz_glyph *gc, int want)
+{
+    int row, best = 3, seen = 0;
+    if (!gp || !gc) return 0;
+    for (row = 0; row < 8; row++) {
+        int pr = -1, cl = -1, rr, v, gap;
+        for (rr = row - 1; rr <= row + 1; rr++) {
+            v = fz_ink_right(gp, rr);
+            if (v > pr) pr = v;
+        }
+        for (rr = row - 1; rr <= row + 1; rr++) {
+            v = fz_ink_left(gc, rr);
+            if (v >= 0 && (cl < 0 || v < cl)) cl = v;
+        }
+        if (pr < 0 || cl < 0) continue;
+        seen = 1;
+        gap = (gp->adv + cl) - pr - 1;
+        if (gap - want < best) best = gap - want;
+    }
+    if (!seen) return 0;
+    if (best < -1) best = -1;
+    return best;
+}
+
 static int fz_char_mono(int x, int y, unsigned cp, uint16_t fg, uint16_t bg, int scale, int draw_bg)
 {
     const struct fz_glyph *g = fz_find(fz_hax_glyphs, FZ_HAX_COUNT, cp);
@@ -296,7 +437,19 @@ static const uint8_t *fb_glyph(unsigned cp)
 static int fb_tabular(unsigned cp)
 {
     return (cp >= '0' && cp <= '9') || cp == '+' || cp == '-' || cp == '.'
-        || cp == ',' || cp == '=' || cp == '/' || cp == '%' || cp == 0x00B0;
+        || cp == ',' || cp == '=' || cp == '/' || cp == '%' || cp == 0x00B0
+        || cp == ':';
+}
+
+/* Ширина клетки. У двоеточия чернила занимают всего две колонки из пяти, и в
+ * общей шестипиксельной клетке вокруг него оставалось по три пустых - на
+ * крупных часах это выглядело как «01 : 05». Даём ему узкую клетку: просвет
+ * уходит, а положение остаётся стабильным (кернингом двигать нельзя - тогда
+ * двоеточие прыгало бы по горизонтали в зависимости от соседней цифры,
+ * потому что у «1» чернила уже, чем у остальных цифр). */
+static int fb_adv(unsigned cp)
+{
+    return cp == ':' ? 4 : 6;
 }
 
 static int fb_kern(const uint8_t *gp, const uint8_t *gc)
@@ -344,6 +497,50 @@ static void fb_char(int x, int y, unsigned cp, uint16_t fg, uint16_t bg, int sca
                 fb_pixel(x + 5*scale + sx, y + row, bg);
 }
 
+/* Настоящая ширина строки. Шрифт пропорциональный и с кернингом, поэтому
+   «число знаков на шесть» - лишь оценка: у 10:45:41 она врёт на пять пикселей,
+   и выровненный по ней правый край не сходится с соседними строками. Считаем
+   тем же проходом, что и отрисовка, только без вывода. */
+static int fb_text_w(const char *s, int scale)
+{
+    const unsigned char *p = (const unsigned char *)s;
+    unsigned prev = 0;
+    int w = 0, first = 1;
+
+    while (*p) {
+        unsigned cp;
+        if (*p == '\n') { p++; continue; }
+        if ((*p & 0xE0) == 0xC0 && (p[1] & 0xC0) == 0x80) {
+            cp = ((unsigned)(*p & 0x1F) << 6) | (p[1] & 0x3F);
+            p += 2;
+        } else if ((*p & 0xF0) == 0xE0 && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80) {
+            cp = ((unsigned)(*p & 0x0F) << 12) | ((unsigned)(p[1] & 0x3F) << 6)
+                 | (p[2] & 0x3F);
+            p += 3;
+        } else {
+            cp = *p;
+            p++;
+        }
+        if (font_mode != 1 && !first && cp != ' ' && prev != ' '
+            && !(fb_tabular(cp) && fb_tabular(prev))) {
+            int kern = fb_kern(fb_glyph(prev), fb_glyph(cp));
+            if (kern) w -= kern * scale;
+        }
+        if (font_mode == 1) {
+            const struct fz_glyph *g = fz_find(fz_hax_glyphs, FZ_HAX_COUNT, cp);
+            if (!first && fz_kern_pair(prev, cp))
+                w -= fz_kern(fz_find(fz_hax_glyphs, FZ_HAX_COUNT, prev), g,
+                             fz_kernable(prev) ? 2 : 1) * scale;
+            w += (g ? g->adv : 6) * scale;
+        } else {
+            w += fb_adv(cp) * scale;
+        }
+        prev = cp;
+        first = 0;
+    }
+    return w;
+}
+
 /* Текст приходит в UTF-8: кириллица это два байта (0xD0/0xD1 + продолжение).
    Разбираем двухбайтовые последовательности, остальное считаем ASCII. */
 static void fb_text(int x, int y, const char *s, uint16_t fg, uint16_t bg, int scale, int transp)
@@ -373,12 +570,21 @@ static void fb_text(int x, int y, const char *s, uint16_t fg, uint16_t bg, int s
             int kern = fb_kern(fb_glyph(cps[n - 1]), fb_glyph(cp));
             if (kern) x -= kern * scale;
         }
-        cps[n] = cp; cx[n] = x; cy[n] = y;
+        /* Узкую клетку двоеточия компенсируем сдвигом самого глифа: его
+         * чернила лежат в колонках 2-3 пятиколоночной сетки, и без сдвига
+         * оно прижалось бы к правому соседу. */
+        if (font_mode == 1 && n > 0 && fz_kern_pair(cps[n - 1], cp)) {
+            int k = fz_kern(fz_find(fz_hax_glyphs, FZ_HAX_COUNT, cps[n - 1]),
+                            fz_find(fz_hax_glyphs, FZ_HAX_COUNT, cp),
+                            fz_kernable(cps[n - 1]) ? 2 : 1);
+            x -= k * scale;
+        }
+        cps[n] = cp; cx[n] = x - (cp == ':' ? scale : 0); cy[n] = y;
         if (font_mode == 1) {
             const struct fz_glyph *g = fz_find(fz_hax_glyphs, FZ_HAX_COUNT, cp);
             adv[n] = (g ? g->adv : 6) * scale;
         } else {
-            adv[n] = 6 * scale;
+            adv[n] = fb_adv(cp) * scale;
         }
         x += adv[n];
         n++;
@@ -388,15 +594,31 @@ static void fb_text(int x, int y, const char *s, uint16_t fg, uint16_t bg, int s
         /* Два прохода: сперва фон всех клеток, затем глифы. Иначе широкий
            глиф (W, Ж, Щ) срезается фоном соседней клетки. Прозрачный текст
            фоновый проход пропускает - под буквами остаётся подложка. */
-        int row, sx;
-        if (!transp)
-            for (i = 0; i < n; i++)
-                for (row = 0; row < 8 * scale; row++)
-                    for (sx = 0; sx < adv[i]; sx++)
-                        fb_pixel(cx[i] + sx, cy[i] + row, bg);
+        /* Фон кладём ОДНИМ прямоугольником на всю строку, а не по клеткам.
+         * У широких глифов («ш», «Щ», «W») чернила намеренно выходят за свою
+         * клетку, и после кернинга фон соседней клетки стал срезать этот
+         * выступ - у «ш» пропадала правая палочка. */
+        if (!transp && n > 0) {
+            int x0 = cx[0], x1 = cx[0];
+            for (i = 0; i < n; i++) {
+                const struct fz_glyph *g = fz_find(fz_hax_glyphs, FZ_HAX_COUNT, cps[i]);
+                int right = cx[i] + adv[i];
+                if (g) {
+                    int ink = cx[i] + (g->x + g->w) * scale;
+                    if (ink > right) right = ink;
+                }
+                if (cx[i] < x0) x0 = cx[i];
+                if (right > x1) x1 = right;
+            }
+            fb_rect(x0, cy[0], x1 - x0, 8 * scale, bg);
+        }
+        /* Второй проход рисует ТОЛЬКО чернила: фон уже положен выше. Раньше
+         * каждый глиф закрашивал свою клетку сам, и после кернинга подтянутый
+         * сосед срезал хвост предыдущей буквы - у «7» пропадал верхний правый
+         * угол, у «ш» правая палочка. */
         for (i = 0; i < n; i++)
-            if (!fz_char_mono(cx[i], cy[i], cps[i], fg, bg, scale, !transp))
-                fb_char(cx[i], cy[i], cps[i], fg, bg, scale, transp);
+            if (!fz_char_mono(cx[i], cy[i], cps[i], fg, bg, scale, 0))
+                fb_char(cx[i], cy[i], cps[i], fg, bg, scale, 1);
         return;
     }
 
@@ -545,8 +767,16 @@ static void handle_cmd(const char *json)
         int y = json_int(json, "y", 0);
         int w = json_int(json, "w", 10);
         int h = json_int(json, "h", 10);
+        int r = json_int(json, "r", 0);
+        int rl = json_int(json, "rl", 0);
+        int rr = json_int(json, "rr", 0);
+        int rs = json_int(json, "rs", 0);
         json_str(json, "color", color, sizeof(color));
-        fb_rect(x, y, w, h, parse_color(color));
+        if (rs > 0) fb_band_round_left(x, y, w, h, parse_color(color), rs);
+        else if (rl > 0 || rr > 0)
+            fb_rect_round_side(x, y, w, h, parse_color(color),
+                               rr > 0 ? rr : rl, rr > 0);
+        else fb_rect_round(x, y, w, h, parse_color(color), r);
     }
     else if (!strcmp(cmd, "vgrad")) {
         int x = json_int(json, "x", 0);
@@ -572,6 +802,13 @@ static void handle_cmd(const char *json)
         /* \n уже развёрнут в json_str. bg:"none" - прозрачный фон: под буквами
          * остаётся то, что уже нарисовано (градиент-подложка). */
         int transp = !strcmp(bg_color, "none");
+        /* anchor:"r" - x задаёт ПРАВЫЙ край, "c" - центр: ширину считаем сами.
+         * Шрифт пропорциональный с кернингом, и прикидка «длина * 6» промахивалась
+         * тем сильнее, чем короче надпись - цифры в клетках стояли не по центру. */
+        char anch[8];
+        json_str(json, "anchor", anch, sizeof(anch));
+        if (anch[0] == 'r') x -= fb_text_w(text, size);
+        else if (anch[0] == 'c') x -= fb_text_w(text, size) / 2;
         fb_text(x, y, text, parse_color(color[0] ? color : "white"),
                 parse_color((bg_color[0] && !transp) ? bg_color : "black"),
                 size, transp);

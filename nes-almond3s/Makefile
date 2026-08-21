@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=nes-almond3s
-PKG_RELEASE:=1
+PKG_RELEASE:=4
 PKG_LICENSE:=GPL-2.0-or-later
 PKG_LICENSE_FILES:=src/LICENSE.quicknes
 

@@ -723,6 +723,22 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    /* almond3s-lcd blstat — окна подсветки: самая длинная тёмная и светлая
+     * паузы с прошлого чтения и счётчики затянувшихся. Нужно, чтобы отличить
+     * «панель показывает чёрное» от «ШИМ застрял в тёмной фазе»: во втором
+     * случае dim и светодиод честно рапортуют включённый экран, а света нет.
+     * Чтение обнуляет счётчики - каждый вызов даёт максимум за интервал. */
+    if (argc >= 2 && strcmp(argv[1], "blstat") == 0) {
+        int d[4] = { -1, -1, -1, -1 };
+        if (ioctl(fd, 25, d) == 0)
+            printf("тьма_макс=%d мкс, затянувшихся=%d, свет_макс=%d мкс, затянувшихся=%d\n",
+                   d[0], d[1], d[2], d[3]);
+        else
+            printf("blstat недоступен\n");
+        close(fd);
+        return 0;
+    }
+
     /* almond3s-lcd pic — сырые 17 байт статуса PIC (ioctl 3).
      * Нужно, чтобы ловить, докладывает ли PIC о нажатиях кнопки питания:
      * до ядра она не доходит, вся надежда на эти байты. */
@@ -782,7 +798,7 @@ int main(int argc, char **argv)
             "almond3s-lcd: неизвестная команда%s%s\n"
             "  подсветка: bl 0|1 | dim 0..255 | gray 0..255 | warm 0..100 | pwm <мкс>\n"
             "  панель:    scene N | matrixline <текст> | reinit | rotate 0|1\n"
-            "  сведения:  version | stats | stat | bench | level | pic\n"
+            "  сведения:  version | stats | stat | blstat | bench | level | pic\n"
             "  касания:   touchmode N | waittouch <мс> | daemon | daemon_fg\n"
             "  звук:      volume N | tone | melody | bell | siren | stop\n"
             "  проверка:  demo\n",

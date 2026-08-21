@@ -38,7 +38,7 @@ let C = {
     bg_bot:  "#070A0E", // ...и глубже уход в тень книзу - контрастнее
     hdr:     "#161B22", // GitHub Dark Overlay
     white:   "#C9D1D9", // GH Text Primary
-    green:   "#3FB950", // GH Success
+    green:   "#10B981", // изумруд - единый «хорошо»: заряд, уровень, «включено»
     red:     "#F85149", // GH Danger
     yellow:  "#E8853A", // теперь тоже оранжевый (по просьбе - единый акцент)
     orange:  "#E8853A", // предупреждения (warn-уровень)
@@ -60,6 +60,30 @@ let C = {
     cloud_shd:  "#5A6270", // cloud, shadowed underside
     bolt:       "#FFF176", // lightning bolt
 };
+
+// Светлая тема - подмена НЕЙТРАЛЬНЫХ цветов: фон, плашки, текст, рамки. Акценты
+// (зелёный, красный, оранжевый, голубой) и пиксель-арт остаются прежними. Это
+// принципиально не «Инверсия» со страницы «Дебаг»: та переключает регистры
+// самой панели и выворачивает всё подряд, включая иконки и акценты.
+let THEME_SET = {
+    dark: {
+        bg: "#0D1117", hdr: "#161B22", widget: "#161B22", white: "#C9D1D9",
+        gray: "#8B949E", dim: "#484F58", border: "#30363D", btn: "#21262D",
+        press: "#0B0E13", graph: "#0A1016", empty: "#484F58",
+    },
+    light: {
+        bg: "#EBEFF4", hdr: "#FFFFFF", widget: "#FFFFFF", white: "#1F2328",
+        gray: "#57606A", dim: "#9AA4AE", border: "#CDD5DE", btn: "#E3E8EE",
+        press: "#D5DCE4", graph: "#EDF2F8", empty: "#E3E8EE",
+    },
+};
+let THEME = "dark";
+
+function theme_apply(mode) {
+    THEME = (mode == "light") ? "light" : "dark";
+    let t = THEME_SET[THEME];
+    for (let k in t) C[k] = t[k];
+}
 
 // Пороги и шкалы — те же, что в таблице C дашборда 5gmodem и в 5gtop.
 let MET = {
@@ -195,7 +219,7 @@ let TG_LINK = "t.me/openwrt_fun";
 let COLS    = 2;
 let BTN_PAD = 4;
 let BTN_W   = ((LCD_W - (BTN_PAD * 3)) / 2); // 154
-let BTN_H   = 68;
+let BTN_H   = 58;   // три ряда над общей полосой навигации
 let START_Y = HDR_H + BTN_PAD;
 let BACK_Y  = LCD_H - 32;
 let GEO_JSON = "/tmp/lcd_geo.json";   // ответ геокодера для пикера выбора города
@@ -208,6 +232,16 @@ let GEO_JSON = "/tmp/lcd_geo.json";   // ответ геокодера для п
 let GX = 8, GR = 312, GW = 304, GY = 24, GB = 206, GG = 8;
 let ZIG_ROWS = 6;
 let GCOL = 148;                 // ширина колонки в 2-колоночной раскладке
+// Вертикальные границы полезной области. По горизонтали сетка общая давно, а по
+// вертикали ритма не было: контент начинался на GY=24, впритык к шапке (просвет
+// 2px), а вся невыбранная высота сваливалась вниз одним большим пустым полем.
+// GVT/GVB задают такой же отступ GG сверху и снизу, как между карточками.
+let GVT = HDR_H + GG;           // верх полезной области (30)
+let GVB = BACK_Y - GG;          // низ полезной области (200)
+// Высота карточки, когда N штук делят полезную область поровну.
+function gcard_h(n) {
+    return int((GVB - GVT - (n - 1) * GG) / n);
+}
 let GH = { xs: 40, s: 64, m: 88, l: 176 };   // набор высот карточек
 // gcard() определена ниже, после lcd_rect/lcd_text (ucode без hoisting).
 
@@ -278,6 +312,74 @@ function grad_load() {
 }
 grad_load();
 
+// Текст, лежащий прямо на подложке (заголовки секций, подпись страницы
+// заставки), берёт отдельный цвет. В светлой теме цвет текста плашек почти
+// чёрный, а подложка - насыщенный синий: серые надписи на нём терялись.
+// Когда градиент выключен, фон снова спокойный, и цвета возвращаются к обычным.
+function ontop_apply() {
+    let onblue = (THEME == "light" && GRAD_ON);
+    C.ontop_hi  = onblue ? "#FFFFFF" : C.white;
+    C.ontop     = onblue ? "#EAF3FF" : C.gray;
+    C.ontop_dim = onblue ? "#C3DBF7" : C.dim;
+}
+
+// Скругление углов плашек: 0 - выкл, 1-2 пикселя срезаем у каждого угла.
+let RADIUS = 0;
+function radius_load() {
+    let v = ucur ? ucur.get("almond3s", "display", "radius") : null;
+    RADIUS = (v == null || v == "") ? 0 : int(+v);
+    if (RADIUS < 0) RADIUS = 0;
+    if (RADIUS > 4) RADIUS = 4;
+}
+radius_load();
+
+// Оттенок подложки: тумблер «Оттенок фона» на странице «Экран».
+//   dark  - исходная схема: фон темнее плашек, карточки «всплывают» над ним;
+//   light - обратная: фон чуть СВЕТЛЕЕ C.widget, и плашки читаются утопленными.
+// Это не дневная тема: подсвечивается только подложка, цвета текста и плашек
+// те же, поэтому C.white/C.gray на обоих вариантах остаются контрастными.
+// Светлую пару держим выше C.widget (#161B22) даже в самой тёмной точке -
+// иначе внизу экрана карточки слились бы с фоном.
+// Пары градиента отдельно для каждой темы: на светлой подложка должна быть
+// светлее плашек, иначе карточки на ней тонут.
+let BG_TINTS = {
+    // На тёмной теме светлый вариант - РОВНАЯ заливка верхним цветом, без
+    // растяжки книзу: градиент там читался как грязь, а плоская подложка
+    // честно держит плашки над собой.
+    dark:  { dark:  { top: "#182C40", bot: "#070A0E" },
+             light: { top: "#2B3444", bot: "#2B3444" } },
+    // Светлая тема: подложка из нашего акцентного синего (#58A6FF), уведённого
+    // книзу в тёмно-синий. Белые плашки на таком фоне читаются как вырезанные.
+    light: { dark:  { top: "#529CEA", bot: "#2A66AC" },
+             light: { top: "#74B6FF", bot: "#3F7FC9" } },
+};
+let BG_TINT = "light";
+function bg_tint_apply(mode) {
+    // Умолчание - светлый: на нём плашки читаются как утопленные панели по
+    // всей высоте, а тёмный градиент в середине экрана сливался с ними.
+    BG_TINT = (mode == "dark") ? "dark" : "light";
+    // Правим саму палитру, а не копию: lcd_clear читает C.bg_top/C.bg_bot на
+    // каждом кадре, поэтому переключение видно с первой же перерисовки.
+    let pair = BG_TINTS[THEME][BG_TINT];
+    C.bg_top = pair.top;
+    C.bg_bot = pair.bot;
+    ontop_apply();
+}
+function theme_cfg() {
+    let v = ucur ? ucur.get("almond3s", "display", "theme") : null;
+    return (v == "light") ? "light" : "dark";
+}
+function theme_load() {
+    theme_apply(theme_cfg());
+}
+// Тему применяем ПЕРЕД оттенком: пары градиента у тем разные.
+theme_load();
+
+function bg_tint_load() {
+    bg_tint_apply(ucur ? ucur.get("almond3s", "display", "bg") : null);
+}
+bg_tint_load();
+
 // SSClash: меню VPN показываем, только если служба установлена (есть init).
 // Дальше по файлу vpn_present() зовётся из отрисовки меню - потому объявлен тут.
 let VPN_PRESENT = null;
@@ -333,8 +435,11 @@ let TR_RU = {
     "CELL / NETWORK": "СОТА / СЕТЬ",
     "ROAM": "РОУМ",
     "Modem": "Модем",
-    "Modem Reset": "Сброс",
-    "LTE restart": "модема",
+    "Modem Reset": "Сброс модема",
+    "LTE restart": "Связь пропадёт на ~15 секунд",
+    "Network name": "Имя сети",
+    "Type network name": "Введите имя сети",
+    "Clients will reconnect": "Устройства переподключатся",
     "Resetting modem...": "Перезапуск модема...",
     "Reboot": "Ребут",
     "LED": "Диод",
@@ -427,6 +532,16 @@ let TR_RU = {
     "more devices": "ещё, показать:",
     "router role": "маршрутизатор",
     "Overview": "Обзор",
+    "Corners": "Углы",
+    "Aggregation": "Агрегация",
+    "+ Hidden": "+ Скрытая",
+    "more": "ещё",
+    "Hidden network": "Скрытая сеть",
+    "Period": "Период",
+    "Topic": "Тема",
+    "Node": "Узел",
+    "Control": "Управление",
+    "both": "оба",
     "Load": "Нагрузка",
     "1 min": "1 мин",
     "Machine": "Система",
@@ -505,6 +620,7 @@ let TR_RU = {
     "Shut down": "Выключение",
     "Cancel": "Отмена",
     "Power": "Питание",
+    "Reboot the router": "Аппарат перезапустится",
     "Unplug charger first": "Сначала отключите зарядку",
     "Power off": "Выключение",
     "Powering off...": "Выключаю питание...",
@@ -565,8 +681,12 @@ let TR_RU = {
     "VIEW": "ВИД",
     "Saver": "Заставка",
     "Connecting...": "Подключение...",
-    "Menu icons": "Иконки меню",
+    "Icons": "Иконки",
+    "Theme": "Тема",
     "Background": "Фон",
+    "Background tint": "Оттенок фона",
+    "Dark": "тёмный",
+    "Light": "светлый",
     "Running": "Работает",
     "Stopped": "Остановлен",
     "Waiting for log...": "Ожидание лога...",
@@ -637,7 +757,7 @@ let TR_RU = {
     "To": "ДО",
     "Weather": "Погода",
     "Clock": "Часы",
-    "Line": "Строка",
+    "Status bar": "Статусбар",
     "Off": "Выкл",
     "Matrix": "Матрица",
     "Logo": "Лого",
@@ -666,7 +786,8 @@ let TR_RU = {
     "schedule and actions": "расписание и действия",
     "driver debug": "отладка драйвера",
     "Warm": "Тепло",
-    "Wi-Fi off": "Wi-Fi ночью",
+    "Wi-Fi off": "Wi-Fi",
+    "Dark theme at night": "Тёмная",
     "Green saver": "Зелёная",
     "light": "слабо",
     "medium": "средне",
@@ -776,8 +897,36 @@ function lcd_clear(c) {
         Q(sprintf('{"cmd":"clear","color":"%s"}', c ?? C.bg));
 }
 
+// Прямоугольник, скруглённый только с одной стороны: "l" - левые углы,
+// "r" - правые. Радиус задаём явно, автоправило сюда не лезет.
+function lcd_rect_side(x, y, w, h, c, r, side) {
+    Q(sprintf('{"cmd":"rect","x":%d,"y":%d,"w":%d,"h":%d,"color":"%s","%s":%d}',
+              x, y, w, h, c, side == "r" ? "rr" : "rl", r));
+}
+
 function lcd_rect(x, y, w, h, c) {
-    Q(sprintf('{"cmd":"rect","x":%d,"y":%d,"w":%d,"h":%d,"color":"%s"}', x, y, w, h, c));
+    // Скругляем только плашки: широкий и достаточно высокий прямоугольник, не
+    // растянутый на весь экран (шапка - не карточка). Акцентную полоску (узкую
+    // и высокую) вместо скругления укорачиваем с обоих концов - её квадратный
+    // угол иначе торчал бы из скруглённого угла карточки.
+    let r = 0, rs = 0;
+    if (RADIUS > 0) {
+        // Акцентная полоска (ровно 3px) идёт вдоль закругления - её сдвигает
+        // рендерер. Волосяные линии в 1-2 пикселя обрезать нечему, их просто
+        // укорачиваем на радиус, иначе угол торчит за пределы плашки.
+        if (w == 3 && h >= 14) rs = RADIUS;
+        else if (w <= 2 && h >= 14) { y += RADIUS; h -= RADIUS * 2; }
+        else if (h <= 2 && w >= 24) { x += RADIUS; w -= RADIUS * 2; }
+        else if (w >= 24 && h >= 14 && !(x <= 0 && x + w >= LCD_W)) r = RADIUS;
+    }
+    if (rs > 0)
+        Q(sprintf('{"cmd":"rect","x":%d,"y":%d,"w":%d,"h":%d,"color":"%s","rs":%d}',
+                  x, y, w, h, c, rs));
+    else if (r > 0)
+        Q(sprintf('{"cmd":"rect","x":%d,"y":%d,"w":%d,"h":%d,"color":"%s","r":%d}',
+                  x, y, w, h, c, r));
+    else
+        Q(sprintf('{"cmd":"rect","x":%d,"y":%d,"w":%d,"h":%d,"color":"%s"}', x, y, w, h, c));
 }
 
 // Срезаем сырые контрол-байты (<0x20): регекс /[\x00-\x1f]/ в ucode
@@ -854,6 +1003,28 @@ function lcd_text(x, y, text, color, bg, sz) {
         x, y, text, color ?? C.white, b, sz ?? 2));
 }
 
+// Текст, прижатый к правому краю: x - это правый край, а ширину считает сам
+// рендерер. Шрифт пропорциональный и с кернингом, поэтому прежняя прикидка
+// «знаков на шесть» промахивалась - у строк с двоеточиями на пять пикселей.
+function lcd_text_r(xr, y, text, color, bg, sz) {
+    text = strip_ctrl(replace(replace(replace(text ?? "", '\\', '\\\\'), '"', '\\"'), "\n", "\\n"));
+    let b = bg ?? C.bg;
+    if (GRAD_ON && b == C.bg) b = "none";
+    Q(sprintf('{"cmd":"text","x":%d,"y":%d,"text":"%s","color":"%s","bg":"%s","size":%d,"anchor":"r"}',
+        xr, y, text, color ?? C.white, b, sz ?? 2));
+}
+
+// Текст по центру: центр задаёт x, ширину считает рендерер. Прикидка
+// «длина * 6» врала на пропорциональном шрифте с кернингом - цифры в клетках
+// яркости стояли заметно левее середины.
+function lcd_text_c(xc, y, text, color, bg, sz) {
+    text = strip_ctrl(replace(replace(replace(text ?? "", '\\', '\\\\'), '"', '\\"'), "\n", "\\n"));
+    let b = bg ?? C.bg;
+    if (GRAD_ON && b == C.bg) b = "none";
+    Q(sprintf('{"cmd":"text","x":%d,"y":%d,"text":"%s","color":"%s","bg":"%s","size":%d,"anchor":"c"}',
+        xc, y, text, color ?? C.white, b, sz ?? 2));
+}
+
 // Рамка-контур 1px (общий хелпер: кнопки Wi-Fi/спидтест). Объявлена рано -
 // в ucode нет hoisting, а зовут её функции выше по файлу.
 function rborder(x, y, w, h, c) {
@@ -923,7 +1094,7 @@ function lcd_flush() {
 function draw_sigbars(x, y, bars, col, empty) {
     for (let i = 0; i < 5; i++) {
         let bh = 4 + i * 3;
-        lcd_rect(x + i * 8, y + 16 - bh, 6, bh, i < bars ? col : (empty ?? C.dim));
+        lcd_rect(x + i * 8, y + 16 - bh, 6, bh, i < bars ? col : (empty ?? C.empty));
     }
 }
 
@@ -956,11 +1127,19 @@ function draw_batt_icon(x, y, w, h, bg, pct, nobat, mono, chg, empty) {
 
     let sc = mono ?? (sections == 1 ? C.red : (sections == 2 ? C.orange : C.green));
     let pitch = int((w - 4) / 4);
-    let ec = empty ?? C.dim;
+    let ec = empty ?? C.empty;
+    // Крайние деления скругляем с внешней стороны - вслед за рамкой, иначе
+    // внутри закруглённой батарейки торчат квадратные углы. Хватает 1 пикселя:
+    // деление всего пять точек шириной.
+    let sr = RADIUS >= 3 ? 2 : (RADIUS > 0 ? 1 : 0);
     for (let i = 0; i < 4; i++) {
         let on = i >= 4 - sections;
         if (i == blink_idx && (anim_phase % 2) == 1) on = false;
-        lcd_rect(x + 3 + i * pitch, y + 2, pitch - 2, h - 4, on ? sc : ec);
+        let col = on ? sc : ec;
+        let sx = x + 3 + i * pitch, sw = pitch - 2;
+        if (sr && i == 0)      lcd_rect_side(sx, y + 2, sw, h - 4, col, sr, "l");
+        else if (sr && i == 3) lcd_rect_side(sx, y + 2, sw, h - 4, col, sr, "r");
+        else                   lcd_rect(sx, y + 2, sw, h - 4, col);
     }
 }
 
@@ -1081,7 +1260,7 @@ function draw_graph(x, y, w, h, data, color, mn, mx, thresholds, fill) {
     let range = mx - mn;
 
     // Background
-    lcd_rect(x, y, w, h, "#0841");
+    lcd_rect(x, y, w, h, C.graph);
 
     // Threshold lines (dashed — draw every 4px)
     if (thresholds) {
@@ -1091,24 +1270,31 @@ function draw_graph(x, y, w, h, data, color, mn, mx, thresholds, fill) {
                 for (let dx = 0; dx < w; dx += 8)
                     lcd_rect(x + dx, ty2, 4, 1, t.color ?? C.gray);
                 // Label on right
-                lcd_text(x + w - 30, ty2 - 4, t.label ?? "", t.color ?? C.gray, "#0841", 1);
+                lcd_text(x + w - 30, ty2 - 4, t.label ?? "", t.color ?? C.gray, C.graph, 1);
             }
         }
     }
 
     // Scale labels (left: max, bottom: min)
-    lcd_text(x + 1, y + 1, sprintf("%d", mx), C.gray, "#0841", 1);
-    lcd_text(x + 1, y + h - 9, sprintf("%d", mn), C.gray, "#0841", 1);
+    lcd_text(x + 1, y + 1, sprintf("%d", mx), C.gray, C.graph, 1);
+    lcd_text(x + 1, y + h - 9, sprintf("%d", mn), C.gray, C.graph, 1);
 
     // Plot line: connect points
     let pts = n > HIST_LEN ? HIST_LEN : n;
     let start = n - pts;
-    let step_x = (w - 2) / (pts - 1);
+    // В ucode целые делятся НАЦЕЛО: шаг вида (w-2)/(pts-1) округлялся вниз,
+    // и накопленная потеря оставляла справа пустую полосу до двух десятков
+    // пикселей - тем шире, чем меньше точек. Считаем позицию каждой точки от
+    // начала: умножаем сперва, делим потом.
+    let span = w - 2, last_i = pts - 1;
+    if (last_i < 1) last_i = 1;
 
     let prev_px = -1, prev_py = -1;
     for (let i = 0; i < pts; i++) {
         let val = data[start + i];
-        let px = x + 1 + int(i * step_x);
+        let px = x + 1 + int(i * span / last_i);
+        let nx = x + 1 + int((i + 1) * span / last_i);
+        let step_x = nx - px; if (step_x < 1) step_x = 1;
         let py = y + h - 1 - int((val - mn) * (h - 2) / range);
         if (py < y) py = y;
         if (py >= y + h) py = y + h - 1;
@@ -1143,7 +1329,9 @@ function draw_graph(x, y, w, h, data, color, mn, mx, thresholds, fill) {
 }
 
 function draw_graph_compact(x, y, w, h, data, color, mn, mx, fill) {
-    lcd_rect(x, y, w, h, "#0B1220");
+    // Графики лежат на плашке - фон берём её же. Отдельная тёмная заливка
+    // выглядела чёрной дырой посреди светлой карточки.
+    lcd_rect(x, y, w, h, C.widget);
     let n = length(data);
     if (n < 2) return;
     if (mx <= mn) mx = mn + 1;
@@ -1152,12 +1340,16 @@ function draw_graph_compact(x, y, w, h, data, color, mn, mx, fill) {
     // батарея 120) - рисуем всё, что есть.
     let pts = n;
     let start = 0;
-    let step_x = (w - 2) / (pts - 1);
+    // Та же беда с целочисленным делением, что и в draw_graph.
+    let span = w - 2, last_i = pts - 1;
+    if (last_i < 1) last_i = 1;
     let prev_px = -1, prev_py = -1;
 
     for (let i = 0; i < pts; i++) {
         let val = data[start + i];
-        let px = x + 1 + int(i * step_x);
+        let px = x + 1 + int(i * span / last_i);
+        let nx = x + 1 + int((i + 1) * span / last_i);
+        let step_x = nx - px; if (step_x < 1) step_x = 1;
         let py = y + h - 1 - int((val - mn) * (h - 2) / range);
         if (py < y) py = y;
         if (py >= y + h) py = y + h - 1;
@@ -1195,13 +1387,16 @@ function dash_spark(x, y, w, h, data, color, mn, mx) {
     let cap = int((w - 2) / 2);
     let from = n > cap ? n - cap : 0, cnt = n - from;
     if (cnt < 2) return;
-    let slot = (w - 2) / (cnt - 1);
+    // Позицию точки считаем от начала: при целочисленном делении шаг
+    // округлялся вниз, и линия не доходила до правого края.
+    let span = w - 2, last_i = cnt - 1;
+    if (last_i < 1) last_i = 1;
     let prev = -1, prevx = -1;
     for (let i = 0; i < cnt; i++) {
         let v = data[from + i];
         if (v > mx) v = mx;
         if (v < mn) v = mn;
-        let px = x + 1 + int(i * slot);
+        let px = x + 1 + int(i * span / last_i);
         let py = y + h - 2 - int((v - mn) * (h - 4) / (mx - mn));
         if (prev >= 0) {
             let dy = py - prev, ys = dy > 0 ? prev : py;
@@ -1646,6 +1841,20 @@ function fmt_uptime(s) {
     return sprintf("%dm", m);
 }
 
+// Компактный аптайм для узких клеток виджетов: там колонка ~74 пикселя, а
+// «1 день 0ч 3м» занимает больше и вылезала за карточку. Минуты рядом с сутками
+// всё равно шум, поэтому в этом виде их не показываем.
+function fmt_uptime_c(s) {
+    s = int(+(s ?? 0));
+    let d = int(s / 86400);
+    let h = int((s % 86400) / 3600);
+    let m = int((s % 3600) / 60);
+    let ru = (lang() == "ru");
+    if (d > 0) return sprintf(ru ? "%dд %dч" : "%dd %dh", d, h);
+    if (h > 0) return sprintf(ru ? "%dч %dм" : "%dh %dm", h, m);
+    return sprintf(ru ? "%dм" : "%dm", m);
+}
+
 function clock_str() {
     let t = localtime();
     return t ? sprintf("%02d:%02d", t.hour, t.min) : "--:--";
@@ -1697,7 +1906,7 @@ let SAVER_SCENE_MAP = { "matrix": 0, "logo": 1 };
 function saver_style() {
     let v = ucur ? ucur.get("almond3s", "display", "saver_style") : null;
     for (let x in SAVER_STYLES) if (x == v) return v;
-    return "full";
+    return "dash";
 }
 
 // Индекс сцены-заставки для стиля (или null для обычных стилей). Определён
@@ -1816,6 +2025,7 @@ function nbright_btn(i) {
 let NIGHT_ACTS = [
     { key: "night_wifi",  label: "Wi-Fi off" },
     { key: "night_green", label: "Green saver", def: true },
+    { key: "night_theme", label: "Dark theme at night" },
 ];
 
 // У ночи своя степень тепла, как своя яркость: дневное значение живёт на
@@ -1834,8 +2044,11 @@ function nwarm_btn(i) {
     return { x: 96 + i * 55, y: 158, w: 51, h: 22 };
 }
 
+// Три переключателя в ряд: свободной вертикали на странице нет, а значение
+// рисуется справа, поэтому в 96 пикселей помещается короткая подпись плюс
+// «вкл/выкл». Отсюда и укороченные названия.
 function nact_btn(i) {
-    return { x: i == 0 ? 8 : 164, y: 184, w: 148, h: 22 };
+    return { x: GX + i * 104, y: 184, w: 96, h: 22 };
 }
 
 function night_act(key) {
@@ -1910,7 +2123,7 @@ function saver_timeout() {
 function style_label(v) {
     if (v == "full")   return tr("Weather");
     if (v == "clock")  return tr("Clock");
-    if (v == "line")   return tr("Line");
+    if (v == "line")   return tr("Status bar");
     if (v == "dash")   return tr("Widgets");
     if (v == "matrix") return tr("Matrix");
     if (v == "logo")   return tr("Logo");
@@ -1952,20 +2165,25 @@ function font_btn() {
 
 // Два тумблера в одной строке: иконки меню слева, фон-градиент справа - по
 // колонкам сетки.
-function micons_btn() { return { x: GX,             y: 72, w: GCOL, h: 26 }; }
-function grad_btn()   { return { x: GX + GCOL + GG, y: 72, w: GCOL, h: 26 }; }
+// Тумблер «Иконки» временно убран со страницы: сама возможность осталась и
+// живёт в almond3s.display.micons, но кнопки нет, пока не доделаем иконки.
+function theme_btn()  { return { x: GX + GCOL + GG, y: 72, w: GCOL, h: 32 }; }
+// Фон одной кнопкой на три состояния: выкл / светлый / тёмный. Раньше их было
+// две - выключатель градиента и оттенок отдельной строкой, - и строка съедала
+// высоту, из-за которой всё остальное на странице приходилось жать.
+function bg_btn()     { return { x: GX, y: 72, w: GCOL, h: 32 }; }
 
 // Переключатели: гашение, сдвиг, ночь. Состояние показывает цвет полоски,
 // поэтому слова «вкл/выкл» на кнопках не нужны.
 // Семь шагов в ряд: ряд занимает всю ширину, подпись уезжает строкой выше -
 // иначе на кнопку остаётся 28 пикселей, это уже уже пальца.
 function bright_btn(i) {
-    return { x: GX + i * 44, y: 118, w: 40, h: 48 };
+    return { x: GX + i * 44, y: 158, w: 40, h: 42 };
 }
 
 function tog_btn(i) {
-    if (i == 0) return { x: 10, y: 64, w: 148, h: 38 };
-    return { x: 166, y: 64, w: 144, h: 38 };
+    if (i == 0) return { x: GX, y: 64, w: GCOL, h: 38 };
+    return { x: GX + GCOL + GG, y: 64, w: GCOL, h: 38 };
 }
 
 // Часы «с» и «до» живут на своей странице: две группы «минус - значение - плюс».
@@ -2232,6 +2450,12 @@ function draw_alarm_icon(x, y, col) {
 // объявлен здесь и наполняется micon_load_custom ниже - это один и тот же
 // глобальный объект. Правки из редактора сразу видны в статус-баре.
 let MICON_CUSTOM = {};
+// Значок «бейджевой» формы: точка в левом нижнем углу и три дуги, растущие от
+// неё вверх-вправо. Старый арт был симметричной «ромашкой» из контуров разной
+// толщины - на 21x14 дуги сливались в пятно. Здесь у всех четырёх элементов
+// одна толщина (2px) и одинаковые просветы, поэтому секции читаются даже на
+// самой мелкой подсветке. Дуги эллиптические: клетка иконки 21x14, на круговых
+// четвертях остались бы пустыми шесть колонок справа.
 let WIFI_ST_DEF = [
     "......#########......",
     "....#############....",
@@ -2369,23 +2593,26 @@ let FN_DEF = [
     "##..........................##",
     "##..........................##",
     "##..........................##",
-    "##...#########..............##",
-    "##...#########..............##",
-    "##...##.....................##",
-    "##...##.........########....##",
-    "##...#######....########....##",
-    "##...#######....##....##....##",
-    "##...##.........##....##....##",
-    "##...##.........##....##....##",
-    "##...##.........##....##....##",
-    "##...##.........##....##....##",
+    "##.....########.............##",
+    "##.....########.............##",
+    "##.....##...................##",
+    "##.....##.......##....##....##",
+    "##.....######...###...##....##",
+    "##.....######...####..##....##",
+    "##.....##.......##.##.##....##",
+    "##.....##.......##..####....##",
+    "##.....##.......##...###....##",
+    "##.....##.......##....##....##",
     "##..........................##",
     "##..........................##",
     "##..........................##",
     "##############################",
     "##############################",
 ];
-function draw_fn_icon(x, y, col) {
+// flat - как у соседних значков: свой рисунок либо в своей палитре, либо
+// одним цветом. Параметр когда-то потеряли при копировании, и страница
+// терминала падала у всех, кто нарисовал собственный значок Fn.
+function draw_fn_icon(x, y, col, flat) {
     let cu = MICON_CUSTOM["fn"];
     if (cu) {
         for (let r = 0; r < cu.h; r++)
@@ -2457,7 +2684,7 @@ function draw_status_row(y, o) {
     let sig = sig_state();
     let bg = o?.bg ?? C.hdr;
     let mono = o?.mono;            /* ночной цвет или null */
-    let empty = o?.empty ?? C.dim;
+    let empty = o?.empty ?? C.empty;
 
     // Откуда роутер берёт интернет (по netpri): Wi-Fi STA -> значок Wi-Fi,
     // кабель в WAN -> значок RJ45, модем -> ярлык технологии (4G/5G).
@@ -2467,6 +2694,8 @@ function draw_status_row(y, o) {
         draw_sigbars(4, y, sig.bars, mono ?? sig.color, empty);
         if (kind == "wifi") {
             // Значок Wi-Fi из редактируемой сетки wifi_st (правки видны вживую).
+            // Зелёный, а не голубой: голубым идут «нейтральные» ярлыки аплинка
+            // (RJ45, 4G/5G), а живая связь по Wi-Fi - это состояние «хорошо».
             draw_wifi_status(50, y, mono ?? C.cyan, mono != null);
         } else if (kind == "wan") {
             draw_eth_icon(50, y, mono ?? C.cyan, mono != null);
@@ -2551,10 +2780,17 @@ function draw_header(title, bg_c) {
     draw_status_row(3, { bg: bg_c, time: true, pct: true });
 }
 
+// Стрелка «назад» одна на весь интерфейс: центр задаём точно, ширину меряет
+// рендерер. Раньше её ставили прикидкой «(ширина - 12) / 2», и на разных
+// страницах она получалась разного размера.
+function draw_back_arrow(xc, y, bg) {
+    lcd_text_c(xc, y ?? (BACK_Y + 9), "<", C.white, bg ?? C.widget, 2);
+}
+
 function draw_back() {
-    lcd_rect(0, BACK_Y, LCD_W, 32, C.back);
-    lcd_rect(0, BACK_Y, LCD_W, 2, "#D32F2F"); // top highlight
-    lcd_text(120, BACK_Y + 9, tr("< BACK"), C.white, C.back, 2);
+    lcd_rect(0, BACK_Y, LCD_W, 32, C.widget);
+    lcd_rect(0, BACK_Y, LCD_W, 2, C.border);
+    draw_back_arrow(int(LCD_W / 2));
 }
 
 // Пиксель-арт иконки плиток меню, 14x14, рисуются в масштабе 2 (28x28 -
@@ -2654,7 +2890,7 @@ let MICONS = {
     ],
     modem: {
         pal: [ "#FFFFFF", "#F85149", "#FFA930", "#FFD866",
-               "#3FB950", "#58A6FF", "#B180F0", "#484F58" ],
+               "#10B981", "#58A6FF", "#B180F0", "#484F58" ],
         art: [
         "..............",
         ".888888888888.",
@@ -2837,7 +3073,7 @@ let MICONS = {
     ],
     debug: {
         pal: [ "#F778BA", "#FFA8D8", "#BF4B8A", "#FFD866",
-               "#3FB950", "#58A6FF", "#B180F0", "#8B949E" ],
+               "#10B981", "#58A6FF", "#B180F0", "#8B949E" ],
         art: [
         "..............",
         "....111111....",
@@ -2857,7 +3093,7 @@ let MICONS = {
     },
     editor: {
         pal: [ "#FFFFFF", "#F778BA", "#FFA930", "#FFD866",
-               "#3FB950", "#58A6FF", "#484F58", "#8B949E" ],
+               "#10B981", "#58A6FF", "#484F58", "#8B949E" ],
         art: [
         "..........22..",
         ".........2228.",
@@ -2910,15 +3146,15 @@ let MICONS = {
 };
 
 let ED_PAL_DEF = [ "#FFFFFF", "#F85149", "#FFA930", "#FFD866",
-                   "#3FB950", "#58A6FF", "#B180F0", "#8B949E" ];
+                   "#10B981", "#58A6FF", "#B180F0", "#8B949E" ];
 let ED_PAL = [ "#FFFFFF", "#F85149", "#FFA930", "#FFD866",
-               "#3FB950", "#58A6FF", "#B180F0", "#8B949E" ];
+               "#10B981", "#58A6FF", "#B180F0", "#8B949E" ];
 
 // Расширенный выбор цвета: перекрашивает текущий слот палитры.
 let ED_COLORS = [
     "#FFFFFF", "#C9D1D9", "#8B949E", "#484F58", "#21262D", "#101418",
     "#FFB3AB", "#F85149", "#A40E26", "#FFC680", "#FFA930", "#B25E00",
-    "#FFE28A", "#FFD866", "#D29922", "#7EE2A8", "#3FB950", "#1F6F3D",
+    "#FFE28A", "#FFD866", "#D29922", "#7EE2A8", "#10B981", "#1F6F3D",
     "#7CE4E4", "#39C5CF", "#0E7490", "#A5C9FF", "#58A6FF", "#1F6FEB",
     "#D2A8FF", "#B180F0", "#8250DF", "#FFA8D8", "#F778BA", "#BF4B8A",
 ];
@@ -3014,19 +3250,17 @@ let cell_arrow_pressed = null;   // листалка соты под пальц�
 function draw_btn(idx, title, subtitle, title_c, sub_c, bg_c, middle, icon, icon_c) {
     let b = btn_pos(idx);
     let pressed = (menu_pressed != null && menu_pressed == idx);
-    let bg = pressed ? C.press : (bg_c ?? C.btn);
+    let bg = pressed ? C.press : (bg_c ?? C.widget);
     let o = pressed ? 2 : 0;
-    let tx = b.x + 8 + o;
+    let tx = b.x + 12 + o;
     lcd_rect(b.x, b.y, b.w, b.h, bg);
-    // Имитатор «выпуклости»: светлый кант снизу И справа. При нажатии кнопка
-    // утапливается - оба канта убираем.
-    if (!pressed) {
-        lcd_rect(b.x, b.y + b.h - 3, b.w, 3, C.border);
-        lcd_rect(b.x + b.w - 3, b.y, 3, b.h, C.border);
-    }
+    // Плитка - такая же карточка, как везде: цвет виджетов и акцентная полоса
+    // слева. Прежний «выпуклый» кант снизу и справа был отдельным языком и
+    // ни на одном другом экране не встречался.
+    lcd_rect(b.x, b.y, 3, b.h, pressed ? C.dim : (icon_c ?? C.cyan));
     if (icon && MICONS_ON) {
-        draw_micon(b.x + 8 + o, b.y + 14 + o, icon, icon_c ?? C.white, 2);
-        tx = b.x + 42 + o;
+        draw_micon(b.x + 12 + o, b.y + 14 + o, icon, icon_c ?? C.white, 2);
+        tx = b.x + 46 + o;
     }
     lcd_text(tx, b.y + 14 + o, title, title_c ?? C.white, bg, 2);
     if (middle)
@@ -3609,7 +3843,7 @@ function sta_apply(ssid, key, band) {
 }
 
 function netpri_btn(i) {
-    return { x: 10, y: 32 + i * 44, w: 300, h: 40 };
+    return { x: GX, y: 32 + i * 44, w: GW, h: 40 };
 }
 
 
@@ -3617,12 +3851,12 @@ function netpri_btn(i) {
 // чтобы их положение не зависело от числа аплинков.
 function draw_scan_btns() {
     let ny = BACK_Y - 36;
-    lcd_rect(10, ny, 145, 30, C.widget);
-    lcd_rect(10, ny, 3, 30, C.accent);
-    lcd_text(24, ny + 11, "+ Wi-Fi 2.4GHz", C.accent, C.widget, 1);
-    lcd_rect(165, ny, 145, 30, C.widget);
-    lcd_rect(165, ny, 3, 30, C.accent);
-    lcd_text(185, ny + 11, "+ Wi-Fi 5GHz", C.accent, C.widget, 1);
+    lcd_rect(GX, ny, GCOL, 30, C.widget);
+    lcd_rect(GX, ny, 3, 30, C.accent);
+    lcd_text(GX + 14, ny + 11, "+ Wi-Fi 2.4GHz", C.accent, C.widget, 1);
+    lcd_rect(GX + GCOL + GG, ny, GCOL, 30, C.widget);
+    lcd_rect(GX + GCOL + GG, ny, 3, 30, C.accent);
+    lcd_text(GX + GCOL + GG + 14, ny + 11, "+ Wi-Fi 5GHz", C.accent, C.widget, 1);
 }
 
 function draw_dashboard() {
@@ -3652,7 +3886,7 @@ function draw_dashboard() {
     }
 
     if (l == null) {
-        lcd_text(20, 100, tr("Reading uplinks..."), C.gray, C.bg, 2);
+        lcd_text(20, 100, tr("Reading uplinks..."), C.ontop, C.bg, 2);
         draw_scan_btns();
         draw_back();
         lcd_flush();
@@ -3661,7 +3895,7 @@ function draw_dashboard() {
     if (length(l) == 0) {
         // Кнопки скана обязаны быть и здесь: после «забыть сеть» без SIM
         // список пуст, и без них со страницы некуда идти (issue #4).
-        lcd_text(20, 100, tr("No uplinks"), C.dim, C.bg, 2);
+        lcd_text(20, 100, tr("No uplinks"), C.ontop_dim, C.bg, 2);
         draw_scan_btns();
         draw_back();
         lcd_flush();
@@ -3697,7 +3931,7 @@ function draw_dashboard() {
         }
         let ip = e.ip ?? "";
         if (ip != "")
-            lcd_text(b.x + b.w - 10 - roff - tlen(ip) * 6, b.y + 25, ip, C.green, C.widget, 1);
+            lcd_text_r(b.x + b.w - 10 - roff, b.y + 25, ip, C.green, C.widget, 1);
         // Пока переключаемся - вместо метрики троеточие акцентом (мгновенный
         // отклик без попапа); как станет основным, вернётся зелёная метрика.
         let m = switching ? "..." : sprintf("%d", int(+(e.metric ?? 0)));
@@ -3728,8 +3962,8 @@ function draw_dashboard() {
                     lcd_rect(10, py + dy, 1, 3, C.dim);
                     lcd_rect(309, py + dy, 1, 3, C.dim);
                 }
-                lcd_text(22, py + 6, tcut(sta_pending.ssid, 18), C.gray, C.bg, 2);
-                lcd_text(22, py + 26, tr("connecting..."), C.dim, C.bg, 1);
+                lcd_text(22, py + 6, tcut(sta_pending.ssid, 18), C.ontop, C.bg, 2);
+                lcd_text(22, py + 26, tr("connecting..."), C.ontop_dim, C.bg, 1);
             }
         }
     }
@@ -3792,6 +4026,15 @@ function sms_mark_read(m) {
                    q(m.modem ?? ""), q(m.key)));
 }
 
+// Хранилище мост берёт из аргумента, а не из настроек: без него sms_tool
+// читает своё умолчание - SIM, а Quectel складывает входящие в память модема,
+// и ящик выглядел пустым при девятнадцати сообщениях. Значение и умолчание -
+// те же, что у вкладки «Входящие» в 5gmodem.
+function sms_store() {
+    let v = ucur ? ucur.get("5gmodem", "sms", "storage") : null;
+    return (v != null && v != "") ? v : "ME";
+}
+
 function sms_refresh() {
     // Нет 5gmodem/моста - не залипаем в ожидании навсегда.
     if (!fs.stat("/usr/share/5gmodem/smsbridge.sh")) {
@@ -3807,7 +4050,8 @@ function sms_refresh() {
     st.sms_wait_since = time();
     // Перенаправление вешаем на подоболочку целиком, иначе фоновый процесс
     // держит наши дескрипторы и ucode ждёт его завершения.
-    system("(/usr/share/5gmodem/smsbridge.sh recv > " + SMS_CACHE + ".new 2>/dev/null" +
+    system("(/usr/share/5gmodem/smsbridge.sh recv " + sms_store() +
+           " > " + SMS_CACHE + ".new 2>/dev/null" +
            " && mv " + SMS_CACHE + ".new " + SMS_CACHE + ") >/dev/null 2>&1 &");
 }
 
@@ -3817,11 +4061,13 @@ function sms_refresh() {
 function sms_delete(m) {
     if (!m || !fs.stat("/usr/share/5gmodem/smsbridge.sh")) return;
     let ids = type(m.idx) == "array" ? m.idx : [];
+    let store = sms_store();
     let cmd = "";
     for (let ix in ids)
-        cmd += sprintf("/usr/share/5gmodem/smsbridge.sh delete %d >/dev/null 2>&1; ", ix);
+        cmd += sprintf("/usr/share/5gmodem/smsbridge.sh delete %d %s >/dev/null 2>&1; ", ix, store);
     if (cmd == "") return;
-    system("( " + cmd + "/usr/share/5gmodem/smsbridge.sh recv > " + SMS_CACHE + ".new" +
+    system("( " + cmd + "/usr/share/5gmodem/smsbridge.sh recv " + store +
+           " > " + SMS_CACHE + ".new" +
            " 2>/dev/null && mv " + SMS_CACHE + ".new " + SMS_CACHE + " ) >/dev/null 2>&1 &");
     // st.sms НЕ обнуляем: вызывающий уже убрал строку оптимистично; когда
     // фоновый recv перепишет кэш, sms_list перечитает его по новому mtime.
@@ -3938,16 +4184,22 @@ function sms_wrap(txt, cols) {
 
 // Полоса «назад» со стрелками страниц. Стрелки рисуем только когда есть куда
 // листать, иначе на них жмут вслепую.
-function draw_back_pager(pg, pages) {
-    lcd_rect(0, BACK_Y, LCD_W, 32, C.back);
-    lcd_text(120, BACK_Y + 9, "< " + tr("BACK"), C.white, C.back, 2);
+function draw_back_pager(pg, pages, no_back) {
+    lcd_rect(0, BACK_Y, LCD_W, 32, C.widget);
+    lcd_rect(0, BACK_Y, LCD_W, 2, C.border);
+    // В меню возвращаться некуда - там центр отдаём счётчику страниц, а на
+    // подстраницах он занят «назад», и счётчик уходит к левой стрелке.
+    if (!no_back)
+        draw_back_arrow(int(LCD_W / 2));
     if (pages > 1) {
-        lcd_text(16, BACK_Y + 9, "<<", pg > 0 ? C.white : "#8B3A3A", C.back, 2);
+        lcd_text(16, BACK_Y + 9, "<<", pg > 0 ? C.white : C.dim, C.widget, 2);
         lcd_text(LCD_W - 40, BACK_Y + 9, ">>",
-                 pg < pages - 1 ? C.white : "#8B3A3A", C.back, 2);
-        // Счётчик прижимаем к левой стрелке: по центру он налезал на «НАЗАД».
-        lcd_text(48, BACK_Y + 13, sprintf("%d/%d", pg + 1, pages),
-                 C.white, C.back, 1);
+                 pg < pages - 1 ? C.white : C.dim, C.widget, 2);
+        let ps = sprintf("%d/%d", pg + 1, pages);
+        if (no_back)
+            lcd_text(int((LCD_W - tlen(ps) * 12) / 2), BACK_Y + 9, ps, C.white, C.widget, 2);
+        else
+            lcd_text(48, BACK_Y + 13, ps, C.white, C.widget, 1);
     }
 }
 
@@ -3968,13 +4220,13 @@ function draw_sms_page() {
                 : ((st.sms_wait && (time() - st.sms_wait_since) >= 15)
                    ? tr("Failed to read inbox")
                    : tr("Reading inbox..."));
-        lcd_text(20, 100, msg, C.gray, C.bg, 1);
+        lcd_text(20, 100, msg, C.ontop, C.bg, 1);
         draw_back();
         lcd_flush();
         return;
     }
     if (length(list) == 0) {
-        lcd_text(20, 100, tr("No messages"), C.dim, C.bg, 2);
+        lcd_text(20, 100, tr("No messages"), C.ontop_dim, C.bg, 2);
         draw_back();
         lcd_flush();
         return;
@@ -3990,8 +4242,8 @@ function draw_sms_page() {
         let m = list[idx];
         let y = 32 + r * 44;
         let neu = exists(unread, m.key);
-        lcd_rect(10, y, 300, 40, C.widget);
-        lcd_rect(10, y, 3, 40, neu ? C.green : C.dim);
+        lcd_rect(GX, y, GW, 40, C.widget);
+        lcd_rect(GX, y, 3, 40, neu ? C.green : C.dim);
         // Красный минус справа за разделителем - как «забыть» у Wi-Fi.
         lcd_rect(310 - 34, y + 4, 1, 40 - 8, C.border);
         lcd_text(310 - 24, y + 8, "-", C.red, C.widget, 3);
@@ -4016,8 +4268,8 @@ function draw_sms_one() {
             ? list[st.sms_i] : null;
     if (!m) { st.page = "sms"; draw_sms_page(); return; }
 
-    lcd_rect(10, 28, 300, 22, C.widget);
-    lcd_text(20, 34, tcut(sms_from(m.sender), 24), C.white, C.widget, 1);
+    lcd_rect(GX, 28, GW, 22, C.widget);
+    lcd_text(GX + 12, 34, tcut(sms_from(m.sender), 24), C.white, C.widget, 1);
     lcd_text(310 - tlen(m.time) * 6 - 8, 34, m.time, C.dim, C.widget, 1);
 
     let lines = sms_wrap(m.text, SMS_COLS);
@@ -4028,7 +4280,7 @@ function draw_sms_one() {
     for (let i = 0; i < SMS_LINES; i++) {
         let li = st.sms_tp * SMS_LINES + i;
         if (li >= length(lines)) break;
-        lcd_text(16, 58 + i * 12, lines[li], C.white, C.bg, 1);
+        lcd_text(16, 58 + i * 12, lines[li], C.ontop_hi, C.bg, 1);
     }
 
     draw_back_pager(st.sms_tp, pages);
@@ -4115,81 +4367,75 @@ function menu_items() {
     let tx_last = length(hist.tx) > 0 ? hist.tx[length(hist.tx) - 1] : 0;
     let bt = d?.battery, bp = int(+(bt?.percent ?? -1));
     let ns = int(d?.sms_new ?? 0);
+    // Цвет акцентной полосы - не украшение, а правило: где у пункта есть
+    // состояние, полоса показывает его (связь, заряд, доступность), где нет -
+    // цвет раздела. Иначе всё меню было голубым и цвет не значил ничего.
+    let sig = int(+(d?.lte?.signal ?? -1));
+    let mcol = sig < 0 ? C.dim : (sig >= 60 ? C.green : (sig >= 30 ? C.orange : C.red));
+    let bcol = bp < 0 ? C.dim : (bp >= 40 ? C.green : (bp >= 15 ? C.orange : C.red));
+    let up = netpri_primary();
+    let svc_ok = 0, svc_bad = 0;
+    if (type(d?.services) == "array")
+        for (let e in d.services) {
+            if (e?.r == null) continue;
+            if (int(+(e.r.ok ?? 0)) > 0) svc_ok++; else svc_bad++;
+        }
+    let scol = svc_bad > 0 ? C.red : (svc_ok > 0 ? C.green : C.dim);
+    let vcol = !vpn_present() ? C.dim : (st.vpn_on == true ? C.green : C.gray);
+    let TOOL = "#A371F7";     // инструменты: терминал, игры, Zigbee
+
     let it = [];
-    push(it, { label: tr("Network"), sub: netpri_primary(), icon: "network", ic: C.cyan, act: "dashboard" });
-    push(it, { label: tr("WiFi"), sub: sprintf(tr("%d clients"), nc), icon: "wifi", ic: C.cyan, act: "wifi" });
-    push(it, { label: tr("Modem"), sub: modem_status(d?.lte), mid: d?.lte?.operator, icon: "modem", ic: C.cyan, act: "lte" });
+    push(it, { label: tr("Network"), sub: up, icon: "network",
+               ic: (up != null && up != "" && up != "-") ? C.green : C.dim, act: "dashboard" });
+    push(it, { label: tr("WiFi"), sub: sprintf(tr("%d clients"), nc), icon: "wifi",
+               ic: nc > 0 ? C.green : C.cyan, act: "wifi" });
+    push(it, { label: tr("Modem"), sub: modem_status(d?.lte), mid: d?.lte?.operator,
+               icon: "modem", ic: mcol, act: "lte" });
     push(it, { label: "VPN", sub: vpn_present() ? "SSClash" : tr("SSClash not installed"),
-               sc: vpn_present() ? C.gray : C.dim, ic: C.green, act: "vpn" });
-    push(it, { label: tr("Ping"), sub: tr("check"), icon: "services", ic: C.green, act: "services" });
+               sc: vpn_present() ? C.gray : C.dim, ic: vcol, act: "vpn" });
+    push(it, { label: tr("Ping"), sub: tr("check"), icon: "services", ic: scol, act: "services" });
     push(it, { label: tr("Speedtest"), sub: speedtest_sub(), icon: "bolt", ic: C.cyan, act: "speedtest" });
-    push(it, { label: tr("Traffic"), sub: sprintf("R:%s T:%s", fmt_bytes(rx_last), fmt_bytes(tx_last)), icon: "traffic", ic: C.cyan, act: "traffic" });
-    push(it, { label: tr("SMS"), sub: ns > 0 ? sprintf(tr("%d new"), ns) : tr("inbox"), sc: ns > 0 ? C.green : C.gray, icon: "sms", ic: C.white, act: "sms" });
+    push(it, { label: tr("Traffic"), sub: sprintf("R:%s T:%s", fmt_bytes(rx_last), fmt_bytes(tx_last)),
+               icon: "traffic", ic: C.cyan, act: "traffic" });
+    push(it, { label: tr("SMS"), sub: ns > 0 ? sprintf(tr("%d new"), ns) : tr("inbox"),
+               sc: ns > 0 ? C.green : C.gray, icon: "sms", ic: ns > 0 ? C.green : C.gray, act: "sms" });
     push(it, { label: tr("Weather"), sub: weather_sub(), icon: "weather", ic: C.yellow, act: "weather" });
-    push(it, { label: tr("Alarm"), sub: alarm_sub(), icon: "sound", ic: C.cyan, act: "alarm" });
-    push(it, { label: tr("Battery"), sub: bp >= 0 ? sprintf("%d%%", bp) : "--", sc: bt?.charging ? C.green : C.gray, icon: "bolt", ic: "#FFA930", act: "battery" });
-    push(it, { label: tr("Terminal"), sub: tr("shell"), icon: "term", ic: C.green, act: "term" });
-    // Зигби из меню убран: пока модулем ничего не управляется, плитка только
-    // занимает место. Сама страница жива и открывается через /tmp/.lcd_goto,
-    // так что вернуть её - это одна строка.
-    push(it, { label: tr("Zigbee"), sub: "EM357", icon: "zigbee", ic: C.cyan, act: "zigbee" });
-    push(it, { label: tr("Games"), sub: games_sub(), icon: "game", ic: C.green, act: "games" });
-    // Подпись - о содержимом раздела. Раньше здесь показывалась яркость: она
-    // осталась от плитки «Экран», на месте которой встал этот раздел, и на
-    // «Настройках» процент висел без пояснения, к чему он относится.
-    push(it, { label: tr("Settings"), sub: tr("screen, saver, night"), icon: "display", ic: C.cyan, act: "settings" });
-    push(it, { label: tr("Info"), sub: fmt_uptime(d?.uptime), icon: "info", ic: C.cyan, act: "info" });
-    push(it, { label: tr("Modem Reset"), sub: tr("LTE restart"), sc: "#F0A868", bg: "#3A2208", icon: "reset", ic: C.orange, act: "reset", line: C.orange });
-    push(it, { label: tr("Power"), sub: tr("System"), sc: "#F0B0B8", bg: C.back, icon: "reboot", ic: "#F0B0B8", act: "power", line: "#D32F2F" });
+    push(it, { label: tr("Alarm"), sub: alarm_sub(), icon: "sound", ic: C.yellow, act: "alarm" });
+    push(it, { label: tr("Battery"), sub: bp >= 0 ? sprintf("%d%%", bp) : "--",
+               sc: bt?.charging ? C.green : C.gray, icon: "bolt", ic: bcol, act: "battery" });
+    push(it, { label: tr("Terminal"), sub: tr("shell"), icon: "term", ic: TOOL, act: "term" });
+    push(it, { label: tr("Zigbee"), sub: "EM357", icon: "zigbee", ic: TOOL, act: "zigbee" });
+    push(it, { label: tr("Games"), sub: games_sub(), icon: "game", ic: TOOL, act: "games" });
+    push(it, { label: tr("Settings"), sub: tr("screen, saver, night"), icon: "display",
+               ic: C.gray, act: "settings" });
+    push(it, { label: tr("Info"), sub: fmt_uptime(d?.uptime), icon: "info", ic: C.gray, act: "info" });
+    push(it, { label: tr("Power"), sub: tr("System"), sc: C.gray, icon: "reboot", ic: "#F0736B", act: "power" });
     return it;
 }
 
 function menu_pages() {
-    let p = int((length(menu_items()) + 4) / 5);
+    let p = int((length(menu_items()) + 5) / 6);
     return p < 1 ? 1 : p;
 }
 
-// Плитка-пейджер: слева «<» (страница назад, зона = левая треть), остальное -
-// «вперёд»; по центру номер N/M, справа «>». Двунаправленная навигация одним
-// тапом + видно, сколько всего экранов. Определена ПОСЛЕ menu_pages/menu_items
-// (нет hoisting - иначе draw_nav_tile их не видит и роняет меню).
-function draw_nav_tile() {
-    let b = btn_pos(6);
-    let pages = menu_pages();
-    let pressed = (menu_pressed != null && menu_pressed == 6);
-    let bg = pressed ? C.press : C.hdr;
-    lcd_rect(b.x, b.y, b.w, b.h, bg);
-    if (!pressed) {
-        lcd_rect(b.x, b.y + b.h - 3, b.w, 3, C.border);
-        lcd_rect(b.x + b.w - 3, b.y, 3, b.h, C.border);
-    }
-    let ac = pages > 1 ? C.cyan : C.dim;
-    let cy = b.y + int((b.h - 18) / 2);
-    let m = 14;                       // одинаковый отступ стрелок от краёв
-    lcd_text(b.x + m, cy, "<", ac, bg, 3);
-    lcd_text(b.x + b.w - m - 17, cy, ">", ac, bg, 3);
-    // Номер страницы - строго по центру плитки.
-    let ps = sprintf("%d/%d", st.mpg, pages);
-    lcd_text(b.x + int((b.w - tlen(ps) * 12) / 2), b.y + int((b.h - 16) / 2),
-             ps, C.white, bg, 2);
-}
-
+// Определена ПОСЛЕ menu_pages/menu_items: в ucode нет hoisting, иначе меню
+// упало бы, не найдя их.
 function draw_menu() {
     if (st.halting) return;
 
     lcd_clear(C.bg);
     draw_header();
     let items = menu_items();
-    let pages = int((length(items) + 4) / 5); if (pages < 1) pages = 1;
+    let pages = menu_pages();
     if (st.mpg == null || st.mpg < 1 || st.mpg > pages) st.mpg = 1;
-    let base = (st.mpg - 1) * 5;
-    for (let s = 0; s < 5 && base + s < length(items); s++) {
+    let base = (st.mpg - 1) * 6;
+    for (let s = 0; s < 6 && base + s < length(items); s++) {
         let m = items[base + s];
         draw_btn(s + 1, m.label, m.sub, m.tc ?? C.white, m.sc ?? C.gray,
                  m.bg, m.mid, m.icon, m.ic);
         if (m.line) { let b = btn_pos(s + 1); lcd_rect(b.x, b.y, b.w, 2, m.line); }
     }
-    draw_nav_tile();
+    draw_back_pager(st.mpg - 1, pages, true);
     lcd_flush();
 }
 
@@ -4291,6 +4537,12 @@ function qr_box(y) {
     return { x: GX + GW - 68, y: y + 9, w: 62, h: 62 };
 }
 
+// Имя сети кликабельно - тап открывает переименование. Ширину обрезаем до QR:
+// иначе тап по коду попадал бы сюда же.
+function wifi_name_box(y) {
+    return { x: GX + (st.ox ?? 0) + 6, y: y + 18, w: GW - 80, h: 26 };
+}
+
 // === Страница «Дебаг»: тонкие настройки вывода панели ===
 // Сырые команды ILI9341 через CLI: инверсия, гамма-кривая, CABC
 // (адаптивное цветоусиление) и частота ШИМ подсветки. Значения живут в uci
@@ -4326,35 +4578,20 @@ function panel_apply() {
     system(sprintf("almond3s-lcd pwm %d >/dev/null 2>&1", c.hz));
 }
 
-function dbg_inv_btn()   { return { x: 10, y: 30, w: 146, h: 28 }; }
-function dbg_pinit_btn() { return { x: 164, y: 30, w: 146, h: 28 }; }
-function dbg_gamma_btn(i){ return { x: 10 + i * 76, y: 78, w: 72, h: 28 }; }
-function dbg_cabc_btn(i) { return { x: 10 + i * 76, y: 126, w: 72, h: 28 }; }
-function dbg_pwm_btn(i)  { return { x: 10 + i * 60, y: 174, w: 56, h: 28 }; }
+// Тумблеры «Инверсия» и «Панель» отсюда убраны. Вторая таблица инициализации
+// (kernel) роняет панель: картинка идёт полосами, тач перестаёт отвечать, и
+// вернуть аппарат можно только по ssh. Держать такую кнопку в интерфейсе
+// нельзя, а инверсия без неё осталась бы одинокой строкой.
+function dbg_gamma_btn(i){ return { x: 10 + i * 76, y: 42, w: 72, h: 28 }; }
+function dbg_cabc_btn(i) { return { x: 10 + i * 76, y: 100, w: 72, h: 28 }; }
+function dbg_pwm_btn(i)  { return { x: 10 + i * 60, y: 158, w: 56, h: 28 }; }
 
 function draw_debug_page() {
     lcd_clear(C.bg);
     draw_header(tr("Debug"));
     let c = pancfg();
 
-    let ib = dbg_inv_btn();
-    lcd_rect(ib.x, ib.y, ib.w, ib.h, C.widget);
-    lcd_rect(ib.x, ib.y, 3, ib.h, c.inv ? C.green : C.dim);
-    lcd_text(ib.x + 12, ib.y + 8, tr("Invert"), C.white, C.widget, 1);
-    lcd_text(ib.x + ib.w - 44, ib.y + 8, c.inv ? tr("on") : tr("off"),
-             c.inv ? C.green : C.gray, C.widget, 1);
-
-    // Таблица инициализации панели: загрузчик (наш дефолт) или вторая
-    // заводская из стокового ядра. Смена = полный reset+init панели.
-    let pb = dbg_pinit_btn();
-    lcd_rect(pb.x, pb.y, pb.w, pb.h, C.widget);
-    lcd_rect(pb.x, pb.y, 3, pb.h, c.init == "kernel" ? C.yellow : C.dim);
-    lcd_text(pb.x + 12, pb.y + 8, tr("Panel"), C.white, C.widget, 1);
-    lcd_text(pb.x + pb.w - 44, pb.y + 8,
-             c.init == "kernel" ? tr("kernel") : tr("boot"),
-             c.init == "kernel" ? C.yellow : C.gray, C.widget, 1);
-
-    lcd_text(12, 66, tr("GAMMA CURVE"), C.gray, C.bg, 1);
+    lcd_text(12, 30, tr("GAMMA CURVE"), C.ontop, C.bg, 1);
     for (let i = 0; i < 4; i++) {
         let b = dbg_gamma_btn(i), sel = (c.gamma == i + 1);
         lcd_rect(b.x, b.y, b.w, b.h, C.widget);
@@ -4364,7 +4601,7 @@ function draw_debug_page() {
                  sel ? C.white : C.gray, C.widget, 1);
     }
 
-    lcd_text(12, 114, tr("COLOR ENHANCE"), C.gray, C.bg, 1);
+    lcd_text(12, 88, tr("COLOR ENHANCE"), C.ontop, C.bg, 1);
     let cl = [ tr("off"), "UI", tr("photo"), tr("video") ];
     for (let i = 0; i < 4; i++) {
         let b = dbg_cabc_btn(i), sel = (c.cabc == i);
@@ -4374,13 +4611,13 @@ function draw_debug_page() {
                  sel ? C.white : C.gray, C.widget, 1);
     }
 
-    lcd_text(12, 162, tr("BACKLIGHT PWM, HZ"), C.gray, C.bg, 1);
+    lcd_text(12, 146, tr("BACKLIGHT PWM, HZ"), C.ontop, C.bg, 1);
     for (let i = 0; i < length(PWM_STEPS); i++) {
         let b = dbg_pwm_btn(i), sel = (c.hz == PWM_STEPS[i]);
         lcd_rect(b.x, b.y, b.w, b.h, C.widget);
         lcd_rect(b.x, b.y, 3, b.h, sel ? C.green : C.border);
         let t = sprintf("%d", PWM_STEPS[i]);
-        lcd_text(b.x + int((b.w - tlen(t) * 6) / 2) + 2, b.y + 10, t,
+        lcd_text_c(b.x + int(b.w / 2), b.y + 10, t,
                  sel ? C.white : C.gray, C.widget, 1);
     }
 
@@ -4526,7 +4763,7 @@ function draw_iconedit_page() {
     draw_header(tr("Editor"));
     if (ed_cpick) {
         // Пикер цветов: расширенная палитра для текущего слота.
-        lcd_text(ED_X, ED_Y, tr("Pick a color for the slot"), C.gray, C.bg, 1);
+        lcd_text(ED_X, ED_Y, tr("Pick a color for the slot"), C.ontop, C.bg, 1);
         for (let i = 0; i < length(ED_COLORS); i++) {
             let px = ED_X + (i % 6) * 28;
             let py = ED_Y + 14 + int(i / 6) * 30;
@@ -4544,7 +4781,7 @@ function draw_iconedit_page() {
     }
     if (ed_pick) {
         // Пикер: все иконки меню сеткой на месте холста.
-        lcd_text(ED_X, ED_Y, tr("Pick an icon to edit"), C.gray, C.bg, 1);
+        lcd_text(ED_X, ED_Y, tr("Pick an icon to edit"), C.ontop, C.bg, 1);
         for (let i = 0; i < length(ED_SLOTS); i++) {
             let px = ED_X + (i % 6) * 34;
             let py = ED_Y + 14 + int(i / 6) * 36;
@@ -4608,12 +4845,12 @@ function draw_iconedit_page() {
     // После превью - оно чистит свою зону и затирало кнопку.
     for (let i = 0; i < 4; i++)
         lcd_rect(282 + i * 7, 94, 7, 16,
-                 [ "#F85149", "#FFD866", "#3FB950", "#58A6FF" ][i]);
+                 [ "#F85149", "#FFD866", "#10B981", "#58A6FF" ][i]);
     lcd_text(192, 180, ed_target != null
              ? sprintf("%s: %s", tr("editing"), ed_target)
-             : "/etc/almond3s/art", C.dim, C.bg, 1);
+             : "/etc/almond3s/art", C.ontop_dim, C.bg, 1);
     if (ed_saved != "")
-        lcd_text(192, 192, ed_saved, C.gray, C.bg, 1);
+        lcd_text(192, 192, ed_saved, C.ontop, C.bg, 1);
     draw_back();
     lcd_flush();
 }
@@ -4625,7 +4862,8 @@ function dbg_open_btn() { return { x: GX, y: 176, w: 160, h: 26 }; }
 // поверх плёнка - исходный кадр не трогается.
 let WARM_STEPS = [ 0, 30, 60, 100 ];
 
-function warm_btn() { return { x: GX, y: 176, w: GW, h: 26 }; }
+function warm_btn()   { return { x: GX, y: 108, w: GCOL, h: 32 }; }
+function radius_btn() { return { x: GX + GCOL + GG, y: 108, w: GCOL, h: 32 }; }
 
 function warm_cfg() {
     let v = ucur ? ucur.get("almond3s", "display", "warm") : null;
@@ -4635,8 +4873,18 @@ function warm_cfg() {
     return 0;
 }
 
+// Уровень тепла, положенный ПРЯМО СЕЙЧАС. Ночью со своим значением побеждает
+// оно, иначе дневное с «Экрана». Раньше backlight_write в конце безусловно
+// звал warm_apply() с дневным уровнем - и ночное тепло, только что выставленное
+// на странице «Ночь», тут же затиралось нулём. Сюда же приходит любое
+// пробуждение экрана и смена яркости, так что затиралось оно всю ночь.
+function warm_now() {
+    let n = nwarm_cfg();
+    return (night_now() && n > 0) ? n : warm_cfg();
+}
+
 function warm_apply() {
-    system(sprintf("almond3s-lcd warm %d >/dev/null 2>&1", warm_cfg()));
+    system(sprintf("almond3s-lcd warm %d >/dev/null 2>&1", warm_now()));
 }
 
 function warm_next() {
@@ -4663,17 +4911,24 @@ function warm_label() {
 // плитками в меню, «Ночь» внутри «Заставки», редактор иконок и дебаг панели -
 // кто где. Найти что-то можно было только помня, где оно лежит.
 // Питание и Будильник сюда НЕ переехали - это функции, а не настройки.
+// Акцент по тому же правилу, что и в главном меню: у «Диода» есть состояние,
+// и полоса его показывает, у остальных - цвет раздела; отладка панели серая
+// как служебная.
 let SETTINGS = [
-    { label: "Display",      sub: "brightness, warm, language", act: "display" },
-    { label: "Saver",        sub: "timeout and look",           act: "saver" },
-    { label: "Night",        sub: "schedule and actions",       act: "night" },
+    { label: "Display",      sub: "brightness, warm, language", act: "display", ic: "#58A6FF" },
+    { label: "Saver",        sub: "timeout and look",           act: "saver",   ic: "#A371F7" },
+    { label: "Night",        sub: "schedule and actions",       act: "night",   ic: "#39C5CF" },
     { label: "LED",          sub: "above the screen",           act: "led" },
-    { label: "Editor",       sub: "pixel art",                  act: "iconedit" },
-    { label: "Panel tuning", sub: "driver debug",               act: "debug" },
+    { label: "Editor",       sub: "pixel art",                  act: "iconedit", ic: "#DB61A2" },
+    { label: "Debug",        sub: "driver debug",               act: "debug",   ic: "#8B949E" },
 ];
 
+// Две колонки по сетке: плитка 148x51 - вдвое крупнее прежней строки, в неё
+// влезает заголовок нормального кегля, и попасть пальцем куда легче.
 function settings_btn(i) {
-    return { x: GX, y: 28 + i * 29, w: GW, h: 26 };
+    let h = gcard_h(3);
+    return { x: GX + (i % 2) * (GCOL + GG), y: GVT + int(i / 2) * (h + GG),
+             w: GCOL, h: h };
 }
 
 function draw_settings_page() {
@@ -4682,22 +4937,56 @@ function draw_settings_page() {
 
     for (let i = 0; i < length(SETTINGS); i++) {
         let b = settings_btn(i);
-        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
-        lcd_rect(b.x, b.y, 3, b.h, C.accent);
-        lcd_text(b.x + 12, b.y + 4, tr(SETTINGS[i].label), C.white, C.widget, 1);
+        let acc = SETTINGS[i].ic ?? C.cyan;
         let sub = tr(SETTINGS[i].sub);
         if (SETTINGS[i].act == "led") {
             let lc = led_cfg();
-            if (led_blinking) sub = tr("blinking");
+            if (led_blinking) { sub = tr("blinking"); acc = C.orange; }
             else {
                 sub = lc.on ? tr("on") : tr("off");
                 if (lc.sms) sub += ", " + tr("blink on SMS");
+                // Мигание по SMS - тоже включённое состояние: диод сам погашен,
+                // но при новом сообщении оживёт, и полоса должна это показывать.
+                acc = lc.on ? C.green : (lc.sms ? C.orange : C.gray);
             }
         }
-        lcd_text(b.x + 12, b.y + 16, sub, C.gray, C.widget, 1);
-        lcd_text(b.x + b.w - 18, b.y + 8, ">", C.gray, C.widget, 2);
+        lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+        lcd_rect(b.x, b.y, 3, b.h, acc);
+        lcd_text(b.x + 12, b.y + 10, tr(SETTINGS[i].label), C.white, C.widget, 2);
+        lcd_text(b.x + 12, b.y + 32, tcut(sub, 21), C.gray, C.widget, 1);
     }
 
+    draw_back();
+    lcd_flush();
+}
+
+// Питание было модалкой: красное окно со своим циклом ожидания касания, то есть
+// отдельной механикой на весь интерфейс. Теперь это обычная страница - две
+// крупные карточки на сетке, а роль «Отмены» играет общая кнопка «назад».
+function power_btn(i) {
+    let h = gcard_h(3);
+    return { x: GX, y: GVT + i * (h + GG), w: GW, h: h };
+}
+
+function draw_power_page() {
+    lcd_clear(C.bg);
+    draw_header(tr("POWER"));
+    // Порядок - по радикальности: сперва трогаем только модем, потом весь
+    // аппарат, в конце выключение. Цвет полосы идёт той же лесенкой.
+    let items = [
+        [ tr("Modem Reset"), tr("LTE restart"), C.orange ],
+        [ tr("Restart"), tr("Reboot the router"), "#F0736B" ],
+        [ tr("Shut down"), tr("Unplug charger first"), C.red ],
+    ];
+    for (let i = 0; i < 3; i++) {
+        let b = power_btn(i);
+        let pressed = (st.pwr_press == i);
+        gcard(b.x, b.y, b.w, b.h, items[i][2]);
+        if (pressed) lcd_rect(b.x + 3, b.y, b.w - 3, b.h, C.press);
+        let bgc = pressed ? C.press : C.widget;
+        lcd_text(b.x + 13, b.y + 10, items[i][0], C.white, bgc, 3);
+        lcd_text(b.x + 13, b.y + 34, items[i][1], C.gray, bgc, 1);
+    }
     draw_back();
     lcd_flush();
 }
@@ -4721,39 +5010,52 @@ function draw_display_page() {
     let fb = font_btn(), ff = (FONT_MODE == 1);
     gcard(fb.x, fb.y, fb.w, fb.h, ff ? C.green : C.border);
     let flab = ff ? tr("FONT FLIPPER") : tr("FONT STD");
-    lcd_text(fb.x + int((fb.w - tlen(flab) * 6) / 2) + 2, fb.y + 13, flab,
+    lcd_text_c(fb.x + int(fb.w / 2), fb.y + 13, flab,
              ff ? C.white : C.gray, C.widget, 1);
 
-    // Иконки меню и фон-градиент: два тумблера в одной строке. Цвет полоски
-    // показывает состояние, справа компактное «вкл/выкл».
-    let mb = micons_btn();
-    gcard(mb.x, mb.y, mb.w, mb.h, MICONS_ON ? C.green : C.dim);
-    lcd_text(mb.x + 12, mb.y + 9, tr("Menu icons"), C.white, C.widget, 1);
-    lcd_text(mb.x + mb.w - 26, mb.y + 9, MICONS_ON ? tr("on") : tr("off"),
-             MICONS_ON ? C.green : C.gray, C.widget, 1);
+    // Фон-подложка и тема - две колонки сетки.
+    let tb = theme_btn();
+    let dark = (THEME == "dark");
+    gcard(tb.x, tb.y, tb.w, tb.h, dark ? C.gray : C.cyan);
+    lcd_text(tb.x + 12, tb.y + 12, tr("Theme"), C.white, C.widget, 1);
+    lcd_text_r(tb.x + tb.w - 10, tb.y + 12, dark ? tr("Dark") : tr("Light"),
+               dark ? C.gray : C.cyan, C.widget, 1);
 
-    let gb = grad_btn();
-    gcard(gb.x, gb.y, gb.w, gb.h, GRAD_ON ? C.green : C.dim);
-    lcd_text(gb.x + 12, gb.y + 9, tr("Background"), C.white, C.widget, 1);
-    lcd_text(gb.x + gb.w - 26, gb.y + 9, GRAD_ON ? tr("on") : tr("off"),
-             GRAD_ON ? C.green : C.gray, C.widget, 1);
+    let gb = bg_btn();
+    let lt = (BG_TINT == "light");
+    let bacc = !GRAD_ON ? C.dim : (lt ? C.cyan : C.gray);
+    gcard(gb.x, gb.y, gb.w, gb.h, bacc);
+    lcd_text(gb.x + 12, gb.y + 12, tr("Background"), C.white, C.widget, 1);
+    lcd_text_r(gb.x + gb.w - 10, gb.y + 12,
+               !GRAD_ON ? tr("off") : (lt ? tr("Light") : tr("Dark")),
+               bacc, C.widget, 1);
+
+    // Тёплый свет и скругление углов - вторым рядом, по две колонки сетки.
+    let wb = warm_btn(), wv = warm_cfg();
+    gcard(wb.x, wb.y, wb.w, wb.h, wv ? "#F0A868" : C.dim);
+    lcd_text(wb.x + 12, wb.y + 12, tr("Warm"), C.white, C.widget, 1);
+    lcd_text_r(wb.x + wb.w - 10, wb.y + 12, warm_label(),
+               wv ? "#F0A868" : C.gray, C.widget, 1);
+
+    let cb = radius_btn();
+    gcard(cb.x, cb.y, cb.w, cb.h, RADIUS ? C.cyan : C.dim);
+    lcd_text(cb.x + 12, cb.y + 12, tr("Corners"), C.white, C.widget, 1);
+    lcd_text_r(cb.x + cb.w - 10, cb.y + 12,
+               RADIUS ? sprintf("%d px", RADIUS) : tr("off"),
+               RADIUS ? C.cyan : C.gray, C.widget, 1);
 
     // Яркость: семь шагов, выбранный подсвечен.
     let bp = bright_cfg();
-    lcd_text(GX + 4, 102, tr("LIGHT"), C.gray, C.bg, 1);
+    lcd_text(GX + 4, 146, tr("LIGHT"), C.ontop, C.bg, 1);
     for (let i = 0; i < length(BRIGHT_STEPS); i++) {
         let b = bright_btn(i), sel = (BRIGHT_STEPS[i] == bp);
         gcard(b.x, b.y, b.w, b.h, sel ? C.green : C.border);
         let t = sprintf("%d", BRIGHT_STEPS[i]);
-        lcd_text(b.x + int((b.w - tlen(t) * 6) / 2) + 2, b.y + 18, t,
+        // Строка шрифта - 8 пикселей на размер: центр клетки считаем от него,
+        // иначе цифра прижимается к верху (кнопка стала ниже, отступ остался).
+        lcd_text_c(b.x + int(b.w / 2), b.y + int((b.h - 8) / 2), t,
                  sel ? C.white : C.gray, C.widget, 1);
     }
-
-    let wb = warm_btn(), wv = warm_cfg();
-    gcard(wb.x, wb.y, wb.w, wb.h, wv ? "#F0A868" : C.dim);
-    lcd_text(wb.x + 12, wb.y + 9, tr("Warm"), C.white, C.widget, 1);
-    lcd_text(wb.x + wb.w - 8 - tlen(warm_label()) * 6, wb.y + 9, warm_label(),
-             wv ? "#F0A868" : C.gray, C.widget, 1);
 
     draw_back();
     lcd_flush();
@@ -4776,13 +5078,13 @@ function draw_saver_page() {
     lcd_text(z.x + int(z.w / 2) - 7, z.y + 8, "+", C.accent, C.widget, 4);
 
     let stl = saver_style();
-    lcd_text(12, 84, tr("VIEW"), C.gray, C.bg, 1);
+    lcd_text(12, 84, tr("VIEW"), C.ontop, C.bg, 1);
     for (let i = 0; i < length(SAVER_STYLES); i++) {
         let b = style_btn(i), sel = (SAVER_STYLES[i] == stl);
         lcd_rect(b.x, b.y, b.w, b.h, C.widget);
         lcd_rect(b.x, b.y, 3, b.h, sel ? C.green : C.border);
         let t = style_label(SAVER_STYLES[i]);
-        lcd_text(b.x + int((b.w - tlen(t) * 6) / 2) + 2, b.y + 11, t,
+        lcd_text_c(b.x + int(b.w / 2), b.y + 11, t,
                  sel ? C.white : C.gray, C.widget, 1);
     }
 
@@ -4955,7 +5257,7 @@ let SAVERCFG_ROWS = [
 ];
 
 function savercfg_row(i) {
-    return { x: 10, y: 30 + i * 30, w: 300, h: 26 };
+    return { x: GX, y: 30 + i * 30, w: GW, h: 26 };
 }
 
 function savercfg_size_btn(i) {
@@ -4993,7 +5295,7 @@ function draw_savercfg_page() {
     }
     if (saver_style() == "clock") {
         let yb = 30 + length(rows) * 30;
-        lcd_text(10, yb + 7, tr("Clock size"), C.gray, C.bg, 1);
+        lcd_text(10, yb + 7, tr("Clock size"), C.ontop, C.bg, 1);
         let names = [ "S", "M", "L" ], keys = [ "s", "m", "l" ];
         for (let i = 0; i < 3; i++) {
             let b = savercfg_size_btn(i), sel = fl.size == keys[i];
@@ -5009,8 +5311,51 @@ function draw_savercfg_page() {
 }
 
 
+// Сетка списка сетей: две колонки по пять рядов. В одну колонку помещалось
+// шесть сетей, в две - десять, и это без прокрутки закрывает почти любой эфир.
 function stascan_row(i) {
-    return { x: 10, y: 30 + i * 30, w: 300, h: 26 };
+    return { x: GX + (i % 2) * (GCOL + GG), y: 30 + int(i / 2) * 30,
+             w: GCOL, h: 26 };
+}
+
+// Скрытая точка в скане не появляется никогда - её имя надо назвать самому.
+// Строка стоит под найденными сетями (и одна на пустом списке): выше неё
+// место занято результатами скана, ниже - полоса «назад».
+// Последний ряд отдан служебным клеткам: слева скрытая сеть, справа листалка.
+// Держать за ними постоянное место обязательно - иначе на полном экране
+// результатов их негде рисовать, а именно там они и нужны.
+let STASCAN_MAX = 10;
+function stascan_hidden_row() { return stascan_row(10); }
+function stascan_more_row()   { return stascan_row(11); }
+
+// Страниц столько, сколько нужно на все найденные сети; страница по кругу.
+function stascan_pages(nets) {
+    let n = (type(nets) == "array") ? length(nets) : 0;
+    if (n <= STASCAN_MAX) return 1;
+    return int((n + STASCAN_MAX - 1) / STASCAN_MAX);
+}
+
+function stascan_page(nets) {
+    let pg = int(+(sta.pg ?? 0));
+    let pages = stascan_pages(nets);
+    if (pg < 0 || pg >= pages) pg = 0;
+    sta.pg = pg;
+    return pg;
+}
+
+function draw_hidden_row(nets) {
+    let b = stascan_hidden_row();
+    lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+    lcd_rect(b.x, b.y, 3, b.h, C.accent);
+    lcd_text(b.x + 12, b.y + 7, tr("+ Hidden"), C.accent, C.widget, 1);
+
+    let pages = stascan_pages(nets);
+    if (pages < 2) return;
+    let pg = stascan_page(nets), m = stascan_more_row();
+    lcd_rect(m.x, m.y, m.w, m.h, C.widget);
+    lcd_rect(m.x, m.y, 3, m.h, C.cyan);
+    lcd_text(m.x + 12, m.y + 7, sprintf("%d/%d", pg + 1, pages), C.gray, C.widget, 1);
+    lcd_text_r(m.x + m.w - 12, m.y + 7, tr("more") + "  >>", C.cyan, C.widget, 1);
 }
 
 function draw_stascan_page() {
@@ -5019,30 +5364,33 @@ function draw_stascan_page() {
 
     let nets = sta.nets;
     if (nets == null) {
-        lcd_text(20, 100, tr("Scanning..."), C.gray, C.bg, 2);
+        lcd_text(20, 100, tr("Scanning..."), C.ontop, C.bg, 2);
         draw_back();
         lcd_flush();
         return;
     }
     if (length(nets) == 0) {
-        lcd_text(20, 100, tr("No networks found"), C.dim, C.bg, 2);
-        lcd_text(20, 124, tr("Tap BACK and retry"), C.dim, C.bg, 1);
+        lcd_text(20, 60, tr("No networks found"), C.ontop_dim, C.bg, 2);
+        lcd_text(20, 84, tr("Tap BACK and retry"), C.ontop_dim, C.bg, 1);
+        draw_hidden_row(nets);
         draw_back();
         lcd_flush();
         return;
     }
-    // До шести сетей на экран, самые сильные сверху.
-    for (let i = 0; i < length(nets) && i < 6; i++) {
-        let n = nets[i], b = stascan_row(i);
+    // Десять сетей на страницу, самые сильные сверху. Клетка узкая, поэтому
+    // диапазон не пишем словом - о нём и так сказано в заголовке страницы,
+    // а звёздочка отмечает защищённую сеть.
+    let off = stascan_page(nets) * STASCAN_MAX;
+    for (let k = 0; k < STASCAN_MAX && off + k < length(nets); k++) {
+        let n = nets[off + k], b = stascan_row(k);
         lcd_rect(b.x, b.y, b.w, b.h, C.widget);
         let bars = n.signal > -55 ? 3 : (n.signal > -70 ? 2 : 1);
         let bc = bars == 3 ? C.green : (bars == 2 ? C.orange : C.red);
         lcd_rect(b.x, b.y, 3, b.h, bc);
-        lcd_text(b.x + 12, b.y + 7, tcut(n.ssid, 22), C.white, C.widget, 1);
-        let tag = sprintf("%dG%s", n.band, n.enc ? " *" : "");
-        lcd_text(b.x + b.w - 12 - tlen(tag) * 6, b.y + 7, tag,
-                 n.enc ? C.gray : C.cyan, C.widget, 1);
+        lcd_text(b.x + 12, b.y + 7, tcut(n.ssid, 17), C.white, C.widget, 1);
+        if (n.enc) lcd_text_r(b.x + b.w - 8, b.y + 7, "*", C.gray, C.widget, 1);
     }
+    draw_hidden_row(nets);
     draw_back();
     lcd_flush();
 }
@@ -5177,7 +5525,7 @@ function kb_apply(e, kb) {
 // Иконка клавиатуры для кнопки «назад» (белый прямоугольник с точками-клавишами).
 function draw_kbd_icon(x, y) {
     lcd_rect(x, y, 30, 20, C.white);
-    lcd_rect(x + 2, y + 2, 26, 16, C.back);
+    lcd_rect(x + 2, y + 2, 26, 16, C.widget);
     for (let r = 0; r < 2; r++)
         for (let c = 0; c < 6; c++)
             lcd_rect(x + 4 + c * 4, y + 4 + r * 4, 2, 2, C.white);
@@ -5189,23 +5537,46 @@ function draw_kbd_page() {
     // Режим ввода города: то же поле+клавиатура, но текст открытый и свой буфер.
     if (st.kbmode == "city") {
         draw_header(tr("Custom city"));
-        lcd_rect(10, 30, 300, 30, C.widget);
+        lcd_rect(GX, 30, GW, 30, C.widget);
         let v = st.citybuf ?? "";
-        lcd_text(18, 38, v != "" ? v : tr("Type city name"),
+        lcd_text(GX + 10, 38, v != "" ? v : tr("Type city name"),
                  v != "" ? C.white : C.dim, C.widget, 2);
         kb_draw(92, st.citykb);
         draw_back();
         lcd_flush();
         return;
     }
+    if (st.kbmode == "ssid") {
+        draw_header(tr("Network name"));
+        lcd_rect(GX, 30, GW, 30, C.widget);
+        let v = st.ssidbuf ?? "";
+        lcd_text(GX + 10, 38, v != "" ? v : tr("Type network name"),
+                 v != "" ? C.white : C.dim, C.widget, 2);
+        kb_draw(92, st.citykb);
+        draw_back();
+        lcd_flush();
+        return;
+    }
+    if (st.kbmode == "hssid") {
+        draw_header(tr("Hidden network"));
+        lcd_rect(GX, 30, GW, 30, C.widget);
+        let v = sta.hssid ?? "";
+        lcd_text(GX + 10, 38, v != "" ? v : tr("Type network name"),
+                 v != "" ? C.white : C.dim, C.widget, 2);
+        kb_draw(92, sta.kb);
+        draw_back();
+        lcd_flush();
+        return;
+    }
     if (st.kbmode == "mqtt") {
         let fk = st.kbfield ?? "host";
-        let ttl = fk == "host" ? tr("Broker") : (fk == "port" ? tr("Port") :
-                  (fk == "user" ? tr("User") : tr("Password")));
+        let ttl = fk;
+        for (let i = 0; i < length(MQTT_FIELDS); i++)
+            if (MQTT_FIELDS[i].key == fk) ttl = tr(MQTT_FIELDS[i].label);
         draw_header(sprintf("MQTT: %s", ttl));
-        lcd_rect(10, 30, 300, 30, C.widget);
+        lcd_rect(GX, 30, GW, 30, C.widget);
         let v = st.mqttbuf ?? "";
-        lcd_text(18, 38, v != "" ? v : tr("Type value"),
+        lcd_text(GX + 10, 38, v != "" ? v : tr("Type value"),
                  v != "" ? C.white : C.dim, C.widget, 2);
         kb_draw(92, st.citykb);
         draw_back();
@@ -5213,15 +5584,16 @@ function draw_kbd_page() {
         return;
     }
     let n = sta.sel >= 0 ? sta.nets[sta.sel] : null;
-    draw_header(tcut(n ? n.ssid : tr("Password"), 24));
+    draw_header(tcut(n ? n.ssid : (sta.hssid != null && sta.hssid != ""
+                                   ? sta.hssid : tr("Password")), 24));
 
     // Поле ввода: показываем пароль точками, последний символ открыт.
-    lcd_rect(10, 30, 300, 30, C.widget);
+    lcd_rect(GX, 30, GW, 30, C.widget);
     let shown = "";
     let pl = length(sta.pass);
     for (let i = 0; i < pl; i++)
         shown += (i == pl - 1) ? substr(sta.pass, i, 1) : "*";
-    lcd_text(18, 38, shown != "" ? shown : tr("enter password"),
+    lcd_text(GX + 10, 38, shown != "" ? shown : tr("enter password"),
              shown != "" ? C.white : C.dim, C.widget, 2);
 
     kb_draw(92, sta.kb);   // общая клавиатура (встроенные ⌫⇧↵)
@@ -5339,14 +5711,14 @@ function term_grid() {
 // по центру «Выход», справа иконка показа/скрытия клавиатуры. Зоны по x
 // разведены: tx<52 - Fn, tx>=278 - клава, между - выход.
 function draw_term_bar() {
-    lcd_rect(0, BACK_Y, LCD_W, 32, C.back);
-    lcd_rect(0, BACK_Y, LCD_W, 2, "#D32F2F");
+    lcd_rect(0, BACK_Y, LCD_W, 32, C.widget);
+    lcd_rect(0, BACK_Y, LCD_W, 2, C.border);
     // Fn - редактируемая иконка (30x20, слот "fn" в редакторе). Активна
     // (открыта страница стрелок) - рисуем вторым проходом со сдвигом 1px = жирнее.
     let active = st.term.kb.pg == "ext";
     draw_fn_icon(8, BACK_Y + 6, C.white);
     if (active) draw_fn_icon(9, BACK_Y + 6, C.white);
-    lcd_text(130, BACK_Y + 9, tr("Exit"), C.white, C.back, 2);
+    lcd_text(130, BACK_Y + 9, tr("Exit"), C.white, C.widget, 2);
     draw_kbd_icon(284, BACK_Y + 6);
 }
 
@@ -5408,19 +5780,19 @@ function draw_battery_page() {
     lcd_text(cx + 12, y1 + 10, pct < 0 ? "--" : sprintf("%d%%", pct), pcol, C.widget, 3);
     let st_s = bat?.no_battery ? tr("Battery not installed")
              : (full ? tr("Plugged in") : (chg ? tr("Charging") : tr("Battery")));
-    lcd_text(cx + cw - 12 - tlen(st_s) * 6, y1 + 10, st_s, C.white, C.widget, 1);
+    lcd_text_r(cx + cw - 12, y1 + 10, st_s, C.white, C.widget, 1);
     // Вольты вместо сырого АЦП по ТОЧНОЙ стоковой формуле (из дизасма ядра:
     // ADC*3.3*(1/1024)*7.11*0.5 = ADC*0.01145654); прежняя adc*8.4/726
     // завышала на ~1% (при 726 рисовала 8.4В, реально 8.32В).
     let adc_s = adc > 0 ? sprintf("%.2f %s", adc * 0.01145654, tr("V")) : "";
-    lcd_text(cx + cw - 12 - tlen(adc_s) * 6, y1 + 26, adc_s, C.gray, C.widget, 1);
+    lcd_text_r(cx + cw - 12, y1 + 26, adc_s, C.gray, C.widget, 1);
 
     // Время работы от батареи с момента, когда сняли зарядку (даёт collector).
     let obs = int(+(bat?.on_bat_sec ?? 0));
     if (!chg && !full && !bat?.no_battery && obs > 0) {
         let ob = sprintf(tr("on battery %s"),
                          obs < 60 ? sprintf("%d %s", obs, tr("sec")) : fmt_dur(int(obs / 60), false));
-        lcd_text(cx + cw - 12 - tlen(ob) * 6, y1 + 40, ob, C.gray, C.widget, 1);
+        lcd_text_r(cx + cw - 12, y1 + 40, ob, C.gray, C.widget, 1);
     }
 
     // Прогноз: слева подпись и время, справа расход.
@@ -5438,8 +5810,8 @@ function draw_battery_page() {
     // Скорость разряда в процентах в час: сырые «АЦП/мин» человеку ни о
     // чём (пересчёт линейный по рабочему диапазону 512..726 ~= 0..100%).
     let d2 = drain > 0 ? sprintf("%d%s", int(drain * 6000 / 214), tr("%/h")) : tr("measuring");
-    lcd_text(cx + cw - 12 - tlen(d1) * 6, y2 + 8, d1, C.white, C.widget, 1);
-    lcd_text(cx + cw - 12 - tlen(d2) * 6, y2 + 22, d2, C.gray, C.widget, 1);
+    lcd_text_r(cx + cw - 12, y2 + 8, d1, C.white, C.widget, 1);
+    lcd_text_r(cx + cw - 12, y2 + 22, d2, C.gray, C.widget, 1);
 
     // Графики за последние ~2 часа: слева заряд, справа сырой АЦП.
     let y3 = y2 + 40 + GG;
@@ -5484,8 +5856,12 @@ function draw_battery_page() {
     lcd_flush();
 }
 
+// Две колонки, как в списке сетей: имена ромов короткие, в одну колонку
+// половина строки уходила впустую, а на страницу влезало вдвое меньше.
+let GAMES_PER_PAGE = 8;
 function games_btn(i) {
-    return { x: 8, y: 26 + i * 32, w: 304, h: 30 };
+    return { x: GX + (i % 2) * (GCOL + GG), y: 26 + int(i / 2) * 32,
+             w: GCOL, h: 30 };
 }
 
 // Листалка: ромов стало много, на страницу помещается четыре.
@@ -5589,10 +5965,10 @@ function draw_gqr_page() {
     for (let i = 0; i < 2; i++) {
         let x = 22 + i * 156;
         draw_qr(qr_rows(pad_url(i + 1)), x, 46, 3, "#000000", "#FFFFFF");
-        lcd_text(x + 4, 140, sprintf(tr("Player %d"), i + 1), C.white, C.bg, 1);
+        lcd_text(x + 4, 140, sprintf(tr("Player %d"), i + 1), C.ontop_hi, C.bg, 1);
     }
-    lcd_text(12, 168, tr("scan while a game is running"), C.dim, C.bg, 1);
-    lcd_text(12, 184, pad_url(1), C.gray, C.bg, 1);
+    lcd_text(12, 168, tr("scan while a game is running"), C.ontop_dim, C.bg, 1);
+    lcd_text(12, 184, pad_url(1), C.ontop, C.bg, 1);
 
     draw_back();
     lcd_flush();
@@ -5657,7 +6033,7 @@ function draw_gkeys_page() {
         lcd_text(b.x + 12, b.y + 8, KEYS[i].label, C.gray, C.widget, 1);
         lcd_text(b.x + 180, b.y + 8, key_title(m[KEYS[i].id]), C.white, C.widget, 1);
     }
-    lcd_text(12, 32 + length(KEYS) * 32 + 4, tr("tap a row, then press a key"), C.dim, C.bg, 1);
+    lcd_text(12, 32 + length(KEYS) * 32 + 4, tr("tap a row, then press a key"), C.ontop_dim, C.bg, 1);
 
     draw_back();
     lcd_flush();
@@ -5716,14 +6092,15 @@ function draw_games_page() {
     draw_header(tr("Games"));
 
     let roms = rom_list();
-    let pages = length(roms) > 4 ? int((length(roms) + 3) / 4) : 1;
+    let pages = length(roms) > GAMES_PER_PAGE
+              ? int((length(roms) + GAMES_PER_PAGE - 1) / GAMES_PER_PAGE) : 1;
     if (st.gpg == null || st.gpg >= pages) st.gpg = 0;
-    let base = st.gpg * 4;
-    for (let i = 0; i < 4 && base + i < length(roms); i++) {
+    let base = st.gpg * GAMES_PER_PAGE;
+    for (let i = 0; i < GAMES_PER_PAGE && base + i < length(roms); i++) {
         let r = games_btn(i);
         lcd_rect(r.x, r.y, r.w, r.h, C.widget);
         lcd_rect(r.x, r.y, 3, r.h, C.accent);
-        lcd_text(r.x + 12, r.y + 9, tcut(roms[base + i].name, 46), C.white, C.widget, 1);
+        lcd_text(r.x + 12, r.y + 9, tcut(roms[base + i].name, 20), C.white, C.widget, 1);
     }
     let cb = games_cfg_btn();
     lcd_rect(cb.x, cb.y, cb.w, cb.h, C.widget);
@@ -5737,22 +6114,22 @@ function draw_games_page() {
         lcd_rect(z.x, z.y, z.w, z.h, C.widget);
         lcd_text(z.x + 32, z.y + 8, ">>", C.accent, C.widget, 2);
         // Просвет между стрелками 200..224, текст 3 знака по 6px - ставим в центр.
-        lcd_text(203, z.y + 11, sprintf("%d/%d", st.gpg + 1, pages), C.gray, C.bg, 1);
+        lcd_text(203, z.y + 11, sprintf("%d/%d", st.gpg + 1, pages), C.ontop, C.bg, 1);
 
     }
 
     // Путь к ромам показываем ВСЕГДА, мелко и приглушённо. Раньше он всплывал
     // только когда список пуст - то есть ровно тогда, когда его уже некуда
     // положить, а при полном списке узнать место было неоткуда.
-    lcd_text(10, 192, ROM_DIRS[0], C.dim, C.bg, 1);
+    lcd_text(10, 192, ROM_DIRS[0], C.ontop_dim, C.bg, 1);
 
     // Подсказка, когда ромов нет или эмулятор не поставлен. Путь тут больше не
     // дублируем - он строкой ниже.
     let y = 26 + (length(roms) + 1) * 32 + 6;
     if (!fs.stat(NES_BIN))
-        lcd_text(12, y, tr("emulator not installed"), C.dim, C.bg, 1);
+        lcd_text(12, y, tr("emulator not installed"), C.ontop_dim, C.bg, 1);
     else if (!length(roms))
-        lcd_text(12, y, tr("Put .nes into"), C.dim, C.bg, 1);
+        lcd_text(12, y, tr("Put .nes into"), C.ontop_dim, C.bg, 1);
 
     draw_back();
     lcd_flush();
@@ -5844,11 +6221,13 @@ function zig_beacon_start() {
         fs.unlink(ZIG_KEYFILE);
     }
     if (zig_mode() == "mesh")
+        // Имя узла - это hostname, а его человек задаёт сам: пробел разорвал бы
+        // команду на два аргумента, точка с запятой - на две команды.
         system(sprintf("ZIG_POWER=%d setsid %s mesh 30 %s >/dev/null 2>&1 </dev/null &",
-                       c.power, ZIG_BIN, zig_name()));
+                       c.power, ZIG_BIN, sh_quote(zig_name())));
     else
         system(sprintf("ZIG_POWER=%d setsid %s beacon %d 10 %s >/dev/null 2>&1 </dev/null &",
-                       c.power, ZIG_BIN, c.ch, zig_name()));
+                       c.power, ZIG_BIN, c.ch, sh_quote(zig_name())));
 }
 
 function zig_set(k, v) {
@@ -5863,6 +6242,18 @@ function zig_json(path) {
     let raw = fs.readfile(path);
     if (!raw) return null;
     try { return json(raw); } catch (e) { return null; }
+}
+
+// Режим страницы Zigbee - «эфир» или список соседей. Держать его в одном месте
+// обязательно: zig_run() заводит st.zig под свои нужды ещё до того, как
+// страницу впервые нарисовали, и объект получался БЕЗ поля mode. Рисование
+// показывало список (там условие «не эфир»), а обработчик тапа сверялся с
+// «mode == peers» и не находил совпадения - строки соседей не открывались.
+function zig_ui_mode() {
+    st.zig ??= {};
+    if (st.zig.mode == null)
+        st.zig.mode = zig_cfg().beacon ? "peers" : "escan";
+    return st.zig.mode;
 }
 
 // Скан идёт секунды и держит порт, поэтому запускаем фоном в файл, а страница
@@ -5898,7 +6289,7 @@ function icon_home(x, y, col, bg) {
 }
 
 function zig_rssi_bar(v) {
-    return clampi(int((int(v) + 95) * 100 / 50), 0, 100);
+    return clampi(int((int(v) + 100) * 100 / 90), 0, 100);
 }
 
 function zig_rssi_col(v) {
@@ -5927,7 +6318,7 @@ function draw_zigbee_page() {
     lcd_clear(C.bg);
     draw_header(tr("Zigbee"));
     let cfg = zig_cfg();
-    st.zig ??= { mode: cfg.beacon ? "peers" : "escan" };
+    zig_ui_mode();
     let z = st.zig;
 
     let info = zig_json(ZIG_INFO);
@@ -5939,7 +6330,7 @@ function draw_zigbee_page() {
     lcd_rect(GX, GY, GW, 26, C.widget);
     lcd_rect(GX, GY, 3, 26, info?.ok ? C.green : C.dim);
     lcd_text(GX + 12, GY + 9, head, C.white, C.widget, 1);
-    lcd_text(GX + GW - 11 - tlen(sprintf("PAN %04X  CH %d", cfg.pan, cfg.ch)) * 6, GY + 9,
+    lcd_text_r(GX + GW - 11, GY + 9,
              sprintf("PAN %04X  CH %d", cfg.pan, cfg.ch), C.gray, C.widget, 1);
 
     let ay = GY + 32, ah = BACK_Y - 44 - ay;
@@ -5949,7 +6340,7 @@ function draw_zigbee_page() {
     if (zig_busy()) {
         lcd_text(GX + int((GW - tlen(tr("Scanning...")) * 12) / 2), ay + int(ah / 2) - 7,
                  tr("Scanning..."), C.cyan, C.widget, 2);
-    } else if (z.mode == "escan") {
+    } else if (zig_ui_mode() == "escan") {
         let d = zig_json(ZIG_ESCAN);
         let chans = type(d?.channels) == "array" ? d.channels : [];
         if (length(chans) == 0) {
@@ -6040,7 +6431,7 @@ function zig_peer_row(i) {
     return { x: GX, y: GY + 32 + i * 20, w: GW, h: 18 };
 }
 
-let A_CYAN = "#58A6FF", A_GREEN = "#3FB950", A_ORANGE = "#E8853A",
+let A_CYAN = "#58A6FF", A_GREEN = "#10B981", A_ORANGE = "#E8853A",
     A_PURPLE = "#A371F7", A_TEAL = "#39C5CF", A_PINK = "#DB61A2";
 
 function dash_card(b, o, acc) {
@@ -6053,7 +6444,7 @@ function dash_lab(b, o, s) {
 }
 
 function dash_right(b, o, y, s, col) {
-    lcd_text(b.x + b.w - 11 - tlen(s) * 6, y, s, o.mono ?? (col ?? o.dim), o.card, 1);
+    lcd_text_r(b.x + b.w - 11, y, s, o.mono ?? (col ?? o.dim), o.card, 1);
 }
 
 function dash_val(b, o, s, col) {
@@ -6095,15 +6486,23 @@ function dash_lvl_col(pct) {
     return pct < 0 ? C.dim : (pct >= 60 ? C.green : (pct >= 30 ? C.orange : C.red));
 }
 
+// Три ряда карточек растянуты на всю свободную высоту: раньше шаг и высота
+// были фиксированными, блок кончался на 186-й строке, и под ним оставалась
+// пустая полоса в два десятка пикселей перед кнопками.
 function zp_box(c, r, cw) {
     let u = int((GW - 18) / 4);
-    return { x: GX + c * (u + 6), y: GY + r * 56,
-             w: cw * u + (cw - 1) * 6, h: 50 };
+    let top = GY, bot = BACK_Y - 8;
+    let h = int((bot - top - 2 * 7) / 3);
+    return { x: GX + c * (u + 6), y: top + r * (h + 7),
+             w: cw * u + (cw - 1) * 6, h: h };
 }
 
+// Кнопки соседа - такие же карточки сетки, как всё остальное: плашка,
+// акцентная полоска СЛЕВА, а не сверху. Навигация - третья такая же карточка
+// со своим приглушённым акцентом.
 function zp_act(i) {
-    let w = int(LCD_W / 4);
-    return { x: i * w, y: BACK_Y, w: w, h: 32 };
+    let w = int((GW - 16) / 3);
+    return { x: GX + i * (w + 8), y: BACK_Y, w: w, h: 30 };
 }
 
 function draw_zigpeer_page() {
@@ -6113,7 +6512,7 @@ function draw_zigpeer_page() {
     let n = peers[st.zig?.peer ?? 0];
     if (n == null) {
         draw_header(tr("Peers"));
-        lcd_text(GX + 12, GY + 20, tr("no peers heard"), C.dim, C.bg, 2);
+        lcd_text(GX + 12, GY + 20, tr("no peers heard"), C.ontop_dim, C.bg, 2);
         draw_back();
         lcd_flush();
         return;
@@ -6169,32 +6568,38 @@ function draw_zigpeer_page() {
     b = zp_box(0, 2, 2);
     let fresh = int(+(n.age ?? 99)) < 30;
     let lq = int(+(n.lqi ?? 0));
-    dash_gauge(b, o, fresh ? A_GREEN : C.dim, tr("link"),
-               sprintf("%d dBm", int(+(n.rssi ?? 0))), int(lq * 100 / 255),
-               fresh ? C.green : C.dim);
-    dash_right(b, o, b.y + 6, sprintf("%d %s", int(+(n.age ?? 0)), tr("sec")));
+    let zr = int(+(n.rssi ?? 0));
+    let zcol = fresh ? zig_rssi_col(zr) : C.dim;
+    dash_gauge(b, o, zcol, tr("link"), sprintf("%d dBm", zr),
+               zig_rssi_bar(zr), zcol);
+    dash_right(b, o, b.y + 6, sprintf("LQI %d   %d %s", lq,
+                                      int(+(n.age ?? 0)), tr("sec")));
 
     b = zp_box(2, 2, 1);
+    // Клетка соседа такая же узкая, как в виджетах: полная форма «1 день 0ч 3м»
+    // вылезала за карточку, поэтому здесь тот же компактный вид.
     dash_simple(b, o, A_PURPLE, tr("Uptime short"),
-                m.up != null ? fmt_uptime(int(+m.up) * 60) : "--", null, o.fg);
+                m.up != null ? fmt_uptime_c(int(+m.up) * 60) : "--", null, o.fg);
 
     b = zp_box(3, 2, 1);
     let nc = m.wifi != null ? int(+m.wifi) : -1;
     let wcol = nc > 0 ? A_TEAL : C.dim;
     dash_simple(b, o, wcol, "Wi-Fi", nc >= 0 ? sprintf("%d", nc) : "--", tr("clients"), wcol);
 
+    // VPN переключается тапом по самой карточке, отдельной кнопки нет.
     let acts = [
-        [ von ? tr("VPN off") : tr("VPN on"), von ? A_PURPLE : C.gray ],
         [ tr("Modem"), A_ORANGE ],
         [ tr("Reboot"), "#F0736B" ],
-        [ tr("< BACK"), C.white ],
+        [ "<", C.gray ],
     ];
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 3; i++) {
         let a = zp_act(i);
-        lcd_rect(a.x, a.y, a.w, a.h, i == 3 ? C.back : C.widget);
-        lcd_rect(a.x, a.y, a.w, 2, i == 3 ? "#D32F2F" : acts[i][1]);
-        lcd_text(a.x + int((a.w - tlen(acts[i][0]) * 6) / 2), a.y + 12, acts[i][0],
-                 acts[i][1], i == 3 ? C.back : C.widget, 1);
+        gcard(a.x, a.y, a.w, a.h, acts[i][1]);
+        if (i < 2)
+            lcd_text_c(a.x + int(a.w / 2) + 2, a.y + 11, acts[i][0],
+                       acts[i][1], C.widget, 1);
+        else
+            draw_back_arrow(a.x + int(a.w / 2) + 2, a.y + 8);
     }
     lcd_flush();
 }
@@ -6236,7 +6641,23 @@ function mqtt_cfg() {
         port: g("port", "1883"),
         user: g("user", ""),
         pass: g("pass", ""),
+        period: g("period", "60"),
+        prefix: g("prefix", "almond3s"),
+        node: g("node", ""),
+        homed_prefix: g("homed_prefix", "homed"),
+        control: g("control", "off"),
+        retain: g("retain", "0") == "1",
     };
+}
+
+// Управление органами: выключено, темы Home Assistant, темы HOMEd или оба
+// набора сразу. Ходит по кругу тапом, отдельного экрана не заслуживает.
+let MQTT_CTL = [ "off", "ha", "homed", "both" ];
+function mqtt_ctl_label(v) {
+    if (v == "ha") return "HA";
+    if (v == "homed") return "HOMEd";
+    if (v == "both") return tr("both");
+    return tr("off");
 }
 
 function mqtt_set(k, v) {
@@ -6245,19 +6666,37 @@ function mqtt_set(k, v) {
     ucur.commit("almond3s");
 }
 
+// Адрес брокера длинный - ему целая строка; остальное короткое и живёт по две
+// клетки в ряд, иначе восемь полей на экран не помещаются.
 let MQTT_FIELDS = [
-    { key: "host", label: "Broker", hint: "адрес или имя" },
-    { key: "port", label: "Port",   hint: "по умолчанию 1883" },
-    { key: "user", label: "User",   hint: "если брокер требует" },
-    { key: "pass", label: "Password", hint: "хранится в настройках" },
+    { key: "host",         label: "Broker",   hint: "адрес или имя" },
+    { key: "port",         label: "Port",     hint: "1883" },
+    { key: "period",       label: "Period",   hint: "60" },
+    { key: "user",         label: "User",     hint: "нет" },
+    { key: "pass",         label: "Password", hint: "нет" },
+    { key: "prefix",       label: "Topic",    hint: "almond3s" },
+    { key: "node",         label: "Node",     hint: "имя хоста" },
+    { key: "homed_prefix", label: "HOMEd",    hint: "homed" },
 ];
 
 function mqtt_row(i) {
-    return { x: GX, y: GY + i * 30, w: GW, h: 26 };
+    if (i == 0) return { x: GX, y: GY, w: GW, h: 26 };
+    let k = i - 1;
+    return { x: GX + (k % 2) * (GCOL + GG), y: 52 + int(k / 2) * 28, w: GCOL, h: 26 };
 }
 
+function mqtt_ctl_btn() {
+    return { x: GX + GCOL + GG, y: 136, w: GCOL, h: 26 };
+}
+
+// Нижняя строка делится: слева выключатель публикации, справа retain - он
+// прижат к ней по смыслу, оба про то, как мы отдаём состояние наружу.
 function mqtt_toggle_btn() {
-    return { x: GX, y: BACK_Y - 38, w: GW, h: 32 };
+    return { x: GX, y: BACK_Y - 40, w: 200, h: 32 };
+}
+
+function mqtt_retain_btn() {
+    return { x: GX + 208, y: BACK_Y - 40, w: 96, h: 32 };
 }
 
 function draw_mqtt_page() {
@@ -6266,23 +6705,40 @@ function draw_mqtt_page() {
     let c = mqtt_cfg();
     for (let i = 0; i < length(MQTT_FIELDS); i++) {
         let r = mqtt_row(i), f = MQTT_FIELDS[i];
-        let v = f.key == "host" ? c.host : (f.key == "port" ? c.port :
-                (f.key == "user" ? c.user : c.pass));
+        let v = c[f.key] ?? "";
         let shown = f.key == "pass" && v != ""
             ? substr("************", 0, length(v) > 12 ? 12 : length(v))
             : v;
         lcd_rect(r.x, r.y, r.w, r.h, C.widget);
         lcd_rect(r.x, r.y, 3, r.h, v != "" ? C.cyan : C.dim);
         lcd_text(r.x + 12, r.y + 10, tr(f.label), C.gray, C.widget, 1);
-        lcd_text(r.x + 96, r.y + 6, shown != "" ? tcut(shown, 20) : tr(f.hint),
-                 shown != "" ? C.white : C.dim, C.widget, shown != "" ? 2 : 1);
+        if (i == 0)
+            lcd_text(r.x + 96, r.y + 6, shown != "" ? tcut(shown, 20) : tr(f.hint),
+                     shown != "" ? C.white : C.dim, C.widget, shown != "" ? 2 : 1);
+        else
+            lcd_text_r(r.x + r.w - 10, r.y + 10, shown != "" ? tcut(shown, 12) : tr(f.hint),
+                       shown != "" ? C.white : C.dim, C.widget, 1);
     }
+
+    let cb = mqtt_ctl_btn(), con = (c.control != "off");
+    lcd_rect(cb.x, cb.y, cb.w, cb.h, C.widget);
+    lcd_rect(cb.x, cb.y, 3, cb.h, con ? C.green : C.dim);
+    lcd_text(cb.x + 12, cb.y + 10, tr("Control"), C.gray, C.widget, 1);
+    lcd_text_r(cb.x + cb.w - 10, cb.y + 10, mqtt_ctl_label(c.control),
+               con ? C.green : C.dim, C.widget, 1);
+    let rb2 = mqtt_retain_btn();
+    lcd_rect(rb2.x, rb2.y, rb2.w, rb2.h, C.widget);
+    lcd_rect(rb2.x, rb2.y, 3, rb2.h, c.retain ? C.cyan : C.dim);
+    lcd_text(rb2.x + 12, rb2.y + 5, "Retain", C.gray, C.widget, 1);
+    lcd_text(rb2.x + 12, rb2.y + 18, c.retain ? tr("on") : tr("off"),
+             c.retain ? C.cyan : C.dim, C.widget, 1);
+
     let b = mqtt_toggle_btn();
     let can = c.host != "";
     lcd_rect(b.x, b.y, b.w, b.h, C.widget);
     lcd_rect(b.x, b.y, 3, b.h, c.on ? C.green : (can ? C.gray : C.dim));
     let lab = c.on ? tr("publishing on") : (can ? tr("publishing off") : tr("set broker address first"));
-    lcd_text(b.x + int((b.w - tlen(lab) * 6) / 2), b.y + 12, lab,
+    lcd_text_c(b.x + int(b.w / 2), b.y + 12, lab,
              c.on ? C.green : (can ? C.white : C.dim), C.widget, 1);
     draw_back();
     lcd_flush();
@@ -6344,7 +6800,7 @@ function draw_zigset_page() {
              c.beacon ? (mesh ? C.cyan : C.green) : C.gray, C.widget, 2);
     let hint2 = c.beacon ? (mesh ? tr("via Zigbee network") : tr("standalone, no network"))
                          : tr("chip free for other software");
-    lcd_text(bb.x + bb.w - 11 - tlen(hint2) * 6, bb.y + 9, hint2, C.dim, C.widget, 1);
+    lcd_text_r(bb.x + bb.w - 11, bb.y + 9, hint2, C.dim, C.widget, 1);
     for (let i = 0; i < length(rows); i++) {
         let r = zigset_row(i);
         lcd_rect(r.x, r.y, r.w, r.h, C.widget);
@@ -6389,7 +6845,7 @@ function draw_zigset_page() {
     } else if (st.zig?.flash_done && (time() - st.zig.flash_done) < 20) {
         hint = tr("Chip updated");
     }
-    lcd_text(GX + 12, GY + 5 * 27 + 1, hint, C.dim, C.bg, 1);
+    lcd_text(GX + 12, GY + 5 * 27 + 1, hint, C.ontop_dim, C.bg, 1);
     let pj = zig_json(ZIG_PEERS);
     let vs = null, vnum = 0;
     let cm = pj?.chip ? match(pj.chip, /EZSP v([0-9]+) ([0-9.]+)/) : null;
@@ -6402,7 +6858,7 @@ function draw_zigset_page() {
         }
     }
     if (vs != null)
-        lcd_text(GX + GW - 11 - tlen(vs) * 6, GY + 5 * 27 + 1, vs,
+        lcd_text_r(GX + GW - 11, GY + 5 * 27 + 1, vs,
                  vnum >= 8 ? C.green : C.orange, C.bg, 1);
 
     let joined = stt?.state == 2;
@@ -6568,7 +7024,7 @@ function draw_dbtn(r, ms, key) {
     if (!pinging) lcd_rect(b.x, b.y + b.h - 2, b.w, 2, C.border);   // кант «кнопки»
     let txt = pinging ? "..." : vpn_delay_txt(ms);
     let col = pinging ? C.cyan : vpn_delay_col(ms);
-    lcd_text(b.x + int((b.w - tlen(txt) * 6) / 2) + o, b.y + 6 + o, txt, col, bg, 1);
+    lcd_text_c(b.x + int(b.w / 2) + o, b.y + 6 + o, txt, col, bg, 1);
 }
 
 // Запустить пинг В ФОНЕ: команда пишет done-файл по завершении, UI опрашивает
@@ -6660,9 +7116,9 @@ function draw_speedtest_page() {
     if (running && disp_e > 0) {
         let fw = int(cw * disp_e / secs); if (fw > cw) fw = cw;
         if (up) { lcd_rect(cx + cw - fw, cy, fw, ch, "#122E45"); bord = "#0095FF"; }
-        else    { lcd_rect(cx, cy, fw, ch, "#1A3027"); bord = "#2EA043"; }
+        else    { lcd_rect(cx, cy, fw, ch, "#1A3027"); bord = "#0E9A6C"; }
     } else if (running) {
-        bord = up ? "#0095FF" : "#2EA043";
+        bord = up ? "#0095FF" : "#0E9A6C";
     }
     rborder(cx, cy, cw, ch, bord);
     rborder(cx + 1, cy + 1, cw - 2, ch - 2, bord);
@@ -6675,8 +7131,8 @@ function draw_speedtest_page() {
     let ph = running ? (up ? tr("Upload") : tr("Download"))
                      : (int(+(sp.ok ?? 0)) ? tr("Done") : (sp.cancelled ? tr("Stopped") : ""));
     if (ph != "")
-        lcd_text(cx + cw - 12 - tlen(ph) * 6, cy + 10,
-                 ph, running ? (up ? "#0095FF" : "#2EA043") : C.gray, "none", 1);
+        lcd_text_r(cx + cw - 12, cy + 10,
+                 ph, running ? (up ? "#0095FF" : "#0E9A6C") : C.gray, "none", 1);
 
     // Значения: живое число - в текущей фазе, второе - последнее известное.
     let dl, ul, dl_hot, ul_hot;
@@ -6685,7 +7141,7 @@ function draw_speedtest_page() {
     else                    { dl = sp.down_mbps; ul = sp.up_mbps; }
 
     let ds = spd_num(dl), us = spd_num(ul);
-    draw_tri_down(cx + 14, cy + 42, "#2EA043");
+    draw_tri_down(cx + 14, cy + 42, "#0E9A6C");
     lcd_text(cx + 30, cy + 34, ds, dl_hot ? C.white : C.gray, "none", 3);
     lcd_text(cx + 30 + tlen(ds) * 18 + 6, cy + 42, tr("Mbps"), C.dim, "none", 1);
 
@@ -6744,8 +7200,8 @@ function draw_speedtest_settings_page() {
     let cx = GX + st.ox;
     let cfg = st.spd_cfg ?? { dl: "", ul: "" };
 
-    lcd_text(cx + 4, 28, tr("Download"), C.dim, C.bg, 1);
-    lcd_text(cx + 158, 28, tr("Upload"), C.dim, C.bg, 1);
+    lcd_text(cx + 4, 28, tr("Download"), C.ontop_dim, C.bg, 1);
+    lcd_text(cx + 158, 28, tr("Upload"), C.ontop_dim, C.bg, 1);
 
     for (let i = 0; i < length(SPD_DL); i++) {
         let sel = SPD_DL[i][1] == cfg.dl, r = spd_dl_rect(i);
@@ -6808,7 +7264,7 @@ function draw_vpn_log() {
     if (maxrows < 1) maxrows = 1;
     let lines = vpn_log_lines(maxchars);
     if (length(lines) == 0) {
-        lcd_text(GX + 4, y0, tr("Waiting for log..."), C.dim, C.bg, 1);
+        lcd_text(GX + 4, y0, tr("Waiting for log..."), C.ontop_dim, C.bg, 1);
     } else {
         let start = length(lines) > maxrows ? length(lines) - maxrows : 0;
         let ry = y0;
@@ -6831,7 +7287,7 @@ function draw_vpn_page() {
         gcard(GX, GY, GW, 44, C.dim);
         lcd_text(GX + 12, GY + 8, "SSClash", C.gray, C.widget, 2);
         lcd_text(GX + 12, GY + 26, tr("SSClash not installed"), C.dim, C.widget, 1);
-        lcd_text(GX + 4, GY + 60, tr("Install: opkg/apk add luci-app-ssclash"), C.dim, C.bg, 1);
+        lcd_text(GX + 4, GY + 60, tr("Install: opkg/apk add luci-app-ssclash"), C.ontop_dim, C.bg, 1);
         draw_back();
         lcd_flush();
         return;
@@ -6903,7 +7359,7 @@ function draw_vpn_page() {
         // /version) - показываем лог как «загрузку»; таймер добьёт группы и
         // покажет карточки. «Нет групп» - только если так и не появились (~30с).
         if ((st.vpn_gwait ?? 0) < 15) { draw_vpn_log(); return; }
-        lcd_text(GX + 4, GY + 62, tr("No switchable groups"), C.dim, C.bg, 1);
+        lcd_text(GX + 4, GY + 62, tr("No switchable groups"), C.ontop_dim, C.bg, 1);
         draw_back();
         lcd_flush();
         return;
@@ -6970,7 +7426,7 @@ function draw_night_page() {
     draw_header(tr("Display"));
 
     let c = night_cfg();
-    lcd_text(20, 36, tr("NIGHT MODE"), C.gray, C.bg, 1);
+    lcd_text(20, 36, tr("NIGHT MODE"), C.ontop, C.bg, 1);
     let nb = night_btn();
     lcd_rect(nb.x, nb.y, nb.w, nb.h, C.widget);
     lcd_rect(nb.x, nb.y, 3, nb.h, c.on ? C.green : C.dim);
@@ -6981,32 +7437,38 @@ function draw_night_page() {
     for (let r = 0; r < 2; r++) {
         let m = hour_btn(r, -1), vb = hour_btn(r, 0), pl = hour_btn(r, 1);
         let hv = sprintf("%02d", r == 0 ? c.from : c.to);
-        lcd_text(24, vb.y + 16, r == 0 ? tr("From") : tr("To"), C.gray, C.bg, 2);
+        lcd_text(24, vb.y + 16, r == 0 ? tr("From") : tr("To"), C.ontop, C.bg, 2);
+        // Знаки кеглем 4 - это клетка 32px, ровно в высоту плашки: со старым
+        // смещением +10 они свисали ниже неё. Центрируем и по вертикали, и по
+        // горизонтали, число тоже перестаёт липнуть к низу.
         lcd_rect(m.x, m.y, m.w, m.h, C.widget);
-        lcd_text(m.x + 18, m.y + 10, "-", C.accent, C.widget, 4);
+        lcd_text(m.x + int((m.w - 24) / 2), m.y + int((m.h - 32) / 2), "-",
+                 C.accent, C.widget, 4);
         lcd_rect(vb.x, vb.y, vb.w, vb.h, C.widget);
-        lcd_text(vb.x + int((vb.w - tlen(hv) * 18) / 2), vb.y + 8, hv, hcol, C.widget, 3);
+        lcd_text(vb.x + int((vb.w - tlen(hv) * 18) / 2), vb.y + int((vb.h - 24) / 2),
+                 hv, hcol, C.widget, 3);
         lcd_rect(pl.x, pl.y, pl.w, pl.h, C.widget);
-        lcd_text(pl.x + 18, pl.y + 10, "+", C.accent, C.widget, 4);
+        lcd_text(pl.x + int((pl.w - 24) / 2), pl.y + int((pl.h - 32) / 2), "+",
+                 C.accent, C.widget, 4);
     }
 
-    lcd_text(24, 138, tr("LIGHT, %"), C.gray, C.bg, 1);
+    lcd_text(24, 138, tr("LIGHT, %"), C.ontop, C.bg, 1);
     for (let i = 0; i < length(NIGHT_BRIGHT_STEPS); i++) {
         let b = nbright_btn(i), sel = (NIGHT_BRIGHT_STEPS[i] == c.bright);
         lcd_rect(b.x, b.y, b.w, b.h, C.widget);
         lcd_rect(b.x, b.y, 3, b.h, sel ? C.green : C.border);
         let t = sprintf("%d", NIGHT_BRIGHT_STEPS[i]);
-        lcd_text(b.x + int((b.w - tlen(t) * 6) / 2) + 2, b.y + 10, t,
+        lcd_text_c(b.x + int(b.w / 2), b.y + 10, t,
                  sel ? C.white : C.gray, C.widget, 1);
     }
 
-    lcd_text(24, 164, tr("WARM, %"), C.gray, C.bg, 1);
+    lcd_text(24, 164, tr("WARM, %"), C.ontop, C.bg, 1);
     for (let i = 0; i < length(NIGHT_WARM_STEPS); i++) {
         let b = nwarm_btn(i), sel = (NIGHT_WARM_STEPS[i] == nwarm_cfg());
         lcd_rect(b.x, b.y, b.w, b.h, C.widget);
         lcd_rect(b.x, b.y, 3, b.h, sel ? "#F0A868" : C.border);
         let t = NIGHT_WARM_STEPS[i] == 0 ? tr("off") : sprintf("%d", NIGHT_WARM_STEPS[i]);
-        lcd_text(b.x + int((b.w - tlen(t) * 6) / 2) + 2, b.y + 8, t,
+        lcd_text_c(b.x + int(b.w / 2), b.y + 8, t,
                  sel ? C.white : C.gray, C.widget, 1);
     }
 
@@ -7119,7 +7581,7 @@ function draw_cell_page() {
         let rd = c.rxdiv ?? "";
         if (rd != "" && rd != "-") {
             let rdt = sprintf("RX div: %s", rd);
-            lcd_text(cx + cw - 10 - tlen(rdt) * 6, y2 + 6, rdt, C.gray, C.widget, 1);
+            lcd_text_r(cx + cw - 10, y2 + 6, rdt, C.gray, C.widget, 1);
         }
         if (ap == "" || ap == "-") {
             lcd_text(cx + 10, y2 + 22, tr("no data"), C.dim, C.widget, 1);
@@ -7275,7 +7737,7 @@ function draw_qr_page() {
 
     lcd_clear(C.bg);
     draw_header(st.qr_band ?? "WiFi");
-    lcd_text(10, 28, ssid, C.white, C.bg, 2);
+    lcd_text(10, 28, ssid, C.ontop_hi, C.bg, 2);
 
     if (rows) {
         let n = length(rows);
@@ -7286,7 +7748,7 @@ function draw_qr_page() {
         draw_qr(rows, int((LCD_W - side) / 2), 50, scale, "#000000", "#FFFFFF");
     } else {
         lcd_text(10, 100, tr("QR unavailable"), C.red, C.bg, 2);
-        lcd_text(10, 124, tr("install qrencode"), C.gray, C.bg, 1);
+        lcd_text(10, 124, tr("install qrencode"), C.ontop, C.bg, 1);
     }
 
     draw_back();
@@ -7348,7 +7810,7 @@ function draw_wifi_clients_page() {
     let list = wifi_band_list(band);
 
     if (!length(list)) {
-        lcd_text(cx + 10, 110, tr("No Clients"), C.dim, C.bg, 2);
+        lcd_text(cx + 10, 110, tr("No Clients"), C.ontop_dim, C.bg, 2);
         draw_back();
         lcd_flush();
         return;
@@ -7475,8 +7937,6 @@ function info_zoom_rows(i) {
     let d = st.data;
     let board = board_info();
     if (i == 0) {
-        let bat = d?.battery;
-        let bpct = int(+(bat?.percent ?? -1));
         let load = d?.cpu_load_raw ? sprintf("%.2f", d.cpu_load_raw / 65536.0)
                  : (d?.cpu_load ?? "?");
         let busy = int(+(d?.cpu_busy ?? -1));
@@ -7488,8 +7948,6 @@ function info_zoom_rows(i) {
             [ tr("Free RAM"), mtot > 0 ? sprintf("%d / %d MB", mfree, mtot)
                                        : sprintf("%d MB", mfree) ],
             [ "CPU", busy >= 0 ? sprintf("%s, %d%%", load, busy) : load ],
-            [ tr("Battery"), bpct >= 0 ? sprintf("%d%%%s", bpct,
-                  bat?.charging ? " +" : "") : "--" ],
         ];
     }
     if (i == 1) {
@@ -7519,23 +7977,21 @@ function draw_info_zoom(i) {
     lcd_clear(C.bg);
     draw_header(tr("System Info"));
     let rows = info_zoom_rows(i);
-    let y = 34;
-    for (let r = 0; r < length(rows); r++) {
+    let n = length(rows);
+    if (n < 1) { draw_back(); lcd_flush(); return; }
+    // Акцент берём от карточки, из которой развернули: цвет остаётся тем же,
+    // и видно, откуда пришёл. Раньше это был голый текст на фоне - крупный,
+    // но вне сетки и без опознавательных знаков.
+    let acc = i == 0 ? C.cyan : (i == 1 ? C.green : "#D2A8FF");
+    let h = gcard_h(n);
+    for (let r = 0; r < n; r++) {
+        let y = GVT + r * (h + GG);
         let lab = rows[r][0], val = rows[r][1];
-        if (r == 0) {
-            lcd_text(12, y, lab, C.gray, C.bg, 1);
-            if (val != "") {
-                y += 12;
-                lcd_text(12, y, tcut(val, 25), C.white, C.bg, 2);
-                y += 22;
-            } else {
-                y += 14;
-            }
-            continue;
-        }
-        lcd_text(12, y, lab, C.gray, C.bg, 1);
-        lcd_text(12, y + 11, tcut(val, 25), C.white, C.bg, 2);
-        y += 34;
+        gcard(GX, y, GW, h, acc);
+        lcd_text(GX + 13, y + int((h - 8) / 2), lab, C.gray, C.widget, 1);
+        if (val != null && val != "")
+            lcd_text_r(GX + GW - 12, y + int((h - 16) / 2), tcut(val, 20),
+                       C.white, C.widget, 2);
     }
     draw_back();
     lcd_flush();
@@ -7563,8 +8019,9 @@ function draw_info_page() {
     let drv_ver = drv_version();
 
     // Card 1: System
-    let y1 = GY + oy;
-    gcard(cx, y1, cw, 52, C.cyan);
+    let ch3 = gcard_h(3);
+    let y1 = GVT + oy;
+    gcard(cx, y1, cw, ch3, C.cyan);
     lcd_text(cx + 10, y1 + 6, tr("SYSTEM"), C.gray, C.widget, 1);
     let hw = board?.model ?? "";
     lcd_text(cx + 10, y1 + 20, hw != "" ? hw : "?", C.white, C.widget, 1);
@@ -7575,7 +8032,7 @@ function draw_info_page() {
     let cstr = sprintf(tr("CPU %s"), load);
     if (busy >= 0) cstr += sprintf(", %d%%", busy);
     if (cores > 0) cstr += sprintf(tr(", %d threads"), cores);
-    lcd_text(cx + cw - 10 - tlen(cstr) * 6, y1 + 20, cstr, C.accent, C.widget, 1);
+    lcd_text_r(cx + cw - 10, y1 + 20, cstr, C.accent, C.widget, 1);
 
     // Заряд отсюда убран: он и так виден в шапке каждой страницы, а
     // подробности живут на «Батарее» - дубль на карточке только шумел.
@@ -7587,11 +8044,11 @@ function draw_info_page() {
     let mtot  = int(+(d?.mem_total_mb ?? 0));
     let mstr = mtot > 0 ? sprintf(tr("free RAM %d/%dM"), mfree, mtot)
                         : sprintf(tr("free RAM %dM"), mfree);
-    lcd_text(cx + cw - 10 - tlen(mstr) * 6, y1 + 34, mstr, C.green, C.widget, 1);
+    lcd_text_r(cx + cw - 10, y1 + 34, mstr, C.green, C.widget, 1);
 
     // Card 2: Power
-    let y2 = y1 + 52 + GG;
-    gcard(cx, y2, cw, 52, C.green);
+    let y2 = y1 + ch3 + GG;
+    gcard(cx, y2, cw, ch3, C.green);
     lcd_text(cx + 10, y2 + 6, tr("STORAGE AND NETWORK"), C.gray, C.widget, 1);
 
     // Флеш: свободно из всего, с полосой занятости справа.
@@ -7602,11 +8059,8 @@ function draw_info_page() {
                  sprintf(tr("Flash %.1f of %.1f MB free"), s_free / 1024.0, s_tot / 1024.0),
                  C.white, C.widget, 1);
         let bw = 56, bx = cx + cw - 10 - bw;
-        let used = int(bw * (s_tot - s_free) / s_tot);
-        lcd_rect(bx, y2 + 20, bw, 7, C.dim);
-        if (used > 0)
-            lcd_rect(bx, y2 + 20, used, 7,
-                     used > bw * 8 / 10 ? C.red : C.green);
+        let pct = int((s_tot - s_free) * 100 / s_tot);
+        seg_bar(bx, y2 + 20, bw, 7, pct, pct > 80 ? C.red : C.green, C.btn, "flash");
     } else {
         lcd_text(cx + 10, y2 + 20, tr("Flash: no data"), C.dim, C.widget, 1);
     }
@@ -7615,17 +8069,17 @@ function draw_info_page() {
     lcd_text(cx + 10, y2 + 34, sprintf("LAN %s", lan?.ip ?? "?"), C.accent, C.widget, 1);
     let mac_s = uc(lan?.mac ?? "");
     if (mac_s != "")
-        lcd_text(cx + cw - 10 - tlen(mac_s) * 6, y2 + 34, mac_s, C.gray, C.widget, 1);
+        lcd_text_r(cx + cw - 10, y2 + 34, mac_s, C.gray, C.widget, 1);
 
     // Card 3: Software
-    let y3 = y2 + 52 + GG;
-    gcard(cx, y3, cw, 52, "#D2A8FF");
+    let y3 = y2 + ch3 + GG;
+    gcard(cx, y3, cw, ch3, "#D2A8FF");
     lcd_text(cx + 10, y3 + 6, tr("SOFTWARE"), C.gray, C.widget, 1);
     // Ссылка на телеграм-канал - напротив заголовка «ПРОШИВКА», справа.
-    lcd_text(cx + cw - 10 - tlen(TG_LINK) * 6, y3 + 6, TG_LINK, C.dim, C.widget, 1);
+    lcd_text_r(cx + cw - 10, y3 + 6, TG_LINK, C.dim, C.widget, 1);
     lcd_text(cx + 10, y3 + 20, sprintf("OpenWrt %s", board?.release?.version ?? "?"), C.white, C.widget, 1);
     let kstr = sprintf(tr("Kernel %s"), board?.kernel ?? "?");
-    lcd_text(cx + cw - 10 - tlen(kstr) * 6, y3 + 20, kstr, C.dim, C.widget, 1);
+    lcd_text_r(cx + cw - 10, y3 + 20, kstr, C.dim, C.widget, 1);
 
     // Драйвер отдаёт дату сборки как 2026-08-13 - показываем по-русски.
     let dv = drv_ver;
@@ -7634,7 +8088,7 @@ function draw_info_page() {
     // Имя драйвера слева цветом, дата сборки - в правый серый столбец
     // между ядром и ссылкой.
     lcd_text(cx + 10, y3 + 32, "kmod-lcd-almond3s", C.accent, C.widget, 1);
-    lcd_text(cx + cw - 10 - tlen(dv) * 6, y3 + 32, dv, C.dim, C.widget, 1);
+    lcd_text_r(cx + cw - 10, y3 + 32, dv, C.dim, C.widget, 1);
 
     draw_back();
     lcd_flush();
@@ -7755,14 +8209,14 @@ function draw_geopick_page() {
     let raw = fs.readfile(GEO_JSON);
     if (!raw) {
         let msg = (time() - (st.geo_wait ?? 0) > 15) ? tr("City not found") : tr("Searching...");
-        lcd_text(20, 100, msg, C.gray, C.bg, 2);
+        lcd_text(20, 100, msg, C.ontop, C.bg, 2);
         draw_back(); lcd_flush(); return;
     }
     let j; try { j = json(raw); } catch (e) { j = {}; }
     let r = (type(j?.results) == "array") ? j.results : [];
     st.geo_res = r;
     if (length(r) == 0) {
-        lcd_text(20, 100, tr("City not found"), C.dim, C.bg, 2);
+        lcd_text(20, 100, tr("City not found"), C.ontop_dim, C.bg, 2);
         draw_back(); lcd_flush(); return;
     }
     let n = length(r); if (n > 6) n = 6;
@@ -7857,12 +8311,12 @@ function draw_ip_page() {
     let ping_v = int(+(d?.vpn?.ping_ms ?? -1));
     let pg_s = ping_g < 0 ? "FAIL" : sprintf("%dms", ping_g);
     let pv_s = ping_v < 0 ? "FAIL" : sprintf("%dms", ping_v);
-    lcd_text(4, y, sprintf("Google: %s  VPN: %s", pg_s, pv_s), C.white, C.bg, 1);
+    lcd_text(4, y, sprintf("Google: %s  VPN: %s", pg_s, pv_s), C.ontop_hi, C.bg, 1);
     y += 14;
 
     // LTE IP for reference
     let lip = d?.lte?.ip ?? "?";
-    lcd_text(4, y, sprintf("LTE IP: %s", lip), C.gray, C.bg, 1);
+    lcd_text(4, y, sprintf("LTE IP: %s", lip), C.ontop, C.bg, 1);
 
     draw_back();
     lcd_flush();
@@ -7897,19 +8351,20 @@ function draw_lte_page() {
     let REDGE = X + GW - 12;
     let rx = function(t) { return REDGE - tlen(t) * 6; };
 
-    let hw = int((GW - 6) / 2);
-    let RX2 = X + hw + 6;
+    // Половинки - та же колонка и тот же зазор, что у всех двухколоночных
+    // страниц: своя арифметика давала 149+6 и уводила правую колонку на 163.
+    let hw = GCOL;
+    let RX2 = X + GCOL + GG;
     let row2 = function(cx0, yy, label, val, lcol, vcol) {
         if (label != null && label != "")
             lcd_text(cx0 + 13, yy, label, lcol ?? C.gray, C.widget, 1);
-        if (val != null && val != "") {
-            let vx = cx0 + hw - 12 - tlen(val) * 6;
-            lcd_text(vx, yy, val, vcol ?? C.white, C.widget, 1);
-        }
+        if (val != null && val != "")
+            lcd_text_r(cx0 + hw - 12, yy, val, vcol ?? C.white, C.widget, 1);
     };
 
-    let ay = GY + oy;
-    gcard(X, ay, hw, 54, C.green);
+    let ch3 = gcard_h(3);
+    let ay = GVT + oy;
+    gcard(X, ay, hw, ch3, C.green);
     let model = l.modem ?? "-";
     if (tlen(model) > 15) {
         let w = split(model, " ");
@@ -7921,45 +8376,45 @@ function draw_lte_page() {
         : "-";
     let tc = temp >= 70 ? C.red : (temp >= 55 ? C.orange : (temp > 0 ? C.white : C.dim));
     let band = l.band ?? "";
-    row2(X, ay + 6, tr("Modem"), tcut(model, 13), null, C.white);
-    row2(X, ay + 18, tr("Band"),
+    row2(X, ay + 3, tr("Modem"), tcut(model, 13), null, C.white);
+    row2(X, ay + 15, tr("Band"),
          band != "" && band != "-" ? tcut(band, 8) : "-", null, C.accent);
-    row2(X, ay + 30, "SIM", slot > 0 ? sprintf("%d", slot) : "-", null, C.white);
-    row2(X, ay + 42, tr("Temp"), ts, null, tc);
+    row2(X, ay + 27, "SIM", slot > 0 ? sprintf("%d", slot) : "-", null, C.white);
+    row2(X, ay + 39, tr("Temp"), ts, null, tc);
 
-    gcard(RX2, ay, hw, 54, A_PINK);
+    gcard(RX2, ay, hw, ch3, A_PINK);
     let mode_s = rat_label(l.mode ?? "-");
     if (nca > 1) mode_s += sprintf(" %dCA", nca);
     let roam_on = int(+(l.roaming ?? 0)) > 0;
     let oper = l.operator ?? "";
     let phone = phone_fmt(l.phone);
-    row2(RX2, ay + 6, tr("Operator"),
+    row2(RX2, ay + 3, tr("Operator"),
          mode_s != "" && mode_s != "-" ? mode_s : "-", null, C.cyan);
-    row2(RX2, ay + 18, tcut(oper != "" && oper != "-" ? oper : "-", 14), null, C.white);
-    row2(RX2, ay + 30, phone != "" ? phone : "-", null, C.white);
-    row2(RX2, ay + 42, roam_on ? tr("ROAM") : tr("Quality"),
+    row2(RX2, ay + 15, tcut(oper != "" && oper != "-" ? oper : "-", 14), null, C.white);
+    row2(RX2, ay + 27, phone != "" ? phone : "-", null, C.white);
+    row2(RX2, ay + 39, roam_on ? tr("ROAM") : tr("Quality"),
          csq > 0 ? sprintf("%d/31", csq) : "-",
          roam_on ? C.orange : C.gray, C.gray);
 
-    let by = ay + 62;
-    gcard(X, by, GW, 54, C.cyan);
-    draw_metric_row(X + 10, by + 6,  GW - 20, "rsrp", "RSRP", rsrp);
-    draw_metric_row(X + 10, by + 18, GW - 20, "rsrq", "RSRQ", int(+(l.rsrq ?? 0)));
-    draw_metric_row(X + 10, by + 30, GW - 20, "sinr", "SINR", int(+(l.sinr ?? 0)));
-    draw_metric_row(X + 10, by + 42, GW - 20, "rssi", "RSSI", int(+(l.rssi ?? 0)));
+    let by = ay + ch3 + GG;
+    gcard(X, by, GW, ch3, C.cyan);
+    draw_metric_row(X + 10, by + 3,  GW - 20, "rsrp", "RSRP", rsrp);
+    draw_metric_row(X + 10, by + 15, GW - 20, "rsrq", "RSRQ", int(+(l.rsrq ?? 0)));
+    draw_metric_row(X + 10, by + 27, GW - 20, "sinr", "SINR", int(+(l.sinr ?? 0)));
+    draw_metric_row(X + 10, by + 39, GW - 20, "rssi", "RSSI", int(+(l.rssi ?? 0)));
 
-    let cy = by + 62;
+    let cy = by + ch3 + GG;
     let cell_id = function(v) {
         let n = int(+(v ?? 0));
         return n > 0 ? sprintf("%d", n) : "-";
     };
-    gcard(X, cy, hw, 54, "#D2A8FF");
-    row2(X, cy + 6, tr("Cell"), null);
-    row2(X, cy + 18, "PCI", cell_id(u?.pci));
-    row2(X, cy + 30, "EARFCN", cell_id(l.earfcn));
-    row2(X, cy + 42, "eNB", cell_id(u?.enb_id));
+    gcard(X, cy, hw, ch3, "#D2A8FF");
+    row2(X, cy + 3, tr("Cell"), null);
+    row2(X, cy + 15, "PCI", cell_id(u?.pci));
+    row2(X, cy + 27, "EARFCN", cell_id(l.earfcn));
+    row2(X, cy + 39, "eNB", cell_id(u?.enb_id));
 
-    gcard(RX2, cy, hw, 54, A_TEAL);
+    gcard(RX2, cy, hw, ch3, A_TEAL);
     let mcc = int(+(u?.mcc ?? 0)), mnc = int(+(u?.mnc ?? 0));
     let plmn_s = "-";
     if (mcc > 0) {
@@ -7970,10 +8425,10 @@ function draw_lte_page() {
     }
     let ip_s = l.ip ?? "";
     let conn_s = conn_fmt(l.conn_time) ?? "";
-    row2(RX2, cy + 6, tr("Network"), null);
-    row2(RX2, cy + 18, "PLMN", plmn_s, null, C.gray);
-    row2(RX2, cy + 30, null, ip_s != "" ? ip_s : "-", null, C.green);
-    row2(RX2, cy + 42, tr("Online"), conn_s != "" ? conn_s : "-", null, C.gray);
+    row2(RX2, cy + 3, tr("Network"), null);
+    row2(RX2, cy + 15, "PLMN", plmn_s, null, C.gray);
+    row2(RX2, cy + 27, "IP", ip_s != "" ? ip_s : "-", null, C.green);
+    row2(RX2, cy + 39, tr("Online"), conn_s != "" ? conn_s : "-", null, C.gray);
 
     draw_back();
     lcd_flush();
@@ -7992,16 +8447,16 @@ function draw_traffic_zoom(i) {
     let tx_last = length(htx) > 0 ? htx[length(htx) - 1] : 0;
 
     lcd_text(12, 34, "RX", C.green, C.bg, 2);
-    lcd_text(44, 30, fmt_bytes(rx_last) + "/s", C.white, C.bg, 3);
+    lcd_text(44, 30, fmt_bytes(rx_last) + "/s", C.ontop_hi, C.bg, 3);
     lcd_text(12, 66, "TX", C.cyan, C.bg, 2);
-    lcd_text(44, 62, fmt_bytes(tx_last) + "/s", C.white, C.bg, 3);
+    lcd_text(44, 62, fmt_bytes(tx_last) + "/s", C.ontop_hi, C.bg, 3);
 
     let rm = arr_minmax(hrx);
     let tm = arr_minmax(htx);
     let mx = rm.max > tm.max ? rm.max : tm.max;
     if (mx < 512) mx = 512;
     let gy = 96, gh = 100, gx = 12, gw = 296;
-    lcd_rect(gx, gy, gw, gh, "#0B1220");
+    lcd_rect(gx, gy, gw, gh, C.graph);
     dash_spark(gx, gy, gw, gh, htx, C.cyan, 0, mx);
     dash_spark(gx, gy, gw, gh, hrx, C.green, 0, mx);
     draw_back();
@@ -8036,7 +8491,7 @@ function draw_traffic_page() {
     let tm = arr_minmax(hist.tx);
     let mx1 = rm.max > tm.max ? rm.max : tm.max;
     if (mx1 < 512) mx1 = 512;
-    lcd_rect(cx + 4, y1 + GTOP, cw - 8, GBOT - GTOP, "#0B1220");
+    lcd_rect(cx + 4, y1 + GTOP, cw - 8, GBOT - GTOP, C.graph);
     dash_spark(cx + 4, y1 + GTOP, cw - 8, GBOT - GTOP, hist.tx, C.cyan, 0, mx1);
     dash_spark(cx + 4, y1 + GTOP, cw - 8, GBOT - GTOP, hist.rx, C.green, 0, mx1);
 
@@ -8055,7 +8510,7 @@ function draw_traffic_page() {
     let btm = arr_minmax(hist.wan_tx);
     let mx2 = brm.max > btm.max ? brm.max : btm.max;
     if (mx2 < 512) mx2 = 512;
-    lcd_rect(cx + 4, y2 + GTOP, cw - 8, GBOT - GTOP, "#0B1220");
+    lcd_rect(cx + 4, y2 + GTOP, cw - 8, GBOT - GTOP, C.graph);
     dash_spark(cx + 4, y2 + GTOP, cw - 8, GBOT - GTOP, hist.wan_tx, C.cyan, 0, mx2);
     dash_spark(cx + 4, y2 + GTOP, cw - 8, GBOT - GTOP, hist.wan_rx, C.green, 0, mx2);
 
@@ -8222,6 +8677,7 @@ function draw_current() {
     case "sms1":      draw_sms_one(); break;
     case "night":     draw_night_page(); break;
     case "settings":  draw_settings_page(); break;
+    case "power":     draw_power_page(); break;
     case "led":       draw_led_page(); break;
     case "battery":   draw_battery_page(); break;
     case "savercfg":  draw_savercfg_page(); break;
@@ -8267,22 +8723,27 @@ let DASH_PAGES = [
         { k: "traffic", c: 0, r: 3, cw: 4, ch: 1 },
     ] },
     { title: "Modem", tiles: [
-        { k: "oper",    c: 0, r: 0, cw: 2, ch: 1 },
-        { k: "rsrp",    c: 2, r: 0, cw: 1, ch: 1 },
-        { k: "sinr",    c: 3, r: 0, cw: 1, ch: 1 },
-        { k: "rsrq",    c: 0, r: 1, cw: 1, ch: 1 },
-        { k: "csq",     c: 1, r: 1, cw: 1, ch: 1 },
-        { k: "band",    c: 2, r: 1, cw: 1, ch: 1 },
-        { k: "mtemp",   c: 3, r: 1, cw: 1, ch: 1 },
+        // Имя оператора уже подписывает карточку сигнала на «Обзоре» - здесь
+        // вместо дубля агрегация несущих и модель модема, их больше нигде нет.
+        { k: "ca",      c: 0, r: 0, cw: 2, ch: 1 },
+        { k: "band",    c: 2, r: 0, cw: 1, ch: 1 },
+        { k: "mtemp",   c: 3, r: 0, cw: 1, ch: 1 },
+        // Уровни одним рядом в привычном порядке: мощность, качество,
+        // отношение сигнал/шум и напоследок CSQ.
+        { k: "rsrp",    c: 0, r: 1, cw: 1, ch: 1 },
+        { k: "rsrq",    c: 1, r: 1, cw: 1, ch: 1 },
+        { k: "sinr",    c: 2, r: 1, cw: 1, ch: 1 },
+        { k: "csq",     c: 3, r: 1, cw: 1, ch: 1 },
         { k: "grsrp",   c: 0, r: 2, cw: 4, ch: 1 },
         { k: "mip",     c: 0, r: 3, cw: 2, ch: 1 },
         { k: "apn",     c: 2, r: 3, cw: 2, ch: 1 },
     ] },
     { title: "Machine", tiles: [
-        { k: "cpu",     c: 0, r: 0, cw: 2, ch: 1 },
+        // CPU занял и своё место, и освободившееся от VPN: ядрам нужна ширина
+        // под нормальные горизонтальные полосы.
+        { k: "cpu",     c: 0, r: 0, cw: 2, ch: 2 },
         { k: "mem",     c: 2, r: 0, cw: 1, ch: 1 },
         { k: "disk",    c: 3, r: 0, cw: 1, ch: 1 },
-        { k: "vpn",     c: 0, r: 1, cw: 2, ch: 1 },
         { k: "lan",     c: 2, r: 1, cw: 2, ch: 1 },
         { k: "gping",   c: 0, r: 2, cw: 4, ch: 1 },
         { k: "ver",     c: 0, r: 3, cw: 2, ch: 1 },
@@ -8329,9 +8790,28 @@ function dash_date() {
 // Номер текущей страницы держим явно, а не выводим из часов: выбор страницы
 // пальцем должен переводить ровно на неё и начинать её показ с полного
 // интервала, а дальше цикл продолжается уже от неё.
+// Пауза перелистывания заставки. Живёт в настройках, поэтому переживает и
+// выход из заставки, и перезапуск службы: человек оставил нужный экран - он
+// там и останется.
+function dash_hold() {
+    return (ucur ? ucur.get("almond3s", "display", "dash_hold") : null) == "1";
+}
+
+function dash_hold_set(on) {
+    if (!ucur) return;
+    ucur.set("almond3s", "display", "dash_hold", on ? "1" : "0");
+    ucur.commit("almond3s");
+}
+
 function dash_page() {
     let n = length(DASH_PAGES);
     if (st.dash_t0 == null) { st.dash_t0 = time(); st.dash_cur = 0; }
+    if (dash_hold()) {
+        // Отсчёт держим сдвинутым, иначе при снятии паузы страница
+        // перескочила бы сразу на несколько вперёд.
+        st.dash_t0 = time();
+        return st.dash_cur ?? 0;
+    }
     let steps = int((time() - st.dash_t0) / DASH_PAGE_SECS);
     if (steps > 0) {
         st.dash_cur = ((st.dash_cur ?? 0) + steps) % n;
@@ -8347,6 +8827,25 @@ function dash_goto(i) {
 
 // Пасхалка: точки-страницы внизу заставки выбирают страницу, а не будят экран.
 // Возвращает номер точки под пальцем или -1.
+// Кнопка паузы - в том же нижнем ряду, слева перед названием страницы, того
+// же размера, что и точки страниц.
+function dash_hold_btn(x, y, col) {
+    if (dash_hold()) {
+        // Значок показывает СОСТОЯНИЕ, а не действие: стоит пауза - видна
+        // пауза, идёт перелистывание - видно «играть».
+        lcd_rect(x, y, 2, 7, col);
+        lcd_rect(x + 4, y, 2, 7, col);
+    } else {
+        for (let i = 0; i < 4; i++)
+            lcd_rect(x + i, y + i, 1, 7 - i * 2, col);
+    }
+}
+
+function dash_hold_at(tx, ty) {
+    let ox = st.ox ?? 0, oy = st.oy ?? 0;
+    return ty >= 218 + oy && ty <= 240 + oy && tx >= 4 + ox && tx <= 22 + ox;
+}
+
 function dash_dot_at(tx, ty) {
     let ox = st.ox ?? 0, oy = st.oy ?? 0;
     let n = length(DASH_PAGES);
@@ -8374,7 +8873,7 @@ function dash_tile(t, d, o) {
     if (t.k == "clock") {
         dash_card(b, o, A_CYAN);
         lcd_text(b.x + 12, b.y + 14, clock_str(), o.fg, o.card, 4);
-        lcd_text(b.x + 12, b.y + 56, dash_date(), o.dim, o.card, 2);
+        lcd_text(b.x + 12, b.y + 56, dash_date(), o.mono ?? A_CYAN, o.card, 2);
         lcd_text(b.x + 12, b.y + 82, fmt_uptime(d?.uptime), o.dim, o.card, 1);
         return;
     }
@@ -8453,7 +8952,8 @@ function dash_tile(t, d, o) {
 
     if (t.k == "oper") {
         dash_simple(b, o, A_CYAN, tr("Operator"), tcut(d?.lte?.operator ?? "--", 22),
-                    tcut(sprintf("%s  %s", d?.lte?.mode ?? "", d?.lte?.modem ?? ""), 22), o.fg);
+                    tcut(sprintf("%s  %s", d?.lte?.mode ?? "", d?.lte?.modem ?? ""), 22),
+                    o.mono ?? A_CYAN);
         return;
     }
 
@@ -8520,13 +9020,23 @@ function dash_tile(t, d, o) {
     }
 
     if (t.k == "mip") {
-        dash_simple(b, o, A_TEAL, "IP", tcut(d?.lte?.ip ?? "--", 22), tr("Modem"), o.fg);
+        dash_simple(b, o, A_TEAL, "IP", tcut(d?.lte?.ip ?? "--", 22), tr("Modem"),
+                    o.mono ?? A_TEAL);
+        return;
+    }
+
+    if (t.k == "ca") {
+        let ca = d?.lte?.ca ?? "";
+        dash_simple(b, o, A_TEAL, tr("Aggregation"),
+                    ca != "" ? tcut(ca, 20) : "--",
+                    tcut(d?.lte?.modem ?? "", 22), o.mono ?? A_TEAL);
         return;
     }
 
     if (t.k == "apn") {
         dash_simple(b, o, A_PURPLE, "APN", tcut(d?.lte?.apn ?? "--", 22),
-                    tcut(sprintf("%s %s", tr("online"), d?.lte?.conn_time ?? ""), 22), o.fg);
+                    tcut(sprintf("%s %s", tr("online"), d?.lte?.conn_time ?? ""), 22),
+                    o.mono ?? A_PURPLE);
         return;
     }
 
@@ -8538,6 +9048,42 @@ function dash_tile(t, d, o) {
         if (n < 1 || b.w < 120) {
             dash_gauge(b, o, col, "CPU", busy >= 0 ? sprintf("%d%%", busy) : "--",
                        busy, col);
+            return;
+        }
+        // Высокая карточка - ядра ложатся горизонтально: полосы получаются
+        // длинными, и это те же секционные прогрессбары, что и везде.
+        if (b.h > 60) {
+            dash_card(b, o, col);
+            dash_lab(b, o, "CPU");
+            dash_val(b, o, busy >= 0 ? sprintf("%d%%", busy) : "--", col);
+            // Кто именно ест процессор - списком справа, по правому краю.
+            // Сборщик отдаёт долю от всей машины по приращению между тиками,
+            // поэтому список показывает текущих едоков, а не долгожителей.
+            let top = type(d?.cpu_top) == "array" ? d.cpu_top : [];
+            let half = b.x + int(b.w / 2) - 4;
+            // Строки по 9 пикселей от y+6: в карточку 106 пикселей высотой их
+            // помещается десять, ровно столько сборщик и присылает.
+            let rows = int((b.h - 12) / 9);
+            if (rows > 10) rows = 10;
+            for (let i = 0; i < length(top) && i < rows; i++) {
+                let nm = tcut(top[i].n ?? "", 12);
+                if (nm == "") continue;
+                lcd_text_r(b.x + b.w - 10, b.y + 6 + i * 9, nm,
+                           i == 0 ? (o.mono ?? col) : o.dim, o.card, 1);
+            }
+            let pitch = int((b.h - 52) / n);
+            if (pitch > 16) pitch = 16;
+            if (pitch < 9) pitch = 9;
+            let y1 = b.y + 46, bw2 = half - (b.x + 24);
+            if (length(top) == 0) bw2 = b.w - 36;
+            for (let i = 0; i < n; i++) {
+                let v = clampi(int(+(cores[i] ?? 0)), 0, 100);
+                let yy = y1 + i * pitch;
+                lcd_text(b.x + 12, yy - 1, sprintf("%d", i), o.dim, o.card, 1);
+                seg_bar(b.x + 24, yy, bw2, 6, v,
+                        o.mono ?? (v >= 85 ? A_ORANGE : A_CYAN),
+                        o.mono ? "#0A2A16" : C.btn, sprintf("cpuh%d", i));
+            }
             return;
         }
         dash_card(b, o, col);
@@ -8573,7 +9119,7 @@ function dash_tile(t, d, o) {
     }
 
     if (t.k == "up") {
-        dash_simple(b, o, A_ORANGE, tr("Uptime short"), fmt_uptime(d?.uptime), "", o.fg);
+        dash_simple(b, o, A_ORANGE, tr("Uptime short"), fmt_uptime_c(d?.uptime), "", o.fg);
         return;
     }
 
@@ -8581,7 +9127,7 @@ function dash_tile(t, d, o) {
         let la = +(d?.cpu_load ?? 0);
         let nc = int(+(d?.cpu_cores ?? 1)); if (nc < 1) nc = 1;
         dash_simple(b, o, la > nc ? C.orange : A_PURPLE, tr("Load"), sprintf("%.2f", la),
-                    tr("1 min"), la > nc ? C.orange : o.fg);
+                    tr("1 min"), la > nc ? C.orange : (o.mono ?? A_PURPLE));
         return;
     }
 
@@ -8600,14 +9146,16 @@ function dash_tile(t, d, o) {
     }
 
     if (t.k == "lan") {
-        dash_simple(b, o, A_CYAN, "LAN", tcut(d?.lan?.ip ?? "--", 22), tcut(d?.lan?.mac ?? "", 22), o.fg);
+        dash_simple(b, o, A_CYAN, "LAN", tcut(d?.lan?.ip ?? "--", 22),
+                    tcut(uc(d?.lan?.mac ?? ""), 22), o.mono ?? A_CYAN);
         return;
     }
 
     if (t.k == "ver") {
         let bi = board_info();
         dash_simple(b, o, A_PINK, tcut(bi?.model ?? "OpenWrt", 22),
-                    tcut(bi?.release?.version ?? "--", 22), tcut(bi?.kernel ?? "", 22), o.fg);
+                    tcut(bi?.release?.version ?? "--", 22), tcut(bi?.kernel ?? "", 22),
+                    o.mono ?? A_PINK);
         return;
     }
 }
@@ -8619,14 +9167,19 @@ function draw_dash_saver(o) {
         dash_tile(page.tiles[i], d, o);
 
     let ox = st.ox ?? 0, oy = st.oy ?? 0;
-    lcd_text(10 + ox, 230 + oy, tr(page.title), o.dim, o.bg, 1);
+    // Цвет тот же, что у активной точки страницы.
+    dash_hold_btn(9 + ox, 230 + oy, o.mono ?? "#FFFFFF");
+    lcd_text(22 + ox, 230 + oy, tr(page.title), o.mono ?? C.ontop, o.bg, 1);
     for (let i = 0; i < length(DASH_PAGES); i++) {
         let dx = LCD_W - 10 - (length(DASH_PAGES) - i) * 12 + ox;
-        lcd_rect(dx, 230 + oy, 7, 7, i == pg ? (o.mono ?? C.white) : (o.mono ? "#0A2A16" : C.dim));
+        // Активная точка своим цветом, а не цветом текста: в светлой теме текст
+        // почти чёрный, и точка выглядела чернильной кляксой на синем фоне.
+        lcd_rect(dx, 230 + oy, 7, 7, i == pg ? (o.mono ?? "#FFFFFF")
+                                            : (o.mono ? "#0A2A16" : C.dim));
     }
 }
 
-function draw_screensaver() {
+function draw_screensaver_body() {
     if (st.halting) return;
     if (st.saver_scene != null) return;   // сцену рисует kmod, ui.uc не вмешивается
     let t = localtime();
@@ -8649,7 +9202,7 @@ function draw_screensaver() {
     let bchg = (bat?.charging || bat?.full) && !bat?.no_battery;
     let fl = svflags();
     let row_o = { bg: bg, mono: night ? primary : null,
-                  empty: night ? "#0A2A16" : C.dim,
+                  empty: night ? "#0A2A16" : C.empty,
                   no_sig: !fl.sig, no_batt: !fl.batt, no_env: !fl.env };
 
     if (style == "dash") {
@@ -8861,11 +9414,18 @@ function backlight_path() {
 // сделает. Теперь любой вызов приводит систему к тому виду, который положен
 // прямо сейчас; обе операции идемпотентны, лишний вызов ничего не стоит.
 function night_apply(on) {
-    let warm = (on && nwarm_cfg() > 0) ? nwarm_cfg() : warm_cfg();
-    system(sprintf("almond3s-lcd warm %d >/dev/null 2>&1", warm));
+    // Уровень считает warm_now по текущему времени; on здесь только для Wi-Fi.
+    warm_apply();
 
     let ap_off = on && night_act("night_wifi");
     system(sprintf("%s/night_wifi.sh %s >/dev/null 2>&1 &", SCRIPTS, ap_off ? "off" : "on"));
+}
+
+// Ночная тема: если действие включено, ночью уходим в тёмную независимо от
+// дневной настройки. Оттенок пересчитываем следом - пары у тем свои.
+function night_theme_apply(n) {
+    theme_apply((n && night_act("night_theme")) ? "dark" : theme_cfg());
+    bg_tint_apply(BG_TINT);
 }
 
 function night_tick() {
@@ -8876,11 +9436,13 @@ function night_tick() {
         // доступа оставались выключенными на весь день: восстановить их было
         // некому. Скрипт при этом ничего не делает, если гасить было нечего.
         st.night_was = n;
+        night_theme_apply(n);
         night_apply(n);
         return;
     }
     if (n == st.night_was) return;
     st.night_was = n;
+    night_theme_apply(n);
     night_apply(n);
 }
 
@@ -8948,6 +9510,30 @@ function bl_level_now() {
     return lvl;
 }
 
+// Погода, Часы и Статусбар рисуем без градиента-подложки, какой бы он ни был
+// выбран: это виды с крупными цифрами на пустом поле, и цветная подложка под
+// ними только мешает. Тему при этом НЕ трогаем - на тёмной фон чёрный, на
+// светлой светлый. Виджеты и сцены не трогаем вовсе, у них своя логика.
+function saver_wants_flat(style) {
+    return style == "full" || style == "clock" || style == "line";
+}
+
+// Градиент гасим только на время кадра и возвращаем сразу после: тело заставки
+// успевает отправить кадр (lcd_flush внутри), а страницы продолжают рисоваться
+// с выбранной подложкой. Заодно пересчитываем цвета надписей поверх фона - на
+// плоской заливке они другие, чем на цветном градиенте.
+function draw_screensaver() {
+    if (!GRAD_ON || !saver_wants_flat(saver_style())) {
+        draw_screensaver_body();
+        return;
+    }
+    GRAD_ON = false;
+    ontop_apply();
+    draw_screensaver_body();
+    GRAD_ON = true;
+    ontop_apply();
+}
+
 function draw_saver_tick() {
     draw_screensaver();
 }
@@ -8999,6 +9585,11 @@ function go_page(p, is_back) {
         }
     }
     st.page = p;
+    // Запоминаем страницу в tmpfs: служба перезапускается при каждом обновлении
+    // пакета, и без этого интерфейс всякий раз поднимался на «Модеме», куда
+    // человек не просил. После настоящей перезагрузки файла нет - стартуем с
+    // умолчания, как и раньше.
+    fs.writefile("/tmp/.lcd_page", p);
     st.page_sig = "";   /* смена страницы - подпись заведомо другая */
     st.izoom = null;    /* полноэкранные карточки не переживают переходы */
     st.tzoom = null;
@@ -9066,11 +9657,11 @@ function action_splash(title, subtitle, color) {
 // Вдавленное состояние всё равно остаётся на экране, пока рисуется и
 // уезжает кадр новой страницы, - глазу хватает.
 function back_press_fx(label) {
-    lcd_rect(0, BACK_Y, LCD_W, 32, C.back_press);
+    lcd_rect(0, BACK_Y, LCD_W, 32, C.press);
     if (label != null)
-        lcd_text(int((LCD_W - tlen(label) * 12) / 2), BACK_Y + 11, label, C.white, C.back_press, 2);
+        lcd_text(int((LCD_W - tlen(label) * 12) / 2), BACK_Y + 11, label, C.white, C.press, 2);
     else
-        lcd_text(122, BACK_Y + 11, tr("< BACK"), C.white, C.back_press, 2);
+        draw_back_arrow(int(LCD_W / 2), BACK_Y + 11, C.press);
     lcd_flush();
     sock_poll(50);
 }
@@ -9251,6 +9842,7 @@ function handle_touch(tx, ty, tmove) {
         in_rect(tx, ty, 10, BACK_Y - 36, 300, 30)) {
         sta.band = tx < 160 ? 2 : 5;
         sta.nets = null;
+        sta.pg = 0;          // новый скан - снова с первой страницы
         // Радио диапазона выключено - включаем его и сканируем (а не «сетей
         // нет»): кнопка скана поднимает диапазон.
         let radio = radio_for_band(sta.band);
@@ -9265,8 +9857,7 @@ function handle_touch(tx, ty, tmove) {
     }
 
     if (st.page == "zigbee" && ty < BACK_Y) {
-        st.zig ??= { mode: "escan" };
-        if (st.zig.mode == "peers") {
+        if (zig_ui_mode() == "peers") {
             let rows = zig_rows();
             let ay = GY + 32;
             if (length(rows) > 0) {
@@ -9375,8 +9966,8 @@ function handle_touch(tx, ty, tmove) {
                 lcd_text(34, 108, tr("Do not power off."), C.gray, "#2A1A06", 1);
                 lcd_rect(40, 135, 110, 40, C.orange);
                 lcd_text(72, 148, tr("YES"), C.white, C.orange, 2);
-                lcd_rect(170, 135, 110, 40, "#0841");
-                lcd_text(202, 148, tr("NO"), C.white, "#0841", 2);
+                lcd_rect(170, 135, 110, 40, C.graph);
+                lcd_text(202, 148, tr("NO"), C.white, C.graph, 2);
                 lcd_flush();
                 let go = false;
                 for (let sec = 10; sec > 0; sec--) {
@@ -9515,10 +10106,27 @@ function handle_touch(tx, ty, tmove) {
             let f = MQTT_FIELDS[i];
             st.kbmode = "mqtt";
             st.kbfield = f.key;
-            st.mqttbuf = f.key == "host" ? c.host : (f.key == "port" ? c.port :
-                         (f.key == "user" ? c.user : c.pass));
-            st.citykb = { pg: f.key == "port" ? "symA" : "abc", caps: false };
+            st.mqttbuf = c[f.key] ?? "";
+            st.citykb = { pg: (f.key == "port" || f.key == "period") ? "symA" : "abc",
+                          caps: false };
             go_page("kbd");
+            return;
+        }
+        let cb = mqtt_ctl_btn();
+        if (in_rect(tx, ty, cb.x, cb.y, cb.w, cb.h)) {
+            let ix = 0;
+            for (let i = 0; i < length(MQTT_CTL); i++)
+                if (MQTT_CTL[i] == c.control) ix = i;
+            mqtt_set("control", MQTT_CTL[(ix + 1) % length(MQTT_CTL)]);
+            if (c.on) system("/etc/init.d/almond3s-mqtt restart");
+            draw_mqtt_page();
+            return;
+        }
+        let rb2 = mqtt_retain_btn();
+        if (in_rect(tx, ty, rb2.x, rb2.y, rb2.w, rb2.h)) {
+            mqtt_set("retain", c.retain ? "0" : "1");
+            if (c.on) system("/etc/init.d/almond3s-mqtt restart");
+            draw_mqtt_page();
             return;
         }
         let b = mqtt_toggle_btn();
@@ -9538,17 +10146,41 @@ function handle_touch(tx, ty, tmove) {
         return;
     }
 
+    // Тап по карточке VPN на странице соседа переключает его VPN. Раньше это
+    // была отдельная кнопка внизу; карточка и так показывает состояние, так
+    // что нажимать логично прямо по ней.
+    if (st.page == "zigpeer" && ty < BACK_Y) {
+        let vb = zp_box(2, 0, 1);
+        if (in_rect(tx, ty, vb.x, vb.y, vb.w, vb.h)) {
+            let d = zig_json(ZIG_PEERS);
+            let peers = type(d?.peers) == "array" ? d.peers : [];
+            let pr = peers[st.zig?.peer ?? 0];
+            let pname = pr?.name ?? "";
+            if (pname == "") return;
+            let von = int(+(pr?.m?.vpn ?? 0)) == 1;
+            let act = von ? "vpn_off" : "vpn_on";
+            system(sprintf("echo %s %s > /tmp/.zig_cmd", sh_quote(pname), sh_quote(act)));
+            toast(tcut(pname, 12) + ": " + (von ? tr("VPN off") : tr("VPN on")),
+                  C.white, "#06202a", 1);
+            draw_zigpeer_page();
+            return;
+        }
+        return;
+    }
+
     if (st.page == "zigpeer" && ty >= BACK_Y) {
         let d = zig_json(ZIG_PEERS);
         let peers = type(d?.peers) == "array" ? d.peers : [];
         let pr = peers[st.zig?.peer ?? 0];
         let pname = pr?.name ?? "";
-        let cell = int(tx / int(LCD_W / 4));
-        if (cell >= 3 || pname == "") { back_press_fx(); go_back(); return; }
-        let von = int(+(pr?.m?.vpn ?? 0)) == 1;
-        let act = cell == 0 ? (von ? "vpn_off" : "vpn_on") : (cell == 1 ? "modem" : "reboot");
-        let lab = cell == 0 ? (von ? tr("VPN off") : tr("VPN on"))
-                            : (cell == 1 ? tr("Modem") : tr("Reboot"));
+        let cell = -1;
+        for (let i = 0; i < 2; i++) {
+            let a = zp_act(i);
+            if (in_rect(tx, ty, a.x, a.y, a.w, a.h)) cell = i;
+        }
+        if (cell < 0 || pname == "") { back_press_fx(); go_back(); return; }
+        let act = cell == 0 ? "modem" : "reboot";
+        let lab = cell == 0 ? tr("Modem") : tr("Reboot");
         system(sprintf("echo %s %s > /tmp/.zig_cmd", sh_quote(pname), sh_quote(act)));
         toast(tcut(pname, 12) + ": " + lab, C.white, "#06202a", 1);
         draw_zigpeer_page();
@@ -9635,20 +10267,24 @@ function handle_touch(tx, ty, tmove) {
 
     if (st.page == "menu") {
         let items = menu_items();
-        let pages = int((length(items) + 4) / 5); if (pages < 1) pages = 1;
+        let pages = menu_pages();
+        // Листание переехало в общую полосу навигации: слева - страница назад,
+        // справа - вперёд, по кругу. Плитка-пейджер больше не нужна, и её место
+        // занял шестой пункт меню.
+        if (ty >= BACK_Y - 4) {
+            if (pages > 1) {
+                if (tx < 70) st.mpg = st.mpg > 1 ? st.mpg - 1 : pages;
+                else if (tx > LCD_W - 70) st.mpg = st.mpg < pages ? st.mpg + 1 : 1;
+                else return;
+                draw_menu();
+            }
+            return;
+        }
         for (let i = 1; i <= 6; i++) {
             let b = btn_pos(i);
             if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
             menu_press_fx(i);
-            if (i == 6) {
-                // Пейджер: левая треть - страница назад, остальное - вперёд.
-                let bp = btn_pos(6), third = int(bp.w / 3);
-                if (tx - bp.x < third) st.mpg = st.mpg > 1 ? st.mpg - 1 : pages;
-                else st.mpg = st.mpg < pages ? st.mpg + 1 : 1;
-                draw_menu();
-                return;
-            }
-            let idx = (st.mpg - 1) * 5 + (i - 1);
+            let idx = (st.mpg - 1) * 6 + (i - 1);
             if (idx >= length(items)) { draw_menu(); return; }
             switch (items[idx].act) {
             case "dashboard": netpri_refresh(); go_page("dashboard"); return;
@@ -9673,8 +10309,7 @@ function handle_touch(tx, ty, tmove) {
                 return;
             case "games":     go_page("games"); return;
             case "info":      go_page("info"); return;
-            case "reset":     menu_do_reset(); return;
-            case "power":     menu_do_power(); return;
+            case "power":     go_page("power"); return;
             }
             draw_menu();
             return;
@@ -9893,8 +10528,8 @@ function handle_touch(tx, ty, tmove) {
                     lcd_text(46, 95, tcut(l[i].label ?? "", 20), C.white, "#300000", 2);
                     lcd_rect(50, 125, 100, 35, C.red);
                     lcd_text(72, 133, tr("YES"), C.white, C.red, 2);
-                    lcd_rect(170, 125, 100, 35, "#0841");
-                    lcd_text(196, 133, tr("NO"), C.white, "#0841", 2);
+                    lcd_rect(170, 125, 100, 35, C.graph);
+                    lcd_text(196, 133, tr("NO"), C.white, C.graph, 2);
                     lcd_flush();
                     for (let sec = 8; sec > 0; sec--) {
                         system("sleep 1");
@@ -9979,9 +10614,28 @@ function handle_touch(tx, ty, tmove) {
     if (st.page == "stascan") {
         let nets = sta.nets;
         if (type(nets) != "array") return;
-        for (let i = 0; i < length(nets) && i < 6; i++) {
-            let b = stascan_row(i);
+        {
+            let mb = stascan_more_row();
+            if (stascan_pages(nets) > 1 && in_rect(tx, ty, mb.x, mb.y, mb.w, mb.h)) {
+                sta.pg = (stascan_page(nets) + 1) % stascan_pages(nets);
+                draw_stascan_page();
+                return;
+            }
+            let hb = stascan_hidden_row();
+            if (in_rect(tx, ty, hb.x, hb.y, hb.w, hb.h)) {
+                sta.sel = -1;              // отметка «сеть названа руками»
+                sta.hssid = "";
+                st.kbmode = "hssid";
+                sta.kb = { pg: "abc", caps: false };
+                go_page("kbd");
+                return;
+            }
+        }
+        let off = stascan_page(nets) * STASCAN_MAX;
+        for (let k = 0; k < STASCAN_MAX && off + k < length(nets); k++) {
+            let b = stascan_row(k);
             if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
+            let i = off + k;
             sta.sel = i;
             if (nets[i].enc) {
                 // Защищённая сеть - вводим пароль.
@@ -10008,7 +10662,8 @@ function handle_touch(tx, ty, tmove) {
         // СНИМАЕТ со стека (было go_page — оно КЛАДЁТ kbd обратно, отсюда петля
         // kbd<->stascan, из которой не выйти).
         if (ty >= BACK_Y) {
-            if (st.kbmode == "city" || st.kbmode == "mqtt") st.kbmode = "sta";
+            if (st.kbmode == "city" || st.kbmode == "mqtt" || st.kbmode == "hssid")
+                st.kbmode = "sta";
             go_back();
             return;
         }
@@ -10025,6 +10680,30 @@ function handle_touch(tx, ty, tmove) {
                 let name = trim(st.citybuf ?? "");
                 st.kbmode = "sta";
                 if (name != "") geo_search(name); else go_back();
+                return;
+            }
+            draw_kbd_page();
+            return;
+        }
+        if (st.kbmode == "ssid") {
+            kb_press_show(e, st.citykb, 92);
+            let a = kb_apply(e, st.citykb);
+            if (a.t == "char") st.ssidbuf = (st.ssidbuf ?? "") + a.ch;
+            else if (a.t == "del") st.ssidbuf = substr(st.ssidbuf ?? "", 0, length(st.ssidbuf ?? "") - 1);
+            else if (a.t == "space") st.ssidbuf = (st.ssidbuf ?? "") + " ";
+            else if (a.t == "enter") {
+                let name = trim(st.ssidbuf ?? "");
+                let sec = st.ssidsec;
+                st.kbmode = "sta";
+                if (name != "" && sec != null && ucur) {
+                    ucur.set("wireless", sec, "ssid", name);
+                    ucur.commit("wireless");
+                    // Перезапуск радио рвёт подключённых - предупреждаем тостом,
+                    // чтобы это не выглядело сбоем.
+                    toast(tr("Clients will reconnect"), C.orange, "#201406", 2);
+                    system("wifi reload >/dev/null 2>&1 &");
+                }
+                go_page("wifi");
                 return;
             }
             draw_kbd_page();
@@ -10049,13 +10728,37 @@ function handle_touch(tx, ty, tmove) {
             draw_kbd_page();
             return;
         }
+        if (st.kbmode == "hssid") {
+            kb_press_show(e, sta.kb, 92);
+            let a2 = kb_apply(e, sta.kb);
+            if (a2.t == "char") sta.hssid = (sta.hssid ?? "") + a2.ch;
+            else if (a2.t == "del")
+                sta.hssid = substr(sta.hssid ?? "", 0, length(sta.hssid ?? "") - 1);
+            else if (a2.t == "space") sta.hssid = (sta.hssid ?? "") + " ";
+            else if (a2.t == "enter") {
+                let nm = trim(sta.hssid ?? "");
+                if (nm == "") { draw_kbd_page(); return; }
+                sta.hssid = nm;
+                // Имя названо - дальше обычный ввод пароля. Открытую скрытую
+                // сеть тоже надо уметь: пустой пароль на ↵ даст encryption=none.
+                sta.pass = ""; sta.kb = { pg: "abc", caps: false };
+                st.kbmode = "sta";
+                draw_kbd_page();
+                return;
+            }
+            draw_kbd_page();
+            return;
+        }
         kb_press_show(e, sta.kb, 92);   // вдавить клавишу
         let a = kb_apply(e, sta.kb);
         if (a.t == "char") sta.pass += a.ch;
         else if (a.t == "del") sta.pass = substr(sta.pass, 0, length(sta.pass) - 1);
         else if (a.t == "space") sta.pass += " ";
         else if (a.t == "enter") {
-            let n = sta.nets[sta.sel];
+            // sel < 0 - имя названо руками (скрытая сеть), в списке скана его нет.
+            let n = sta.sel >= 0 ? sta.nets[sta.sel]
+                                 : { ssid: sta.hssid ?? "", band: sta.band };
+            if (n.ssid == "") { go_back(); return; }
             // В фоне, без заглушки (sta_apply пускает `network reload` фоном).
             sta_apply(n.ssid, sta.pass, n.band);
             sta_pending = { ssid: n.ssid, since: time() };
@@ -10189,25 +10892,6 @@ function handle_touch(tx, ty, tmove) {
     }
 
     if (st.page == "debug") {
-        let ib = dbg_inv_btn();
-        if (in_rect(tx, ty, ib.x, ib.y, ib.w, ib.h)) {
-            pancfg_set("pinv", pancfg().inv ? "0" : "1");
-            panel_apply();
-            draw_debug_page();
-            return;
-        }
-        let pnb = dbg_pinit_btn();
-        if (in_rect(tx, ty, pnb.x, pnb.y, pnb.w, pnb.h)) {
-            let nv = pancfg().init == "kernel" ? "boot" : "kernel";
-            pancfg_set("pinit", nv);
-            // Ре-инит выполняет поток отрисовки с задержкой до сотни мс и
-            // сбрасывает панельные регистры к дефолтам таблицы - ждём его
-            // и накатываем инверсию/гамму/CABC заново.
-            system(sprintf("almond3s-lcd reinit %s >/dev/null 2>&1; sleep 1", nv));
-            panel_apply();
-            draw_debug_page();
-            return;
-        }
         for (let i = 0; i < 4; i++) {
             let b = dbg_gamma_btn(i);
             if (in_rect(tx, ty, b.x, b.y, b.w, b.h)) {
@@ -10458,6 +11142,47 @@ function handle_touch(tx, ty, tmove) {
         return;
     }
 
+    if (st.page == "power") {
+        for (let i = 0; i < 3; i++) {
+            let b = power_btn(i);
+            if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
+            // Отклик нажатия рисуем сразу: скрипты гасят экран не мгновенно, и
+            // без него тап выглядел бы как «не сработало».
+            st.pwr_press = i;
+            draw_power_page();
+            st.pwr_press = null;
+            if (i == 0) {
+                // Лестница сброса уходит в фон одним скриптом (~14с): страница
+                // остаётся живой, модем поднимется сам.
+                run_script("lte_reset.sh", true);
+                toast(tr("Resetting modem..."), C.orange, "#201406", 3);
+                draw_power_page();
+                return;
+            }
+            if (i == 2) {
+                // Выключение при воткнутой зарядке бессмысленно: контроллер
+                // поднимет плату обратно, как только погаснет.
+                let pb = st.data?.battery;
+                if (pb?.charging && !pb?.no_battery) {
+                    toast(tr("Unplug charger first"), C.orange, "#201406", 2);
+                    draw_power_page();
+                    return;
+                }
+                st.halting = true;
+                action_splash(tr("Power off"), tr("Powering off..."), C.red);
+                lcd_flush();
+                run_script("poweroff.sh");
+                return;
+            }
+            st.halting = true;
+            action_splash(tr("Reboot"), tr("Rebooting..."), C.red);
+            lcd_flush();
+            run_script("reboot.sh");
+            return;
+        }
+        return;
+    }
+
     if (st.page == "settings") {
         for (let i = 0; i < length(SETTINGS); i++) {
             let b = settings_btn(i);
@@ -10472,6 +11197,14 @@ function handle_touch(tx, ty, tmove) {
         let wb = warm_btn();
         if (in_rect(tx, ty, wb.x, wb.y, wb.w, wb.h)) {
             warm_next();
+            draw_display_page();
+            return;
+        }
+        let cb = radius_btn();
+        if (in_rect(tx, ty, cb.x, cb.y, cb.w, cb.h)) {
+            RADIUS = (RADIUS + 1) % 5;
+            ucur.set("almond3s", "display", "radius", sprintf("%d", RADIUS));
+            ucur.commit("almond3s");
             draw_display_page();
             return;
         }
@@ -10497,18 +11230,25 @@ function handle_touch(tx, ty, tmove) {
             draw_display_page();
             return;
         }
-        let mb = micons_btn();
-        if (in_rect(tx, ty, mb.x, mb.y, mb.w, mb.h)) {
-            MICONS_ON = !MICONS_ON;
-            ucur.set("almond3s", "display", "micons", MICONS_ON ? "1" : "0");
+        let tb = theme_btn();
+        if (in_rect(tx, ty, tb.x, tb.y, tb.w, tb.h)) {
+            let nv = (THEME == "dark") ? "light" : "dark";
+            theme_apply(nv);
+            bg_tint_apply(BG_TINT);   // пары градиента у тем свои
+            ucur.set("almond3s", "display", "theme", nv);
             ucur.commit("almond3s");
             draw_display_page();
             return;
         }
-        let gb = grad_btn();
+        let gb = bg_btn();
         if (in_rect(tx, ty, gb.x, gb.y, gb.w, gb.h)) {
-            GRAD_ON = !GRAD_ON;
+            // Три состояния по кругу: выкл -> светлый -> тёмный.
+            if (!GRAD_ON) { GRAD_ON = true; bg_tint_apply("light"); }
+            else if (BG_TINT == "light") bg_tint_apply("dark");
+            else GRAD_ON = false;
+            ontop_apply();
             ucur.set("almond3s", "display", "gradient", GRAD_ON ? "1" : "0");
+            ucur.set("almond3s", "display", "bg", BG_TINT);
             ucur.commit("almond3s");
             draw_display_page();
             return;
@@ -10629,8 +11369,9 @@ function handle_touch(tx, ty, tmove) {
         let roms = rom_list();
         let cb = games_cfg_btn();
         if (in_rect(tx, ty, cb.x, cb.y, cb.w, cb.h)) { go_page("gset"); return; }
-        let pages = length(roms) > 4 ? int((length(roms) + 3) / 4) : 1;
-        let base = (st.gpg ?? 0) * 4;
+        let pages = length(roms) > GAMES_PER_PAGE
+                  ? int((length(roms) + GAMES_PER_PAGE - 1) / GAMES_PER_PAGE) : 1;
+        let base = (st.gpg ?? 0) * GAMES_PER_PAGE;
         if (pages > 1) {
             let a = games_arrow(-1), z = games_arrow(1);
             if (in_rect(tx, ty, a.x, a.y, a.w, a.h)) {
@@ -10640,7 +11381,7 @@ function handle_touch(tx, ty, tmove) {
                 st.gpg = (st.gpg + 1) % pages; draw_games_page(); return;
             }
         }
-        for (let i = 0; i < 4 && base + i < length(roms); i++) {
+        for (let i = 0; i < GAMES_PER_PAGE && base + i < length(roms); i++) {
             let r = games_btn(i);
             if (!in_rect(tx, ty, r.x, r.y, r.w, r.h)) continue;
             if (!fs.stat(NES_BIN)) {
@@ -10648,7 +11389,7 @@ function handle_touch(tx, ty, tmove) {
                 return;
             }
             lcd_rect(r.x, r.y, r.w, r.h, C.press);
-            lcd_text(r.x + 12, r.y + 9, tcut(roms[base + i].name, 46), C.white, C.press, 1);
+            lcd_text(r.x + 12, r.y + 9, tcut(roms[base + i].name, 20), C.white, C.press, 1);
             lcd_flush();
             // setsid: скрипт гасит нашу же службу, и без отвязки умрёт вместе с нами.
             system(sprintf("setsid %s/nes_run.sh %s >/dev/null 2>&1 &",
@@ -10666,7 +11407,7 @@ function handle_touch(tx, ty, tmove) {
             if (in_rect(tx, ty, b.x, b.y, b.w, b.h)) {
                 lcd_rect(b.x, b.y, b.w, b.h, C.press);
                 let ct = city_name(list[i]);
-                lcd_text(b.x + int((b.w - tlen(ct) * 6) / 2) + 2, b.y + 10 + 2,
+                lcd_text_c(b.x + int(b.w / 2), b.y + 10 + 2,
                          ct, C.white, C.press, 1);
                 lcd_flush();
                 apply_city(list[i]);
@@ -10704,6 +11445,15 @@ function handle_touch(tx, ty, tmove) {
 
         // Card 1: 2.4GHz (radio1)
         let y1 = GY + oy;
+        let n1 = wifi_name_box(y1);
+        if (in_rect(tx, ty, n1.x, n1.y, n1.w, n1.h) && ucur) {
+            st.ssidsec = "default_radio1";
+            st.ssidbuf = ucur.get("wireless", "default_radio1", "ssid") ?? "";
+            st.kbmode = "ssid";
+            st.citykb = { pg: "abc", caps: false };
+            go_page("kbd");
+            return;
+        }
         let q1 = qr_box(y1);
         if (in_rect(tx, ty, q1.x, q1.y, q1.w, q1.h)
             && ucur && !wifi_is_disabled("radio1", "default_radio1")) {
@@ -10728,6 +11478,15 @@ function handle_touch(tx, ty, tmove) {
 
         // Card 2: 5GHz (radio0)
         let y2 = y1 + 80 + GG;
+        let n2 = wifi_name_box(y2);
+        if (in_rect(tx, ty, n2.x, n2.y, n2.w, n2.h) && ucur) {
+            st.ssidsec = "default_radio0";
+            st.ssidbuf = ucur.get("wireless", "default_radio0", "ssid") ?? "";
+            st.kbmode = "ssid";
+            st.citykb = { pg: "abc", caps: false };
+            go_page("kbd");
+            return;
+        }
         let q2 = qr_box(y2);
         if (in_rect(tx, ty, q2.x, q2.y, q2.w, q2.h)
             && ucur && !wifi_is_disabled("radio0", "default_radio0")) {
@@ -10866,8 +11625,10 @@ function main() {
     // Настройки панели из uci - раньше комментарий у страницы «Дебаг»
     // обещал «накатываются при старте», но вызова здесь не было, и после
     // перезапуска службы инверсия/гамма/CABC/ШИМ молча слетали в дефолт.
-    if (pancfg().init == "kernel")
-        system("almond3s-lcd reinit kernel >/dev/null 2>&1; sleep 1");
+    // Ядерную таблицу инициализации больше не накатываем: она кладёт панель
+    // полосами. Если старая настройка залипла в конфиге - гасим её здесь,
+    // иначе аппарат ронялся бы на каждой загрузке.
+    if (pancfg().init == "kernel") pancfg_set("pinit", "boot");
     panel_apply();
 
     // Stop splash: ioctl(0) via flush
@@ -10883,7 +11644,8 @@ function main() {
     // скажут networkInit. Поднятая сеть иначе перестаёт отвечать на запросы
     // маяка, и соседи её не видят. Делаем это фоном при старте службы.
     system(sprintf("%s state > /tmp/lcd_zig_state.json 2>/dev/null &", ZIG_BIN));
-    st.page = "lte";
+    let last = fs.readfile("/tmp/.lcd_page");
+    st.page = (last != null && trim(last) != "") ? trim(last) : "lte";
     draw_current();
 
     // === uloop event-driven mode ===
@@ -11097,10 +11859,29 @@ function main() {
                 term_null = 0;
                 st.ltch = time();
                 bl_boost();
-                let dot = (st.screen == "screensaver" && !st.blank
-                           && saver_style() == "dash" && st.saver_scene == null)
-                         ? dash_dot_at(t.x, t.y) : -1;
-                if (dot >= 0) {
+                let on_saver = (st.screen == "screensaver" && !st.blank
+                                && saver_style() == "dash" && st.saver_scene == null);
+                let dot = on_saver ? dash_dot_at(t.x, t.y) : -1;
+                // Переключатель дёргаем только на НАСТОЯЩЕМ нажатии: пока
+                // палец лежит на стекле, драйвер шлёт события движения каждые
+                // 50 мс, и на них значок щёлкал десяток раз за одно касание.
+                // Плюс своя выдержка: резистивная панель дребезжит и повтором
+                // нажатия. Движение внутри кнопки ПОГЛОЩАЕМ и ничего не делаем -
+                // иначе оно проваливалось в ветку пробуждения и заставка
+                // уходила прямо под пальцем.
+                if (on_saver && dash_hold_at(t.x, t.y)) {
+                    if (!t.move) {
+                        let c = clock(true);
+                        let ms = c[0] * 1000 + int(c[1] / 1000000);
+                        if (st.hold_t == null || (ms - st.hold_t) > 600) {
+                            st.hold_t = ms;
+                            dash_hold_set(!dash_hold());
+                            st.dash_t0 = time();
+                            draw_saver_tick();
+                        }
+                    }
+                }
+                else if (dot >= 0) {
                     dash_goto(dot);
                     draw_saver_tick();
                 }

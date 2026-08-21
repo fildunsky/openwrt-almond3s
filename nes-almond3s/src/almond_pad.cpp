@@ -26,6 +26,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <signal.h>
+#include <sys/stat.h>
 
 #define PAD_PORT 8099
 
@@ -36,14 +37,24 @@
 #define PAD_RUN   "/tmp/.nes_run"
 #define MAX_CL   2
 
+/* Звук игры. Эмулятор пишет сюда сырые сэмплы 22050 Гц, моно, 16 бит; мы их
+   раздаём телефону теми же кадрами WebSocket, что и состояние пульта. Читающий
+   конец держим открытым, только пока звук кто-то просит: без читателя эмулятор
+   не сможет открыть трубу и не станет зря считать каналы APU. */
+#define SND_FIFO "/tmp/.nes_snd"
+#define SND_TAG  0xA0
+
 static int srv_fd = -1;
 static struct {
     int fd;
     int ws;        /* рукопожатие пройдено */
     unsigned char pad;
+    unsigned char snd;   /* телефон попросил звук */
     char in[1024];
     int  len;
 } cl[MAX_CL];
+
+static int snd_fd = -1;
 
 /* ---- SHA-1: нужен только для рукопожатия WebSocket ---- */
 struct sha1 { unsigned int h[5]; unsigned char buf[64]; unsigned long long n; int i; };
@@ -242,8 +253,22 @@ static const char PAGE[] =
 "return '<svg class=st viewBox=\"0 0 '+w+' 7\">'+o+'</svg>'}"
 "function say(t,ok){s.innerHTML='<i class=\"dot '+(ok?'g':'r')+'\"></i>'+pix(t)}"
 "function send(){if(ws&&ws.readyState==1)ws.send(new Uint8Array([st]))}"
+/* Звук браузер сам не заведёт - нужен жест. Первое нажатие на кнопку и есть
+   жест, поэтому запускаем оттуда. Держим запас около 120 мс: меньше - щелчки
+   на любой заминке в эфире, больше - заметное опоздание к картинке. */
+"var ac=null,ap=0,sw=0,hs=0;"
+"function snd(){if(!ac){try{ac=new (window.AudioContext||window.webkitAudioContext)()}"
+"catch(e){say('NO AUDIO',0);return}}"
+"if(ac.state=='suspended')ac.resume();"
+"sw=1;if(ws&&ws.readyState==1)ws.send(new Uint8Array([83,1]))}"
+"function play(v){if(!ac)return;var n=v.length>>1;if(!n)return;"
+"if(!hs){hs=1;say('SOUND',1)}"
+"var b=ac.createBuffer(1,n,22050),c=b.getChannelData(0),i,q;"
+"for(i=0;i<n;i++){q=v[i*2]|(v[i*2+1]<<8);if(q>32767)q-=65536;c[i]=q/32768}"
+"var t=ac.currentTime;if(ap<t+0.04)ap=t+0.12;if(ap>t+0.4)return;"
+"var o=ac.createBufferSource();o.buffer=b;o.connect(ac.destination);o.start(ap);ap+=b.duration}"
 "function bind(id){var e=document.getElementById(id),m=M[id];"
-"function on(ev){ev.preventDefault();if(st&m)return;st|=m;e.classList.add('on');send()}"
+"function on(ev){ev.preventDefault();snd();if(st&m)return;st|=m;e.classList.add('on');send()}"
 "function off(ev){ev.preventDefault();if(!(st&m))return;st&=~m;e.classList.remove('on');send()}"
 "e.addEventListener('touchstart',on,{passive:false});"
 "e.addEventListener('touchend',off,{passive:false});"
@@ -255,9 +280,10 @@ static const char PAGE[] =
 "document.addEventListener('touchend',function(){if(!document.querySelector('b:active')){"
 "st=0;send();var l=document.querySelectorAll('b.on');for(var i=0;i<l.length;i++)l[i].classList.remove('on')}});"
 "function conn(){ws=new WebSocket('ws://'+location.host+'/ws');ws.binaryType='arraybuffer';"
-"ws.onopen=function(){say('CONNECTED',1)};"
+"ws.onopen=function(){say('CONNECTED',1);if(sw)ws.send(new Uint8Array([83,1]))};"
 "ws.onclose=function(){say('RECONNECTING...',0);setTimeout(conn,1000)};"
 "ws.onmessage=function(m){var v=new Uint8Array(m.data);if(!v.length)return;"
+"if(v[0]==160){play(v.subarray(1));return}"
 "say(v.length>1&&!v[1]?'WAITING...':'PLAYER '+v[0],1)}}"
 "say('CONNECTING...',0);conn();"
 "</script>";
@@ -265,7 +291,53 @@ static const char PAGE[] =
 static void cl_close(int i)
 {
     if (cl[i].fd >= 0) close(cl[i].fd);
-    cl[i].fd = -1; cl[i].ws = 0; cl[i].pad = 0; cl[i].len = 0;
+    cl[i].fd = -1; cl[i].ws = 0; cl[i].pad = 0; cl[i].snd = 0; cl[i].len = 0;
+}
+
+/* Труба нужна ровно пока её кто-то слушает. */
+static void snd_sync(void)
+{
+    int want = 0;
+    for (int i = 0; i < MAX_CL; i++) if (cl[i].fd >= 0 && cl[i].snd) want = 1;
+    if (want && snd_fd < 0) {
+        mkfifo(SND_FIFO, 0666);
+        snd_fd = open(SND_FIFO, O_RDONLY | O_NONBLOCK);
+    } else if (!want && snd_fd >= 0) {
+        close(snd_fd);
+        snd_fd = -1;
+    }
+}
+
+/* Кадр длиннее 125 байт требует расширенной длины - у статуса её не было. */
+static void ws_send_bin(int i, const unsigned char *d, int n)
+{
+    unsigned char h[4];
+    if (cl[i].fd < 0 || !cl[i].ws) return;
+    h[0] = 0x82;
+    if (n < 126) {
+        h[1] = (unsigned char)n;
+        if (send(cl[i].fd, h, 2, MSG_NOSIGNAL | MSG_DONTWAIT) != 2) return;
+    } else {
+        h[1] = 126; h[2] = (unsigned char)(n >> 8); h[3] = (unsigned char)n;
+        if (send(cl[i].fd, h, 4, MSG_NOSIGNAL | MSG_DONTWAIT) != 4) return;
+    }
+    (void)!send(cl[i].fd, d, (size_t)n, MSG_NOSIGNAL | MSG_DONTWAIT);
+}
+
+/* Забрать готовые сэмплы и раздать. Не влезло в сокет - выбрасываем: тянуть
+   очередь звука дороже, чем пропустить его кусок. */
+static void snd_pump(void)
+{
+    static unsigned char buf[1025];
+    int n;
+
+    snd_sync();
+    if (snd_fd < 0) return;
+    buf[0] = SND_TAG;
+    n = (int)read(snd_fd, buf + 1, sizeof buf - 1);
+    if (n <= 0) return;
+    for (int i = 0; i < MAX_CL; i++)
+        if (cl[i].fd >= 0 && cl[i].ws && cl[i].snd) ws_send_bin(i, buf, n + 1);
 }
 
 int pad_net_init(void)
@@ -379,7 +451,10 @@ static void ws_frames(int i)
                 unsigned char* m = p + hdr - 4;
                 for (unsigned long long j = 0; j < plen; j++) d[j] ^= m[j & 3];
             }
-            if (plen >= 1) cl[i].pad = d[0];
+            /* Один байт - состояние кнопок. Два, начиная с 'S', - просьба
+               включить или выключить звук. */
+            if (plen == 1) cl[i].pad = d[0];
+            else if (plen >= 2 && d[0] == 'S') cl[i].snd = d[1] ? 1 : 0;
         }
         memmove(cl[i].in, p + hdr + plen, cl[i].len - hdr - plen);
         cl[i].len -= hdr + plen;
@@ -460,6 +535,8 @@ int main(void)
         b[0] = (unsigned char)pad_net_state(0);
         b[1] = (unsigned char)pad_net_state(1);
         (void)!pwrite(fd, b, sizeof b, 0);
+
+        snd_pump();
 
         game_running = (access(PAD_RUN, F_OK) == 0);
         if (game_running != last_run) {

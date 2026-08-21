@@ -82,16 +82,25 @@ static void qn_picture(unsigned short *dst, int stride)
    ресемплера при этом вдвое меньше, чем на 44. */
 #define QN_RATE 22050
 
+/* Частоту ставим один раз за сеанс. Выключателя у ядра нет вовсе, а ноль сюда
+   передавать нельзя: в Blip_Buffer::set_sample_rate стоит деление на неё, и
+   ядро падает по SIGFPE ровно в тот момент, когда слушатель отключился. */
+static int qn_rate_set;
+
 static int qn_audio_open(void)
 {
-    const char *err = emu->set_sample_rate(QN_RATE);
-    if (err) { fprintf(stderr, "quicknes: звук: %s\n", err); return 0; }
+    if (!qn_rate_set) {
+        const char *err = emu->set_sample_rate(QN_RATE);
+        if (err) { fprintf(stderr, "quicknes: звук: %s\n", err); return 0; }
+        qn_rate_set = 1;
+    }
     return QN_RATE;
 }
 
+/* Буфер оставляем включённым, но платформа продолжает его вычитывать вхолостую:
+   если перестать читать совсем, сэмплы копятся, и end_frame пишет за край. */
 static void qn_audio_close(void)
 {
-    emu->set_sample_rate(0);   /* 0 - ядро перестаёт считать звук вовсе */
 }
 
 static int qn_audio_read(short *buf, int max)

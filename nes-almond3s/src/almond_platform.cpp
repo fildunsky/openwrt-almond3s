@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <time.h>
+#include <errno.h>
 #include <dirent.h>
 #include <linux/input.h>
 #include <pthread.h>
@@ -448,75 +449,69 @@ static void draw_bars(void)
 /* ---- настройки ----
    Раньше их читало каждое ядро само, и настройка, добавленная к одному, во
    втором молчала. Теперь читает слой - ядро о них не знает. */
-/* Звук. На этой плате динамик висит на PIC, а не на звуковой шине, поэтому
-   выхода тут нет и по умолчанию звук выключен. Выключатель сделан заранее,
-   под железо с нормальным динамиком: сэмплы уходят в aplay, а он уже разбира-
-   ется с ALSA. Трубу держим неблокирующей и глотаем SIGPIPE - иначе стоило бы
-   aplay захлебнуться или умереть, и эмуляция встала бы вместе с ним. */
+/* Звук. Динамика с нормальным трактом на плате нет - пищалка висит на PIC и
+   длинную волну туда не отдать. Поэтому сэмплы уходят в трубу, а служба пульта
+   раздаёт их телефону по WebSocket: звук играет там, где и кнопки.
+
+   Труба открывается только на запись и только без блокировки. Пока никто не
+   слушает, читателя у неё нет, open честно отказывает - и мы даже не просим
+   ядро считать каналы. Слушатель ушёл - write отдаёт EPIPE, и мы выключаемся
+   обратно. Ровный темп картинки важнее целости звука: не влезло - выбросили. */
+#define SND_FIFO "/tmp/.nes_snd"
+
 static int sound_want;    /* чего просит настройка */
 static int sound_on;      /* что реально открыто */
-static FILE *snd_pipe;
 static int snd_fd = -1;
 static short snd_buf[4096];
-static int snd_no_out;    /* выхода нет - больше не пробуем и не сорим в лог */
+static time_t snd_retry;  /* не долбимся в трубу каждый кадр */
+static int snd_inited;    /* частоту ядру уже задавали */
+
+static void sound_stop(const nes_core_t *core)
+{
+    if (snd_fd >= 0) { close(snd_fd); snd_fd = -1; }
+    if (sound_on && core->audio_close) core->audio_close();
+    sound_on = 0;
+}
 
 static void sound_apply(const nes_core_t *core)
 {
-    char cmd[128];
     int rate;
 
-    if (sound_want == sound_on) return;
-
-    if (!sound_want) {
-        if (snd_pipe) { pclose(snd_pipe); snd_pipe = NULL; snd_fd = -1; }
-        if (core->audio_close) core->audio_close();
-        sound_on = 0;
-        return;
-    }
+    if (!sound_want) { if (sound_on) sound_stop(core); return; }
+    if (sound_on) return;
     if (!core->audio_open || !core->audio_read) {
         fprintf(stderr, "%s: звук: ядро его не отдаёт\n", core->name);
         sound_want = 0;
         return;
     }
-    /* popen отдаёт успех, даже если команды нет вовсе: оболочка стартует и
-       тут же умирает. Поэтому выход проверяем заранее сами, иначе настройка
-       рапортовала бы о включённом звуке в полной тишине - и ядро зря считало
-       бы каналы. */
-    if (snd_no_out) { sound_want = 0; return; }
-    if (access("/dev/snd", F_OK) != 0 ||
-        (access("/usr/bin/aplay", X_OK) != 0 && access("/bin/aplay", X_OK) != 0)) {
-        fprintf(stderr, "%s: звук: выхода нет (нужны /dev/snd и aplay)\n", core->name);
-        snd_no_out = 1;
-        sound_want = 0;
-        return;
-    }
-    rate = core->audio_open();
-    if (rate <= 0) { sound_want = 0; return; }
+    if (time(NULL) < snd_retry) return;
+    snd_retry = time(NULL) + 1;
 
-    snprintf(cmd, sizeof cmd,
-             "aplay -q -t raw -f S16_LE -c 1 -r %d - 2>/dev/null", rate);
-    snd_pipe = popen(cmd, "w");
-    if (!snd_pipe) {
-        fprintf(stderr, "%s: звук: aplay не запустился\n", core->name);
-        if (core->audio_close) core->audio_close();
-        sound_want = 0;
-        return;
-    }
-    snd_fd = fileno(snd_pipe);
-    fcntl(snd_fd, F_SETFL, O_NONBLOCK);
+    snd_fd = open(SND_FIFO, O_WRONLY | O_NONBLOCK);
+    if (snd_fd < 0) return;          /* пульт не слушает - ждём дальше */
+
+    rate = core->audio_open();
+    if (rate <= 0) { close(snd_fd); snd_fd = -1; sound_want = 0; return; }
     sound_on = 1;
-    fprintf(stderr, "%s: звук включён, %d Гц\n", core->name, rate);
+    snd_inited = 1;
+    fprintf(stderr, "%s: звук в пульт, %d Гц\n", core->name, rate);
 }
 
-/* Сэмплы отдаём в трубу как получится: не влезли - выбрасываем. Ровный темп
-   картинки важнее, чем целость звука на железе, которого пока нет. */
 static void sound_pump(const nes_core_t *core)
 {
     int n;
-    if (!sound_on) return;
+    if (!sound_on) {
+        /* Слушателя нет, но однажды заведённый буфер надо опустошать, иначе
+           сэмплы копятся и ядро пишет за край. Читаем и выбрасываем. */
+        if (snd_inited)
+            (void)core->audio_read(snd_buf, (int)(sizeof snd_buf / sizeof snd_buf[0]));
+        return;
+    }
     n = core->audio_read(snd_buf, (int)(sizeof snd_buf / sizeof snd_buf[0]));
-    if (n > 0 && snd_fd >= 0)
-        (void)!write(snd_fd, snd_buf, (size_t)n * sizeof snd_buf[0]);
+    if (n <= 0) return;
+    if (write(snd_fd, snd_buf, (size_t)n * sizeof snd_buf[0]) < 0
+        && errno != EAGAIN && errno != EWOULDBLOCK)
+        sound_stop(core);
 }
 
 static int fps_mode;      /* 0 - все кадры, 1 - 45, 2 - 30 */

@@ -237,7 +237,20 @@ static u32 bl_phase_now(void)
 static void bl_resync(void)
 {
     bool on;
-    if (bl_level == 0 || bl_level == BL_MAX) return;
+    if (bl_level == 0 || bl_level == BL_MAX) {
+        /* Крайние уровни таймером не крутятся: пин выставлен раз и навсегда,
+         * сам таймер отменён. Но цикл вывода кадра ведёт подсветку сам, по
+         * уровню, захваченному в начале кадра, - и если уровень сменился в
+         * середине (выключение ночного режима: 38 -> 255), цикл успевал
+         * погасить пин уже после отмены таймера. Будить его было некому, и
+         * панель оставалась тёмной при dim=255 и включённом светодиоде: ровно
+         * тот баг, когда экран «выключался» на выходе из ночи. Приводим пин к
+         * уровню безусловно - запись в GPIO дешевле разбирательства. */
+        on = (bl_level == BL_MAX);
+        bl_phase_on = on;
+        bl_pin(on);
+        return;
+    }
     on = bl_phase_now() < bl_on_ns;
     if (on != bl_phase_on) {
         bl_phase_on = on;
@@ -632,6 +645,14 @@ static u8   digR[32], digG[64], digB[32];
  * они честно перемножаются и работают вместе. */
 static int  warm_level;
 static int  dig_plain = 1;   /* ни затемнения, ни фильтра - быстрый путь */
+/* Заявки на смену фильтра и затемнения. Раньше ioctl правил таблицы прямо из
+ * своего процесса, а поток отрисовки в этот момент мог уже гнать кадр - и
+ * читает он признак «фильтр включён» на КАЖДЫЙ прогон строк отдельно. Кадр
+ * уходил наполовину холодным, наполовину тёплым: ровно то, что видно глазом
+ * как «пожелтела половина экрана» или «только полоса статуса». Теперь ioctl
+ * лишь оставляет заявку, а применяет её сам поток отрисовки между кадрами. */
+static int  warm_req = -1;
+static int  dig_req  = -1;
 
 
 static void bl_calc(void)
@@ -664,6 +685,20 @@ static inline u16 dig_pixel(u16 p)
 
 static u16 *prev_snap;
 static bool prev_valid;
+/* Поколение инвалидации. Просьба «перелить весь экран» (смена тепла, цифрового
+ * затемнения, поворота, формата пикселя) может прийти, когда кадр уже идёт на
+ * панель. Такой кадр в конце делал prev_valid = true и ЗАТИРАЛ просьбу: полного
+ * перезалива не случалось, и фильтр ложился лишь на строки, которые менялись
+ * дальше сами - полэкрана, одна полоса или ничего. Теперь кадр подтверждает
+ * снимок, только если за время передачи поколение не сдвинулось. */
+static u32  inval_gen;
+
+static void prev_invalidate(void)
+{
+    prev_valid = false;
+    inval_gen++;
+}
+
 static int  stat_rows;      /* строк в последнем кадре */
 static int  stat_us;        /* сколько он занял, мкс */
 static int  stat_frames;    /* кадров всего */
@@ -716,6 +751,16 @@ static void lcd_send_rows(int r0, int r1, int c0, int c1)
 
             if ((++slot_pos & (BL_SLOT_PIXELS - 1)) != 0)
                 continue;
+
+            /* Уровень мог смениться прямо посреди кадра: тогда крутить
+             * подсветку дальше по старой скважности нельзя - на крайних
+             * уровнях ею уже никто не управляет, и оставленный тёмным пин
+             * так и останется тёмным. */
+            if (dim && (bl_level == 0 || bl_level == BL_MAX)) {
+                dim = 0;
+                bl_phase_on = (bl_level == BL_MAX);
+                bl_pin(bl_phase_on);
+            }
 
             /* Фазу ведём накопителем: раньше здесь было do_div, то есть 64-битное
              * деление каждые два пикселя (~38 тысяч делений на кадр) - на 32-битном
@@ -844,8 +889,12 @@ static void lcd_flush_fb(void)
         lcd_cmd(0x3A);
         lcd_dat(color12 ? 0x53 : 0x55);
         color12_applied = color12;
-        prev_valid = false;
+        prev_invalidate();
     }
+
+    /* Запоминаем поколение на входе в кадр: если за время передачи кто-то
+     * попросит перезалив, снимок в конце подтверждать нельзя. */
+    u32 gen0 = inval_gen;
 
     /* Раньше на панель всегда уезжала вся ширина 320px, даже если менялась
      * узкая полоса. Считаем реальные границы изменений по колонкам и сужаем
@@ -924,7 +973,7 @@ static void lcd_flush_fb(void)
      * Ничего страшного не произойдёт: таймер ШИМ всё это время крутится вхолостую
      * и подхватит фазу в ближайшую миллисекунду. */
 
-    if (prev_snap && !snap_partial) {
+    if (prev_snap && !snap_partial && gen0 == inval_gen) {
         memcpy(prev_snap, flush_snap, FB_SIZE);
         prev_valid = true;
     }
@@ -1490,6 +1539,17 @@ static int render_fn(void *data)
     console_phase = 0; /* splash */
 
     while (!kthread_should_stop()) {
+        /* Заявки на фильтр и затемнение применяем ЗДЕСЬ - между кадрами, в том
+         * же потоке, что и передача. Тогда таблицы не меняются под идущим
+         * кадром, а просьба о полном перезаливе не может быть съедена концом
+         * этого кадра. */
+        if (warm_req >= 0 || dig_req >= 0) {
+            if (warm_req >= 0) { warm_level = warm_req; warm_req = -1; }
+            if (dig_req  >= 0) { dig_level  = dig_req;  dig_req  = -1; }
+            dig_build();
+            prev_invalidate();
+            fb_dirty = 1;
+        }
         /* Разворот делаем регистром панели (MADCTL), а не переворотом
          * пикселей: даром и не мешает построчной отправке. Команду шлём
          * из этого же потока - шина у него одна. */
@@ -1497,7 +1557,7 @@ static int render_fn(void *data)
             lcd_rot_pending = 0;
             lcd_cmd(0x36);
             lcd_dat(lcd_rot ? 0x68 : 0xA8);
-            prev_valid = false;
+            prev_invalidate();
             fb_dirty = 1;
         }
         /* Полный reset+init панели - лечилка на случай слетевшего контроллера
@@ -1511,7 +1571,7 @@ static int render_fn(void *data)
             lcd_init_ili9341();
             bl_bus_busy = false;
             bl_resync();
-            prev_valid = false;
+            prev_invalidate();
             fb_dirty = 1;
         }
         while (pcmd_tail != pcmd_head) {
@@ -1540,8 +1600,12 @@ static int render_fn(void *data)
             if (kthread_should_stop()) break;
         } else if (fb_dirty && !fb_writing) {
             console_phase = 2; /* userspace took over */
-            lcd_flush_fb();
+            /* Флаг снимаем ДО кадра, а не после. Просьба перерисовать,
+             * пришедшая во время передачи, иначе стиралась вместе с ним - и
+             * при статичной странице следующего кадра уже не случалось:
+             * перезалив после смены тепла терялся вместе с ней. */
             fb_dirty = 0;
+            lcd_flush_fb();
         } else {
             /* Страховка от застрявших строк панели: гонки снимка изредка
              * оставляют на стекле полосу прошлого кадра, которую дифф
@@ -1551,7 +1615,7 @@ static int render_fn(void *data)
             static int repaint_tick;
             if (++repaint_tick >= 12000) {
                 repaint_tick = 0;
-                prev_valid = false;
+                prev_invalidate();
                 fb_dirty = 1;
             }
             msleep_interruptible(50);
@@ -1639,7 +1703,7 @@ static ssize_t lcd_fb_write(struct file *f, const char __user *buf,
          * эффектом бага с fb_writing (лишние пересылки), теперь честно
          * просим полный кадр. */
         if (flush_busy)
-            prev_valid = false;
+            prev_invalidate();
         snap_ready = 1;
         fb_writing = 0;
         fb_writer = NULL;
@@ -2539,7 +2603,7 @@ static long lcd_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
                 fb[p] = (u16)(p + k * 7);
             mutex_unlock(&fb_lock);
             snap_ready = false;
-            prev_valid = false;
+            prev_invalidate();
             lcd_flush_fb();
         }
         total_us = (int)ktime_to_us(ktime_sub(ktime_get(), t0));
@@ -2590,9 +2654,7 @@ static long lcd_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
         int w = (int)arg;
         if (w < 0) w = 0;
         if (w > 100) w = 100;
-        warm_level = w;
-        dig_build();
-        prev_valid = false;
+        warm_req = w;
         fb_dirty = 1;
         return 0;
     }
@@ -2603,9 +2665,7 @@ static long lcd_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
         int lvl = (int)arg;
         if (lvl < 0) lvl = 0;
         if (lvl > BL_MAX) lvl = BL_MAX;
-        dig_level = lvl;
-        dig_build();
-        prev_valid = false;
+        dig_req = lvl;
         fb_dirty = 1;
         return 0;
     }
@@ -2906,7 +2966,7 @@ static int __init lcd_drv_init(void)
     /* Копия того, что уже на панели. Не вышло - не беда: без неё просто
      * гоняем кадр целиком, как раньше. */
     prev_snap = vzalloc(FB_SIZE);
-    prev_valid = false;
+    prev_invalidate();
 
     for (i = 0; i < fb_npages; i++)
         fb_pages[i] = vmalloc_to_page(framebuffer + i * PAGE_SIZE);

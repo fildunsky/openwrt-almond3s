@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=lcd-ui-almond3s
-PKG_RELEASE:=490
+PKG_RELEASE:=567
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -97,6 +97,12 @@ define Package/lcd-ui-almond3s/postinst
 #!/bin/sh
 [ -n "$$IPKG_INSTROOT" ] && exit 0
 
+# Демон Zigbee живёт своей сессией и переживает перезапуск службы - это нужно,
+# чтобы аппарат не выпадал из сети на время игры. Но обновление он пережить не
+# должен, иначе останется работать старым кодом: снимаем его здесь, обратно
+# поднимет сторож в ui.uc.
+killall almond3s-zig 2>/dev/null
+
 # Переносим настройки со старых имён: пакет раньше звался lcd-ui и держал
 # конфиг в /etc/config/lcd, а данные - в /etc/lcd. Без переноса пользователь
 # молча теряет яркость, поворот, город и калибровку батареи.
@@ -124,6 +130,9 @@ if ! uci -q get almond3s.mqtt >/dev/null 2>&1; then
 	uci set almond3s.mqtt.port='1883'
 	uci set almond3s.mqtt.prefix='almond3s'
 	uci set almond3s.mqtt.period='60'
+	uci set almond3s.mqtt.control='off'
+	uci set almond3s.mqtt.homed_prefix='homed'
+	uci set almond3s.mqtt.retain='0'
 	uci commit almond3s
 fi
 if ! uci -q get almond3s.alarm >/dev/null 2>&1; then

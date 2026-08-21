@@ -4,7 +4,7 @@ STOP=10
 USE_PROCD=1
 
 start_service() {
-	local enabled host port node user pass prefix period
+	local enabled host port node user pass prefix period control homed_prefix retain
 	config_load almond3s
 	config_get_bool enabled mqtt enabled 0
 	config_get host mqtt host ""
@@ -14,6 +14,13 @@ start_service() {
 	config_get pass mqtt pass ""
 	config_get prefix mqtt prefix "almond3s"
 	config_get period mqtt period 60
+	# Управление: off - только отдаём метрики (как было), ha - выключатели и
+	# кнопки для Home Assistant, homed - темы td/fd службы custom, both - оба.
+	config_get control mqtt control "off"
+	config_get homed_prefix mqtt homed_prefix "homed"
+	# retain на теме состояния: подписчик видит последние метрики сразу при
+	# подключении, не дожидаясь следующего цикла публикации.
+	config_get_bool retain mqtt retain 0
 
 	[ "$enabled" = "1" ] || return 0
 	[ -n "$host" ] || return 0
@@ -21,7 +28,8 @@ start_service() {
 
 	procd_open_instance
 	procd_set_param command /usr/libexec/almond3s/almond3s-mqtt \
-		"$host" "$port" "$node" "$user" "$pass" "$prefix" "$period"
+		"$host" "$port" "$node" "$user" "$pass" "$prefix" "$period" \
+		"$control" "$homed_prefix" "$retain"
 	procd_set_param respawn 30 10 0
 	procd_set_param stderr 1
 	procd_close_instance

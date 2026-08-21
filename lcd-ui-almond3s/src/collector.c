@@ -120,6 +120,11 @@ static void get_lan(char *ip, size_t ip_sz, char *mac, size_t mac_sz)
     }
 }
 
+/* Сколько тактов процессора прошло между нашими замерами - нужно, чтобы
+ * перевести приращение конкретного процесса в проценты от всей машины.
+ * Заполняется в cpu_busy_pct, поэтому её надо звать первой. */
+static unsigned long long cpu_dt_ticks;
+
 static int cpu_busy_pct(void)
 {
     static unsigned long long prev_idle, prev_total;
@@ -135,9 +140,11 @@ static int cpu_busy_pct(void)
     for (int i = 0; i < 8; i++) total += v[i];
     idle = v[3] + v[4];
     int pct = -1;
+    cpu_dt_ticks = 0;
     if (prev_total && total > prev_total) {
         unsigned long long dt = total - prev_total;
         unsigned long long di = idle - prev_idle;
+        cpu_dt_ticks = dt;
         pct = (int)((dt - di) * 100 / dt);
         if (pct < 0) pct = 0;
         if (pct > 100) pct = 100;
@@ -145,6 +152,122 @@ static int cpu_busy_pct(void)
     prev_idle = idle;
     prev_total = total;
     return pct;
+}
+
+/* Топ процессов по процессору. Считаем ПРИРАЩЕНИЕ utime+stime между тиками:
+ * мгновенный снимок /proc показывает время с запуска процесса, и в топ вечно
+ * лезли бы долгоживущие демоны, а не тот, кто ест прямо сейчас. */
+struct proc_prev { int pid; unsigned long long ticks; };
+#define PROC_PREV_MAX 256
+
+static int cpu_top_json(char *out, int outsz, int want)
+{
+    static struct proc_prev prev[PROC_PREV_MAX];
+    static int prev_n;
+    struct proc_prev cur[PROC_PREV_MAX];
+    struct { char name[20]; int pct; unsigned long long d; } top[12];
+    int cur_n = 0, top_n = 0;
+    DIR *d = opendir("/proc");
+    struct dirent *e;
+
+    out[0] = '['; out[1] = ']'; out[2] = 0;
+    if (!d) return 0;
+    if (want > 12) want = 12;
+
+    while ((e = readdir(d)) != NULL && cur_n < PROC_PREV_MAX) {
+        char path[64], buf[512], name[20] = "";
+        int pid = atoi(e->d_name);
+        FILE *f;
+        if (pid <= 0) continue;
+        snprintf(path, sizeof path, "/proc/%d/stat", pid);
+        f = fopen(path, "r");
+        if (!f) continue;
+        size_t got = fread(buf, 1, sizeof buf - 1, f);
+        fclose(f);
+        if (got == 0) continue;
+        buf[got] = 0;
+
+        /* Имя процесса в скобках может само содержать пробелы и скобки,
+         * поэтому ищем ПОСЛЕДНЮЮ закрывающую, а не первую. */
+        char *lp = strchr(buf, '(');
+        char *rp = strrchr(buf, ')');
+        if (!lp || !rp || rp <= lp + 1) continue;
+        {
+            int nl = (int)(rp - lp - 1);
+            if (nl > (int)sizeof name - 1) nl = (int)sizeof name - 1;
+            memcpy(name, lp + 1, (size_t)nl);
+            name[nl] = 0;
+            for (int i = 0; name[i]; i++)
+                if (name[i] == '"' || name[i] == '\\' || (unsigned char)name[i] < 32)
+                    name[i] = '.';
+        }
+
+        /* После ")" идут: состояние, пять целых (ppid..tpgid), пять счётчиков
+         * (flags, minflt, cminflt, majflt, cmajflt) и затем utime и stime. */
+        unsigned long long ut = 0, st2 = 0;
+        {
+            char state;
+            if (sscanf(rp + 2, "%c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu",
+                       &state, &ut, &st2) != 3)
+                continue;
+        }
+
+        cur[cur_n].pid = pid;
+        cur[cur_n].ticks = ut + st2;
+
+        unsigned long long was = 0;
+        int seen = 0;
+        for (int i = 0; i < prev_n; i++)
+            if (prev[i].pid == pid) { was = prev[i].ticks; seen = 1; break; }
+        cur_n++;
+        if (!seen || cur[cur_n - 1].ticks < was) continue;
+
+        unsigned long long delta = cur[cur_n - 1].ticks - was;
+        if (delta == 0 || cpu_dt_ticks == 0) continue;
+        /* Ранжируем по СЫРОМУ приращению, а не по процентам: на спокойной
+         * машине почти все едоки после округления дают ноль, и список из
+         * пяти имён схлопывался в одно. Проценты остаются для показа. */
+        int pct = (int)(delta * 100 / cpu_dt_ticks);
+        if (pct > 100) pct = 100;
+
+        /* Список короткий - держим его отсортированным вставкой с конца. */
+        if (top_n < want) {
+            snprintf(top[top_n].name, sizeof top[0].name, "%s", name);
+            top[top_n].pct = pct;
+            top[top_n].d = delta;
+            top_n++;
+        } else if (delta > top[top_n - 1].d) {
+            snprintf(top[top_n - 1].name, sizeof top[0].name, "%s", name);
+            top[top_n - 1].pct = pct;
+            top[top_n - 1].d = delta;
+        } else {
+            continue;
+        }
+        for (int i = top_n - 1; i > 0 && top[i].d > top[i - 1].d; i--) {
+            char tn[20];
+            int tp = top[i].pct;
+            unsigned long long td = top[i].d;
+            snprintf(tn, sizeof tn, "%s", top[i].name);
+            snprintf(top[i].name, sizeof top[0].name, "%s", top[i - 1].name);
+            top[i].pct = top[i - 1].pct;
+            top[i].d = top[i - 1].d;
+            snprintf(top[i - 1].name, sizeof top[0].name, "%s", tn);
+            top[i - 1].pct = tp;
+            top[i - 1].d = td;
+        }
+    }
+    closedir(d);
+
+    memcpy(prev, cur, sizeof(struct proc_prev) * (size_t)cur_n);
+    prev_n = cur_n;
+
+    int off = 1;
+    for (int i = 0; i < top_n && off < outsz - 32; i++)
+        off += snprintf(out + off, (size_t)(outsz - off), i ? ",{\"n\":\"%s\",\"p\":%d}" : "{\"n\":\"%s\",\"p\":%d}",
+                        top[i].name, top[i].pct);
+    out[off] = ']';
+    out[off + 1] = 0;
+    return top_n;
 }
 
 static int cpu_core_busy(int *out, int max)
@@ -734,6 +857,12 @@ static int m5g_str(const char *json, const char *key, char *out, int outlen) {
     if (n >= outlen) n = outlen - 1;
     memcpy(out, p, n);
     out[n] = 0;
+    /* Значение уедет в НАШ JSON. Обратный слэш в конце строки экранировал бы
+     * закрывающую кавычку, а управляющий байт делает файл невалидным целиком -
+     * и тогда слепнет весь интерфейс, а не одно поле. Кавычка сюда не дойдёт:
+     * разбор останавливается на первой. */
+    for (int i = 0; out[i]; i++)
+        if (out[i] == '\\' || (unsigned char)out[i] < 0x20) out[i] = '.';
     if (strcmp(out, "-") == 0) out[0] = 0;
     return out[0] ? 1 : 0;
 }
@@ -1204,6 +1333,13 @@ int main(void) {
         google_ping = (ping_buf[0] && atof(ping_buf)>0) ? (int)atof(ping_buf) : -1;
 
         /* Format JSON */
+        /* Порядок важен: cpu_busy_pct заполняет длину интервала в тактах,
+         * без неё топ процессов не в чем измерять. */
+        int cpu_b = cpu_busy_pct();
+        /* Десять имён - столько влезает в правую половину большой карточки
+         * виджета; на каждое уходит около 27 байт JSON. */
+        char top_json[448];
+        cpu_top_json(top_json, sizeof top_json, 10);
         char core_json[96];
         {
             int cb[8], cn = cpu_core_busy(cb, 8), off = 1;
@@ -1245,7 +1381,7 @@ int main(void) {
             "\"lan\":{\"ip\":\"%s\",\"mac\":\"%s\"},"
             "\"uptime\":%ld,\"mem_free_mb\":%ld,\"mem_total_mb\":%ld,"
             "\"cpu_load\":%.2f,\"cpu_busy\":%d,\"cpu_cores\":%d,"
-            "\"cpu_core_busy\":%s}\n",
+            "\"cpu_core_busy\":%s,\"cpu_top\":%s}\n",
             (long)time(NULL),
             tele_state, tele_modem,
             li.csq,li.ber,li.rsrp,li.rsrq,li.sinr,li.rssi,li.pci,
@@ -1269,7 +1405,7 @@ int main(void) {
             ovl_free, ovl_total, lan_ip, lan_mac,
             si.uptime, (si.freeram + si.bufferram)/1024/1024,
             si.totalram/1024/1024, si.loads[0]/65536.0,
-            cpu_busy_pct(), cpu_core_count(), core_json);
+            cpu_b, cpu_core_count(), core_json, top_json);
 
         /* snprintf возвращает «сколько БЫ записал»: если JSON перерастёт буфер,
          * len окажется больше реального содержимого, и write()/fwrite() ниже

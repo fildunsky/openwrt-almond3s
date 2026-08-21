@@ -941,6 +941,9 @@ static int peer_slot(const char *nm)
 #define CL_POWER      0x0001
 #define CL_TEMP       0x0402
 #define CL_ALMOND      0xFC00
+/* Атрибут-команда в нашем кластере. Телеметрия занимает атрибуты 0..3 (части
+ * одного пакета), команде отдан отдельный номер, чтобы приёмник не путал их. */
+#define ZATTR_CMD      8
 
 static int aps_build(unsigned char *o, int cluster, int seq)
 {
@@ -1058,6 +1061,10 @@ static int mesh_endpoint(void)
     return -1;
 }
 
+/* Координатор ретранслирует команду дальше по имени: узлы-листья друг друга
+ * не видят, весь обмен идёт через него. */
+static int g_coord;
+
 static void mesh_rx(const unsigned char *pl, int pn, const char *me)
 {
     if (pn >= 20 && pl[2] == 0x45) {
@@ -1071,7 +1078,42 @@ static void mesh_rx(const unsigned char *pl, int pn, const char *me)
         if (cl == CL_ALMOND && ln >= 8 && 22 + ln <= pn && b[2] == 0x0A) {
     const unsigned char *a = b + 3;
     int alen = ln - 3;
-    int part = a[0] | (a[1] << 8);
+    int attr = a[0] | (a[1] << 8);
+    if (attr == ZATTR_CMD && alen >= 4 && a[2] == 0x41) {
+        int blen = a[3];
+        const unsigned char *v = a + 4;
+        if (blen >= 4 && blen <= alen - 4) {
+            int dl = v[0];
+            if (dl > 0 && dl <= 20 && dl + 2 <= blen) {
+                char dn[24];
+                memcpy(dn, v + 1, (size_t)dl); dn[dl] = 0;
+                int al2 = v[1 + dl];
+                if (al2 > 0 && al2 <= 20 && 2 + dl + al2 <= blen) {
+                    char ac[24];
+                    memcpy(ac, v + 2 + dl, (size_t)al2); ac[al2] = 0;
+                    if (!strcmp(dn, me)) {
+                        cmd_exec(ac);
+                        if (getenv("ZIG_DEBUG"))
+                            fprintf(stderr, "команда '%s' выполнена\n", ac);
+                    } else if (g_coord) {
+                        static int rseq;
+                        for (int j = 0; j < npr; j++) {
+                            if (strcmp(pr[j].name, dn)) continue;
+                            unsigned char z2[96];
+                            int zn2 = zcl_report(z2, rseq);
+                            zcl_attr_bytes(z2, &zn2, ZATTR_CMD, v, blen);
+                            mesh_unicast(pr[j].src, CL_ALMOND, z2, zn2, rseq++);
+                            if (getenv("ZIG_DEBUG"))
+                                fprintf(stderr, "команда '%s' переслана %s\n", ac, dn);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        return;
+    }
+    int part = attr;
     if (part > 3) part = 3;
     if (alen >= 4 && a[2] == 0x41) {
         int blen = a[3];
@@ -1083,6 +1125,11 @@ static void mesh_rx(const unsigned char *pl, int pn, const char *me)
                 int k = 0;
                 for (; k < tl; k++) {
                     unsigned char c = v[1 + k];
+                    /* Имя пришло по радио и попадёт в наш JSON: кавычку и
+                     * обратный слэш глушим вместе с непечатными, иначе сосед
+                     * с таким именем ломает файл целиком и страница соседей
+                     * гаснет у всех. */
+                    if (c == '"' || c == '\\') c = '.';
                     nm[k] = (c >= 32 && c < 127) ? (char)c : '.';
                 }
                 nm[k] = 0;
@@ -1327,11 +1374,61 @@ int main(int argc, char **argv)
         long last_save = 0, last_relay = 0;
         int seq = 0;
         int coord = node_type() == 1;
+        g_coord = coord;
+        const char *cmdfile = getenv("ZIG_CMDFILE") ? getenv("ZIG_CMDFILE") : "/tmp/.zig_cmd";
         my_node = coord ? 1 : 2;
         long last_tx = (long)time(NULL) - period;
 
         while (!stop_flag) {
             long now = (long)time(NULL);
+            {
+                /* Команда от интерфейса: файл с парой «кому что». Раньше это
+                 * читала только ветка beacon, а на аппаратах работает mesh -
+                 * поэтому кнопки на карточке соседа молча не срабатывали. */
+                char cb[160];
+                int cn = 0;
+                FILE *cf = fopen(cmdfile, "r");
+                if (cf) {
+                    cn = (int)fread(cb, 1, sizeof cb - 1, cf);
+                    fclose(cf);
+                    remove(cmdfile);
+                }
+                if (cn > 0) {
+                    cb[cn] = 0;
+                    char tgt[24] = "", act[24] = "";
+                    if (sscanf(cb, "%23s %23s", tgt, act) == 2 && tgt[0] && act[0]) {
+                        if (!strcmp(tgt, me)) {
+                            cmd_exec(act);
+                        } else {
+                            int tl2 = (int)strlen(tgt); if (tl2 > 20) tl2 = 20;
+                            int al3 = (int)strlen(act); if (al3 > 20) al3 = 20;
+                            unsigned char blob[64];
+                            int bn2 = 0;
+                            blob[bn2++] = (unsigned char)tl2;
+                            memcpy(blob + bn2, tgt, (size_t)tl2); bn2 += tl2;
+                            blob[bn2++] = (unsigned char)al3;
+                            memcpy(blob + bn2, act, (size_t)al3); bn2 += al3;
+                            unsigned int dest = 0xFFFFu;
+                            for (int j = 0; j < npr; j++)
+                                if (!strcmp(pr[j].name, tgt)) dest = pr[j].src;
+                            /* Соседа не знаем - отдаём координатору, он найдёт. */
+                            if (dest == 0xFFFFu && !coord) dest = 0x0000;
+                            if (dest != 0xFFFFu) {
+                                unsigned char z3[96];
+                                int zn3 = zcl_report(z3, seq);
+                                zcl_attr_bytes(z3, &zn3, ZATTR_CMD, blob, bn2);
+                                int st3 = mesh_unicast(dest, CL_ALMOND, z3, zn3, seq);
+                                seq++;
+                                if (getenv("ZIG_DEBUG"))
+                                    fprintf(stderr, "команда '%s' -> %s (%04X) статус %d\n",
+                                            act, tgt, dest, st3);
+                            } else if (getenv("ZIG_DEBUG")) {
+                                fprintf(stderr, "команда '%s': сосед %s неизвестен\n", act, tgt);
+                            }
+                        }
+                    }
+                }
+            }
             if (now - last_tx >= period) {
                 last_tx = now;
                 unsigned char tele[96];
@@ -1898,6 +1995,7 @@ int main(int argc, char **argv)
                     if (sl < 0 || sl > 20 || o2 + sl > plen) { continue; }
                     char sname[24]; int si = 0;
                     for (; si < sl; si++) { unsigned char c = body[o2 + si];
+                        if (c == '"' || c == '\\') c = '.';
                         sname[si] = (c >= 32 && c < 127) ? (char)c : '.'; }
                     sname[si] = 0; o2 += sl;
                     int dl = o2 < plen ? body[o2++] : 0;
@@ -1925,6 +2023,7 @@ int main(int argc, char **argv)
                 int k = 0;
                 for (; k < tl; k++) {
                     unsigned char c = body[1 + k];
+                    if (c == '"' || c == '\\') c = '.';
                     nm[k] = (c >= 32 && c < 127) ? (char)c : '.';
                 }
                 nm[k] = 0;
