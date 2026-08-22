@@ -2799,28 +2799,41 @@ static int touch_fn(void *data)
         }
 
         /* Диод: команда ставится в очередь классом светодиодов ядра и
-         * уходит отсюда - шина у нас одна на всех. */
+         * уходит отсюда - шина у нас одна на всех. В mode 2 palmbus трогать
+         * нельзя (рвёт PENTRG) - шлём тем же Linux-I2C, что тач и батарею. */
         if (pic_led_cmd) {
-            u32 s_ctl1 = gr(SM0_CTL1);
-            int w, cmd_b = pic_led_cmd;
+            int cmd_b = pic_led_cmd;
             pic_led_cmd = 0;
 
-            gw(SM0_CTL1, 0x90644042); udelay(10);
-            gw(SM0_CFG, 0xFA);
-            gw(SM0_DATA, PIC_ADDR);
-            gw(SM0_START, 1);
-            gw(SM0_DATAOUT, cmd_b);
-            gw(SM0_STATUS, 0);
-            for (w = 0; w < 500; w++) {
-                if (gr(0x918) & 0x01) break;
-                udelay(10);
+            if (touch_mode == 2) {
+                u8 c = (u8)cmd_b;
+                pic_i2c_write(&c, 1);
+            } else {
+                u32 s_ctl1 = gr(SM0_CTL1);
+                int w;
+                gw(SM0_CTL1, 0x90644042); udelay(10);
+                gw(SM0_CFG, 0xFA);
+                gw(SM0_DATA, PIC_ADDR);
+                gw(SM0_START, 1);
+                gw(SM0_DATAOUT, cmd_b);
+                gw(SM0_STATUS, 0);
+                for (w = 0; w < 500; w++) {
+                    if (gr(0x918) & 0x01) break;
+                    udelay(10);
+                }
+                gw(SM0_CTL1, s_ctl1); udelay(10);
             }
-            gw(SM0_CTL1, s_ctl1); udelay(10);
         }
 
         /* Посылка произвольной длины: мелодия грузится одним пакетом
          * {0x2D, hi, lo, hi, lo, ...} - так это делает заводской драйвер,
          * старшим байтом вперёд. */
+        if (pic_raw_len > 0 && touch_mode == 2) {
+            pic_i2c_write(pic_raw_buf, pic_raw_len);
+            pr_debug("PIC пакет %d байт (i2c), первый 0x%02x\n",
+                     pic_raw_len, pic_raw_buf[0]);
+            pic_raw_len = 0;
+        }
         if (pic_raw_len > 0) {
             u32 s_ctl1 = gr(SM0_CTL1);
             int i, w;
@@ -2850,6 +2863,34 @@ static int touch_fn(void *data)
             int bw;
             int pic_mode = pic_beep_request;
             pic_beep_request = 0;
+
+            /* mode 2: те же команды тем же Linux-I2C, palmbus не трогаем. */
+            if (touch_mode == 2) {
+                u8 c = 0x39, b3[3];
+                pic_i2c_write(&c, 1);            /* SSP reinit */
+                mdelay(10);
+                if (pic_mode == 2) {
+                    u8 raw_cmd = (u8)(pic_beep_ms & 0xFF);
+                    u8 raw_data = (u8)((pic_beep_ms >> 8) & 0xFF);
+                    if (raw_data > 0) {
+                        b3[0] = raw_cmd; b3[1] = 0x00; b3[2] = raw_data;
+                        pic_i2c_write(b3, 3);
+                    } else {
+                        pic_i2c_write(&raw_cmd, 1);
+                    }
+                } else {
+                    b3[0] = 0x33; b3[1] = 0x00; b3[2] = 0x01;  /* WAKE, 1 нота */
+                    pic_i2c_write(b3, 3); mdelay(15);
+                    b3[0] = 0x2D; b3[1] = 0x96; b3[2] = 0x04;  /* частота */
+                    pic_i2c_write(b3, 3); mdelay(15);
+                    b3[0] = 0x2E; b3[1] = 0x58; b3[2] = 0x02;  /* длительность */
+                    pic_i2c_write(b3, 3); mdelay(15);
+                    b3[0] = 0x2F; b3[1] = 0x00; b3[2] = 0x01;  /* play */
+                    pic_i2c_write(b3, 3); mdelay(15);
+                    c = 0x30; pic_i2c_write(&c, 1);            /* LED blink */
+                }
+                goto beep_done;
+            }
 
             /* Helper macro: SM0 init + 3-byte write (like battery write) */
             #define PW3(b0,b1,b2) do { \
