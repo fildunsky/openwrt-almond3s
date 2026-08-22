@@ -830,6 +830,11 @@ struct lte_info {
     char cqi[16], uecat[16], volte[16], mimo[16], rxdiv[16], antports[64];
     char s1band[24], s2band[24], s3band[24];
     int s1pci, s2pci, s3pci, s1earfcn, s2earfcn, s3earfcn;
+    /* Состояние несущей: "activated" - работает, "deactivated" - спит (сеть
+       держит про запас), "-" - модем не сообщил. По нему отличаем активную
+       агрегацию от сконфигурированной, но спящей. */
+    char s1state[16], s2state[16], s3state[16];
+    char ca[48];           /* ярлык агрегации ТОЛЬКО из активных несущих: B1+B40 */
     char neighbors[1024];  /* готовый JSON-массив соседних сот от 5gmodem */
 };
 
@@ -918,9 +923,12 @@ static void tele_apply(struct lte_info *li) {
 
     m5g_str(buf, "oper", li->oper, sizeof(li->oper));
     m5g_str(buf, "mode", li->mode, sizeof(li->mode));
-    if (!m5g_str(buf, "ca", li->band, sizeof(li->band)))
-        m5g_str(buf, "band", li->band, sizeof(li->band));
-
+    /* band - основная несущая, ca - ярлык АКТИВНОЙ агрегации (только рабочие
+       несущие). Раньше ca писался в band как фолбэк, и они путались. Ключа ca
+       у модема может не быть - тогда активной агрегации нет, ниже соберём её из
+       слотов по state. */
+    m5g_str(buf, "band", li->band, sizeof(li->band));
+    m5g_str(buf, "ca", li->ca, sizeof(li->ca));
 }
 
 static void tele_clear(struct lte_info *li) {
@@ -930,6 +938,20 @@ static void tele_clear(struct lte_info *li) {
     li->oper[0] = 0;
     li->mode[0] = 0;
     li->band[0] = 0;
+    li->ca[0] = 0;
+    li->s1band[0] = li->s2band[0] = li->s3band[0] = 0;
+    li->s1state[0] = li->s2state[0] = li->s3state[0] = 0;
+}
+
+/* Короткое имя диапазона: 5gmodem пишет «B40 (2300 MHz)», а в плитку и в
+   строку несущих влезает только «B40». */
+static void band_short(const char *src, char *dst, size_t n) {
+    size_t i = 0;
+    while (src[i] && src[i] != ' ' && src[i] != '(' && i + 1 < n) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = 0;
 }
 
 static void tele_cell(struct lte_info *li) {
@@ -1001,20 +1023,77 @@ static void tele_cell(struct lte_info *li) {
         snprintf(li->volte, sizeof(li->volte), "%s", sv);
 
     {
-        const char *keys[3] = { "\"s1\"", "\"s2\"", "\"s3\"" };
+        /* Несущие 5gmodem отдаёт ПЛОСКИМИ ключами: "s1band", "s1pci", "s1earfcn".
+           Раньше мы искали вложенные объекты "s1":{...} - их в файле нет, и все
+           дополнительные несущие терялись: страница «Сота» показывала пустой
+           список, а виджет агрегации - один основной диапазон. Вложенный вид
+           оставлен запасным путём на случай другой версии 5gmodem. */
+        const char *nest[3] = { "\"s1\":{", "\"s2\":{", "\"s3\":{" };
+        const char *fb[3] = { "s1band", "s2band", "s3band" };
+        const char *fp[3] = { "s1pci",  "s2pci",  "s3pci"  };
+        const char *fe[3] = { "s1earfcn", "s2earfcn", "s3earfcn" };
+        const char *fst[3] = { "s1state", "s2state", "s3state" };
         char *bands[3] = { li->s1band, li->s2band, li->s3band };
+        char *stts[3] = { li->s1state, li->s2state, li->s3state };
         int sizes[3] = { (int)sizeof(li->s1band), (int)sizeof(li->s2band), (int)sizeof(li->s3band) };
+        int ssz[3] = { (int)sizeof(li->s1state), (int)sizeof(li->s2state), (int)sizeof(li->s3state) };
         int *pcis[3] = { &li->s1pci, &li->s2pci, &li->s3pci };
         int *earf[3] = { &li->s1earfcn, &li->s2earfcn, &li->s3earfcn };
+        /* li - неинициализированная переменная цикла: зануляем слоты явно,
+           иначе пропущенный ключ оставил бы мусор со стека. */
+        for (int i = 0; i < 3; i++) { bands[i][0] = 0; stts[i][0] = 0; *pcis[i] = 0; *earf[i] = 0; }
         for (int i = 0; i < 3; i++) {
-            const char *o = strstr(buf, keys[i]);
-            if (!o) continue;
-            o = strchr(o, '{');
-            if (!o) continue;
-            if (m5g_str(o, "band", sv, sizeof(sv))) snprintf(bands[i], (size_t)sizes[i], "%s", sv);
-            v = tele_num(o, "pci", &ok);    if (ok) *pcis[i] = v;
-            v = tele_num(o, "earfcn", &ok); if (ok) *earf[i] = v;
+            /* state читаем безусловно: m5g_str сам обнулит поле, если ключа нет,
+               и мусор не задержится. */
+            m5g_str(buf, fst[i], stts[i], (size_t)ssz[i]);
+            if (m5g_str(buf, fb[i], sv, sizeof(sv))) band_short(sv, bands[i], (size_t)sizes[i]);
+            v = tele_num(buf, fp[i], &ok);    if (ok) *pcis[i] = v;
+            v = tele_num(buf, fe[i], &ok);    if (ok) *earf[i] = v;
+            if (bands[i][0]) continue;
+            {
+                const char *o = strstr(buf, nest[i]);
+                if (!o) continue;
+                o = strchr(o, '{');
+                if (!o) continue;
+                if (m5g_str(o, "band", sv, sizeof(sv))) band_short(sv, bands[i], (size_t)sizes[i]);
+                v = tele_num(o, "pci", &ok);    if (ok) *pcis[i] = v;
+                v = tele_num(o, "earfcn", &ok); if (ok) *earf[i] = v;
+                m5g_str(o, "state", stts[i], (size_t)ssz[i]);
+            }
         }
+
+        /* Ярлык агрегации - ТОЛЬКО из активных несущих. Слоты s1..s4 описывают
+           ВСЮ сконфигурированную агрегацию, включая спящие: сеть собирает SCC
+           заранее и держит выключенными до трафика. Спящую несущую в ярлык не
+           берём (иначе покой выглядит как работающая агрегация) - признак один,
+           state=="activated". У спящей RSRP/SINR есть, но данные она не несёт,
+           так что наличие уровней активностью не считаем.
+           Если модем уже дал готовый ca в основном файле (он тоже только из
+           активных) - он приоритетнее, наш подсчёт лишь запасной. */
+        if (!li->ca[0]) {
+            char *sec[3] = { li->s1band, li->s2band, li->s3band };
+            char *stt[3] = { li->s1state, li->s2state, li->s3state };
+            int n = 0;
+            if (li->band[0] && li->band[0] != '-') {
+                band_short(li->band, li->ca, sizeof(li->ca));
+                n = 1;
+            }
+            for (int i = 0; i < 3; i++) {
+                if (!sec[i][0] || sec[i][0] == '-') continue;
+                if (strcmp(stt[i], "activated") != 0) continue;   /* спящую пропускаем */
+                if (li->ca[0])
+                    snprintf(li->ca + strlen(li->ca), sizeof(li->ca) - strlen(li->ca),
+                             "+%s", sec[i]);
+                else
+                    snprintf(li->ca, sizeof(li->ca), "%s", sec[i]);
+                n++;
+            }
+            /* Один PCC без активных SCC - не агрегация: ярлык очищаем, экран
+               покажет обычный бенд неподсвеченным. */
+            if (n < 2) li->ca[0] = 0;
+        }
+        /* nca НЕ пересчитываем: 5gmodem отдаёт число активных вторичных
+           несущих, nca:0 при заполненных слотах - норма (собрано, но спит). */
     }
 
     {
@@ -1026,6 +1105,13 @@ static void tele_cell(struct lte_info *li) {
             li->neighbors[e - o + 1] = 0;
         }
     }
+
+    /* «+» в режиме (4G+) значит РАБОТАЮЩУЮ агрегацию, а не способность к ней.
+       Некоторые модемы (Telit) пишут 4G+, даже когда все SCC спят. Приводим
+       4G-семейство к факту: собран активный ca -> 4G+, иначе 4G. Остальные
+       режимы (5G/3G) не трогаем. */
+    if (!strcmp(li->mode, "4G") || !strcmp(li->mode, "4G+") || !strcmp(li->mode, "LTE"))
+        snprintf(li->mode, sizeof(li->mode), "%s", li->ca[0] ? "4G+" : "4G");
 }
 
 static void get_lte_info_ext(struct lte_info *li) {
@@ -1356,7 +1442,7 @@ int main(void) {
             "\"tele\":{\"src\":%d,\"modem\":%d},"
             "\"lte\":{\"csq\":%d,\"ber\":%d,\"rsrp\":%d,\"rsrq\":%d,"
             "\"sinr\":%d,\"rssi\":%d,\"pci\":%d,"
-            "\"band\":\"%s\",\"mode\":\"%s\",\"operator\":\"%s\",\"ip\":\"%s\","
+            "\"band\":\"%s\",\"ca\":\"%s\",\"mode\":\"%s\",\"operator\":\"%s\",\"ip\":\"%s\","
             "\"modem\":\"%s\",\"temp\":%d,\"signal\":%d,\"nca\":%d,"
             "\"conn_time\":\"%s\",\"rx\":\"%s\",\"tx\":\"%s\",\"apn\":\"%s\","
             "\"fw\":\"%s\",\"therm\":%d,\"simslot\":%d,\"roaming\":%d,"
@@ -1367,9 +1453,9 @@ int main(void) {
             "\"bandwidth\":\"%s\",\"pathloss\":\"%s\",\"txpower\":\"%s\","
             "\"cqi\":\"%s\",\"uecat\":\"%s\",\"volte\":\"%s\",\"mimo\":\"%s\","
             "\"rxdiv\":\"%s\",\"antports\":\"%s\","
-            "\"s1band\":\"%s\",\"s1pci\":%d,\"s1earfcn\":%d,"
-            "\"s2band\":\"%s\",\"s2pci\":%d,\"s2earfcn\":%d,"
-            "\"s3band\":\"%s\",\"s3pci\":%d,\"s3earfcn\":%d,"
+            "\"s1band\":\"%s\",\"s1pci\":%d,\"s1earfcn\":%d,\"s1state\":\"%s\","
+            "\"s2band\":\"%s\",\"s2pci\":%d,\"s2earfcn\":%d,\"s2state\":\"%s\","
+            "\"s3band\":\"%s\",\"s3pci\":%d,\"s3earfcn\":%d,\"s3state\":\"%s\","
             "\"neighbors\":%s}},"
             "\"vpn\":{\"active\":%s,\"type\":\"%s\",\"ping_ms\":%d,\"external_ip\":\"%s\"},"
             "\"wifi\":{\"clients\":%s},"
@@ -1385,14 +1471,14 @@ int main(void) {
             (long)time(NULL),
             tele_state, tele_modem,
             li.csq,li.ber,li.rsrp,li.rsrq,li.sinr,li.rssi,li.pci,
-            li.band,li.mode,li.oper,li.ip,li.modem,li.temp,li.signal_pct,li.nca,
+            li.band,li.ca,li.mode,li.oper,li.ip,li.modem,li.temp,li.signal_pct,li.nca,
             li.conn_time,li.rx,li.tx,li.apn,li.fw,li.therm,li.simslot,li.roaming,
             li.cid,li.enbid,li.mcc,li.mnc,li.earfcn,li.reg,li.phone,
             li.lac,li.tac,li.cid_hex,li.bandwidth,li.pathloss,li.txpower,
             li.cqi,li.uecat,li.volte,li.mimo,li.rxdiv,li.antports,
-            li.s1band,li.s1pci,li.s1earfcn,
-            li.s2band,li.s2pci,li.s2earfcn,
-            li.s3band,li.s3pci,li.s3earfcn,
+            li.s1band,li.s1pci,li.s1earfcn,li.s1state,
+            li.s2band,li.s2pci,li.s2earfcn,li.s2state,
+            li.s3band,li.s3pci,li.s3earfcn,li.s3state,
             li.neighbors[0] ? li.neighbors : "[]",
             vpn_active?"true":"false",vpn_type,vpn_ping,ext_ip,
             wifi_json, google_ping,

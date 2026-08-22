@@ -1803,7 +1803,14 @@ static void i2c_raw_stop(void)
  * дал поток одного канала Y, CONVERT(SEQ,0x97) - вечное 0xFF, оба тупика
  * аппаратные. Экспериментальная ветка оставлена как памятник с дампером.
  */
-static int touch_mode = 0;
+/* Дефолт - режим 3 (PENTRG-непрерывный через palmbus + накопление X/Y по
+ * одному каналу): читает высокоомный контакт (тонкий стилус, маргинальная
+ * панель Almond_13) И оставляет батарею на palmbus - палбас и Linux-I2C на этом
+ * SM0-контроллере не сосуществуют (Linux-I2C тач + palmbus PIC = таймауты), а
+ * PIC по Linux-I2C не читается вовсе (0xFF). Поэтому всё держим на palmbus.
+ * 2 = PENTRG по Linux-I2C (тач работает, но рвёт чтение батареи), 0 = ручной
+ * SELECT (батарея ок, но стилус не тянет), оба оставлены фолбэками. */
+static int touch_mode = 2;
 static int touch_mode_req = -1;  /* смена режима: применяет тач-поток, шина его */
 static int sx_reg_req = -1;      /* адрес регистра на чтение (0x40|RA внутри) */
 static int sx_reg_val = -2;      /* результат: >=0 байт, -2 не готов */
@@ -1827,8 +1834,9 @@ static void sx8650_config(int pentrg)
      * прошивка его писала, и на плате может стоять пин-совместимый SX8651,
      * у которого 0x03 существует. Пишем как завод - хуже не будет. */
     i2c_raw_start(); i2c_raw_write(0x03); i2c_raw_write(0x2D); i2c_raw_stop(); udelay(150);
-    /* ChanMsk: в эксперименте меряем X,Y,Z1,Z2 - давление отсеивает помехи */
-    i2c_raw_start(); i2c_raw_write(0x04); i2c_raw_write(pentrg ? 0xF0 : 0xC0); i2c_raw_stop(); udelay(150);
+    /* ChanMsk=0xF0 (X,Y,Z1,Z2) - как в СТОКЕ (он ставит 0xF0 и в ручном
+     * режиме). Раньше в ручном было 0xC0; сток включал все каналы. */
+    i2c_raw_start(); i2c_raw_write(0x04); i2c_raw_write(0xF0); i2c_raw_stop(); udelay(150);
 
     if (pentrg) {
         /* Никакой команды режима: остаёмся в ручном (RATE=0). Живой тест
@@ -1849,6 +1857,10 @@ static void sx8650_config(int pentrg)
     gw(SM0_CTL1, saved_ctl1); udelay(10);
 }
 
+static void sx8650_config_i2c(void);   /* определены ниже, нужны в hw_init */
+static void sx8650_config_pmtrg(void);
+static void sx8650_config_sm(void);
+
 static void sx8650_hw_init(void)
 {
     /* Get I2C adapter for PIC battery (Linux I2C) */
@@ -1856,9 +1868,16 @@ static void sx8650_hw_init(void)
     if (!touch_i2c_adap)
         pr_warn("cannot get I2C adapter 0 (PIC battery won't work)\n");
 
-    sx8650_config(touch_mode);
-    pr_info("SX8650 init done (%s, palmbus + SM0 save/restore)\n",
-            touch_mode ? "PENTRG" : "manual");
+    if (touch_mode == 5) sx8650_config(0);
+    else if (touch_mode == 4) sx8650_config_sm();
+    else if (touch_mode == 3) sx8650_config_pmtrg();
+    else if (touch_mode == 2) sx8650_config_i2c();
+    else sx8650_config(touch_mode);
+    pr_info("SX8650 init done (%s)\n",
+            touch_mode == 5 ? "STOCK-copy" :
+            (touch_mode == 4 ? "SM(PENDET/PENTRG)" :
+            (touch_mode == 3 ? "PENTRG-pb" :
+            (touch_mode == 2 ? "PENTRG-i2c" : (touch_mode ? "PENTRG" : "manual")))));
 }
 
 /*
@@ -1872,13 +1891,13 @@ static int sx8650_read_xy(int *rx, int *ry)
     u32 saved_ctl1 = gr(SM0_CTL1);
 
     /* --- Read X: SELECT(X)=0x80 --- */
-    gw(SM0_CTL1, 0x90644042); udelay(10);
+    gw(SM0_CTL1, 0x90640042); udelay(10);
     gw(SM0_DATA, SX8650_ADDR);
     gw(SM0_START, 0); udelay(10);
     gw(SM0_DATAOUT, 0x80);
     gw(SM0_STATUS, 2); udelay(150);
     gw(SM0_START, 0); udelay(10);
-    gw(SM0_DATAOUT, 0x91);
+    gw(SM0_DATAOUT, 0x90);  /* X: cmd|0x10 = 0x90 (сток), не 0x91 */
     gw(SM0_STATUS, 2); udelay(150);
     gw(SM0_CFG, 0xFA);
     gw(SM0_START, 0); udelay(10);
@@ -1907,7 +1926,7 @@ static int sx8650_read_xy(int *rx, int *ry)
     }
 
     /* --- Read Y: SELECT(Y)=0x81 --- */
-    gw(SM0_CTL1, 0x90644042); udelay(10);
+    gw(SM0_CTL1, 0x90640042); udelay(10);
     gw(SM0_DATA, SX8650_ADDR);
     gw(SM0_START, 0); udelay(10);
     gw(SM0_DATAOUT, 0x81);
@@ -1996,21 +2015,43 @@ static int __maybe_unused pic_i2c_write(u8 *data, int len)
  * 1. Write {0x2F, 0x00, 0x02} then read
  * 2. Simple read (no command)
  */
+/* Чтение батареи PIC штатным Linux-I2C - тот же протокол, что рабочий
+ * palmbus-вариант (0x39 SSP-reinit -> 10мс -> 0x36 ADC -> 5мс -> 6 байт),
+ * только через i2c_transfer. Нужен режиму 2 (штатный I2C для тача), где
+ * palmbus трогать нельзя - он рвёт шину. Раньше здесь была неверная команда
+ * (0x33) - батарея показывала пусто. */
 static int __maybe_unused pic_read_battery(void)
 {
-    int ret;
+    u8 cmd, resp[6] = {0};
+    int i, w1, w2;
+    cmd = 0x39; w1 = pic_i2c_write(&cmd, 1);   /* SSP REINIT */
+    mdelay(10);
+    cmd = 0x36; w2 = pic_i2c_write(&cmd, 1);   /* ADC read */
+    usleep_range(5000, 6000);
     {
-        u8 wake[3] = { 0x33, 0x00, 0x01 };
-        pic_i2c_write(wake, 3);
-        mdelay(50);
+        int r1 = pic_i2c_read(resp, 6);
+        /* Linux-I2C кадр PIC отличается от palmbus-кадра: тут просто
+         * [adc_lo, adc_hi, статус, ...] без ведущего 0xff и без маркера.
+         * Сверено живьём 22.08: без зарядки c1 02 00.. (705), с зарядкой
+         * cf 02 01.. (719) - и обе цифры сходятся с palmbus-чтением. */
+        int adc = (resp[1] << 8) | resp[0];
+        static int dl = 12;
+        if (dl > 0) { dl--; pr_info("PIC-i2c w=%d/%d r=%d: %02x %02x %02x %02x %02x %02x adc=%d\n",
+                                    w1, w2, r1, resp[0], resp[1], resp[2], resp[3], resp[4], resp[5], adc); }
+        if (r1 == 0 && w2 == 0 && adc > 0 && adc < 1023) {
+            /* Коллектор разбирает palmbus-раскладку - переложим в неё:
+             * adc_lo -> raw[1], adc_hi -> raw[3], маркер 0x04 -> raw[4],
+             * статус (bit0 = зарядка) -> raw[5]. */
+            pic_battery_raw[0] = 0xFF;
+            pic_battery_raw[1] = resp[0];
+            pic_battery_raw[2] = 0;
+            pic_battery_raw[3] = resp[1] & 0x0F;
+            pic_battery_raw[4] = 0x04;
+            pic_battery_raw[5] = resp[2];
+            pic_battery_valid = 1;
+        }
     }
-    ret = pic_i2c_read(pic_battery_raw, PIC_BATTERY_LEN);
-    if (!ret) {
-        pic_battery_valid = 1;
-    } else {
-        pr_info("PIC not responding (%d)\n", ret);
-    }
-
+    (void)i;
     return 0;
 }
 
@@ -2094,6 +2135,9 @@ static void pic_read_battery_palmbus(void)
          * полубайта байта 3. Прежняя проверка resp[3]==0x02 отбрасывала
          * все выборки вне окна 512..767, и показания замирали. */
         int adc = ((resp[3] & 0x0F) << 8) | resp[1];
+        { static int dl2 = 6;
+          if (dl2 > 0) { dl2--; pr_info("PIC-pb  : %02x %02x %02x %02x %02x %02x adc=%d\n",
+                         resp[0], resp[1], resp[2], resp[3], resp[4], resp[5], adc); } }
         /* Статус-байт по заводскому разбору: bit0 - зарядка, bit5+bit6 -
          * батареи нет, bit6 без bit5 - tamper. Какой-то из оставшихся бит
          * должен отражать кнопку питания (сток по ней запускал handshake
@@ -2279,6 +2323,374 @@ static void sx8650_write_reg(int reg, int val)
     gw(SM0_CTL1, saved_ctl1); udelay(10);
 }
 
+/* ===== Режим 2: PENTRG через ШТАТНЫЙ Linux I2C (как сток и mainline sx8654) =====
+ * Прошлый заход в PENTRG читал буфер через palmbus и получал «только Y» -
+ * тупик сочли аппаратным. Но заводской модуль almond_touch и mainline-драйвер
+ * читают результат ОБЫЧНЫМ I2C: сперва байт STAT (0x40|0x05, бит CONVIRQ), затем
+ * блок nchan*2 байт. Ручной SELECT-опрос не набирает сигнал через высокоомный
+ * контакт (тонкий стилус, «жёсткая» панель Almond_13); непрерывный PENTRG на
+ * 5000cps с усреднением 7 выборок (FILT_7SA) - набирает, оттого сток и ловил
+ * стилус. Palmbus здесь не трогаем совсем - весь обмен идёт через touch_i2c_adap,
+ * тем же путём, что чтение батареи PIC. */
+#define SX_REG_TOUCH0   0x00   /* RATE[7:4] | POWDLY[3:0] */
+#define SX_REG_TOUCH1   0x01   /* CONDIRQ | RPDNT | FILT */
+#define SX_REG_CHANMASK 0x04
+#define SX_REG_STAT     0x05
+#define SX_CMD_READREG  0x40
+#define SX_CMD_PENTRG   0xE0
+#define SX_STAT_CONVIRQ 0x80
+#define SX_RATE_5000CPS 0xF0
+#define SX_POWDLY_1_1MS 0x0B
+#define SX_CONDIRQ      0x20
+#define SX_RPDNT_100K   0x00
+#define SX_FILT_7SA     0x03
+#define SX_CONV_X       0x80
+#define SX_CONV_Y       0x40
+
+static int sx_i2c_wr(const u8 *buf, int len)
+{
+    struct i2c_msg m = { .addr = SX8650_ADDR, .flags = 0, .len = len, .buf = (u8 *)buf };
+    if (!touch_i2c_adap) return -ENODEV;
+    return i2c_transfer(touch_i2c_adap, &m, 1) == 1 ? 0 : -EIO;
+}
+
+static int sx_i2c_rd(u8 *buf, int len)
+{
+    struct i2c_msg m = { .addr = SX8650_ADDR, .flags = I2C_M_RD, .len = len, .buf = buf };
+    if (!touch_i2c_adap) return -ENODEV;
+    return i2c_transfer(touch_i2c_adap, &m, 1) == 1 ? 0 : -EIO;
+}
+
+static void sx8650_config_i2c(void)
+{
+    u8 b[2];
+    /* Карта регистров - как у РАБОЧЕГО ручного драйвера (проверено: reg0x01=
+     * CTRL0 со значением 0x27=RATE2/POWDLY7, reset=0x1F), а НЕ mainline-адреса
+     * (там reset=0x3F, RATE в reg0x00). По mainline-адресам секвенсер
+     * настраивался криво и чип конвертил только Y (X всегда FFFF). */
+    b[0] = 0x1F; b[1] = 0xDE; sx_i2c_wr(b, 2); msleep(50);           /* SoftReset */
+    b[0] = 0x01; b[1] = SX_RATE_5000CPS | 0x07; sx_i2c_wr(b, 2);     /* CTRL0: 5000cps|POWDLY7 */
+    b[0] = 0x02; b[1] = SX_CONDIRQ | SX_FILT_7SA; sx_i2c_wr(b, 2);   /* CTRL1: CONDIRQ|FILT7 */
+    b[0] = 0x03; b[1] = 0x2D; sx_i2c_wr(b, 2);                       /* CTRL2: как в стоке */
+    b[0] = 0x04; b[1] = SX_CONV_X | SX_CONV_Y; sx_i2c_wr(b, 2);      /* ChanMask X|Y */
+    b[0] = SX_CMD_PENTRG; sx_i2c_wr(b, 1);                           /* старт непрерывного пен-режима */
+}
+
+/* Чип в PENTRG отдаёт по ОДНОМУ каналу на CONVIRQ (проверено: 4-байтное чтение
+ * всегда даёт один Y + пустышку). Поэтому читаем 2 байта за цикл и КОПИМ X и Y
+ * раздельно; точку отдаём, когда оба свежие (в пределах ~120мс). */
+static int lastx_raw = -1, lasty_raw = -1;
+static unsigned long lastx_j, lasty_j;
+static unsigned long touch_ok_j;
+
+static int sx8650_read_i2c(int *rx, int *ry)
+{
+    u8 reg = SX_CMD_READREG | SX_REG_STAT, stat = 0;
+    u8 d[2];
+    u16 v; int ch, raw_x, raw_y, n, got = 0;
+
+    /* Дренаж: чип конвертит непрерывно (~0.2мс/канал), а тик потока 30мс -
+     * выгребаем всё накопленное и оставляем самые свежие X и Y. Без этого
+     * пара собиралась из сэмплов РАЗНЫХ тиков, и первая точка касания несла
+     * транзиент посадки пальца - тап уезжал по вертикали. */
+    for (n = 0; n < 8; n++) {
+        if (sx_i2c_wr(&reg, 1) < 0) { touch_bad_ch++; return 0; }
+        if (sx_i2c_rd(&stat, 1) < 0) { touch_bad_ch++; return 0; }
+        if (!(stat & SX_STAT_CONVIRQ)) break;
+        if (sx_i2c_rd(d, 2) < 0) { touch_bad_ch++; return 0; }
+        v = ((u16)d[0] << 8) | d[1];
+        if (v == 0xFFFF || (v & 0x8000)) return 0;   /* пера нет */
+        ch = (v >> 12) & 7;
+        if (ch == 0) { lastx_raw = v & 0x0FFF; lastx_j = jiffies; got = 1; }
+        else if (ch == 1) { lasty_raw = v & 0x0FFF; lasty_j = jiffies; got = 1; }
+    }
+    if (!got) return 0;
+
+    /* нужны оба канала и оба свежие */
+    if (lastx_raw < 0 || lasty_raw < 0) return 0;
+    if (jiffies - lastx_j > msecs_to_jiffies(120) ||
+        jiffies - lasty_j > msecs_to_jiffies(120)) return 0;
+
+    /* Первый тик нового контакта пропускаем: его сэмплы сняты в момент
+     * посадки, пока сопротивление контакта ещё плывёт. Следующий тик
+     * (через 30мс) отдаёт устоявшуюся точку - задержка незаметна. */
+    if (jiffies - touch_ok_j > msecs_to_jiffies(150)) {
+        touch_ok_j = jiffies;
+        return 0;
+    }
+    touch_ok_j = jiffies;
+    raw_x = lastx_raw; raw_y = lasty_raw;
+
+    {
+        int px = (4096 - raw_y) * TOUCH_SCALE_X / 4096 - TOUCH_OFF_X;
+        int py = raw_x * TOUCH_SCALE_Y / 4096 - TOUCH_OFF_Y;
+        *rx = px < 0 ? 0 : (px > LCD_W - 1 ? LCD_W - 1 : px);
+        *ry = py < 0 ? 0 : (py > LCD_H - 1 ? LCD_H - 1 : py);
+        if (lcd_rot) { *rx = LCD_W - 1 - *rx; *ry = LCD_H - 1 - *ry; }
+        touch_ok_cnt++;
+        return 1;
+    }
+}
+
+/* ===== Режим 3: PENTRG-непрерывный через PALMBUS (стоко-подобный) =====
+ * Ручной SELECT не тянет высокоомный контакт (тонкий стилус, панель Almond_13):
+ * все каналы 4095. Заводской almond_touch и mainline sx8654 читают стилус
+ * непрерывным PENTRG с усреднением 7 выборок. Linux-I2C к чипу на этой плате не
+ * ходит (вешает шину) - значит PENTRG тоже через palmbus. Прошлый заход читал
+ * 8 байт (маска X,Y,Z1,Z2) и рассинхронивался в «только Y». Здесь как в
+ * mainline: маска ТОЛЬКО X|Y, проверка STAT.CONVIRQ, чтение ровно 4 байт. */
+
+/* Прочитать n байт из чипа по palmbus (адрес чтения 0x91=0x48<<1|1). Модель -
+ * тот же SM0-танец, что и в sx8650_select_read, только тянем n DATAIN. */
+static void sx_pb_read(u8 *buf, int n)
+{
+    int i;
+    gw(SM0_DATAOUT, 0x91);
+    gw(SM0_STATUS, 2); udelay(150);
+    gw(SM0_CFG, 0xFA);
+    gw(SM0_START, 0); udelay(10);
+    gw(SM0_START, 1); gw(SM0_START, 1); udelay(10);
+    gw(SM0_STATUS, 1); udelay(150);
+    for (i = 0; i < n; i++) { buf[i] = gr(SM0_DATAIN) & 0xFF; udelay(150); }
+    gw(SM0_START, 0); udelay(10);
+    gw(SM0_START, 1);
+}
+
+/* Прочитать управляющий регистр чипа: команда 0x40|reg, затем один байт. */
+static int sx_pb_regread(int reg)
+{
+    u8 v;
+    gw(SM0_DATA, SX8650_ADDR);
+    gw(SM0_START, 0); udelay(10);
+    gw(SM0_DATAOUT, 0x40 | (reg & 0x1F));
+    gw(SM0_STATUS, 2); udelay(150);
+    sx_pb_read(&v, 1);
+    return v;
+}
+
+static void sx8650_config_pmtrg(void)
+{
+    u32 saved_ctl1 = gr(SM0_CTL1);
+    gw(SM0_CTL1, 0x90644042);
+    i2c_raw_start(); i2c_raw_write(0x1F); i2c_raw_write(0xDE); i2c_raw_stop(); mdelay(50);
+    /* Карта регистров ПО ДАТАШИТУ (V2.19): CTRL0=0x00 (RATE|POWDLY),
+     * CTRL1=0x01 (CONDIRQ|RPDNT|FILT), CTRL2=0x02 (SETDLY), ChanMsk=0x04.
+     * Регистра 0x03 НЕТ. Прежде RATE писался в 0x01 - мимо, и «стоп» тоже.
+     * CTRL0=0x86: RATE=300cps (нибл 8, как в стоке - шина занята ~9%, батарея
+     * читается между конверсиями) | POWDLY=35мкс (нибл 6, тянет высокоомный
+     * контакт стилуса; 0.5мкс дефолта было мало).
+     * CTRL1=0x27: CONDIRQ=1, RPDNT=200к, FILT=макс (7 выборок - усреднение).
+     * CTRL2=0x00: SETDLY immediate. Маска - только X,Y. */
+    i2c_raw_start(); i2c_raw_write(0x00); i2c_raw_write(0x86); i2c_raw_stop(); udelay(150);
+    i2c_raw_start(); i2c_raw_write(0x01); i2c_raw_write(0x27); i2c_raw_stop(); udelay(150);
+    i2c_raw_start(); i2c_raw_write(0x02); i2c_raw_write(0x00); i2c_raw_stop(); udelay(150);
+    i2c_raw_start(); i2c_raw_write(0x04); i2c_raw_write(0xC0); i2c_raw_stop(); udelay(150);
+    /* Команда PENTRG (0xE0): чип сам ждёт перо, конвертит X,Y на RATE. */
+    i2c_raw_start(); i2c_raw_write(0xE0); i2c_raw_stop(); udelay(150);
+    gw(SM0_CFG, 0xFA);
+    gw(SM0_CTL1, saved_ctl1); udelay(10);
+}
+
+static int sx8650_read_pmtrg(int *rx, int *ry)
+{
+    u8 d[2];
+    int stat, ch, raw_x, raw_y;
+    u16 v;
+    u32 saved_ctl1 = gr(SM0_CTL1);
+
+    gw(SM0_CTL1, 0x90644042); udelay(10);
+    gw(SM0_DATA, SX8650_ADDR);
+    stat = sx_pb_regread(0x05);           /* STAT: бит7 CONVIRQ = есть данные */
+    if (!(stat & 0x80)) { gw(SM0_CTL1, saved_ctl1); udelay(10); return 0; }
+    gw(SM0_DATA, SX8650_ADDR);
+    sx_pb_read(d, 2);                       /* ОДИН канал за CONVIRQ, be16 [ch|data] */
+    gw(SM0_CTL1, saved_ctl1); udelay(10);
+
+    /* Чип отдаёт по одному каналу на CONVIRQ - копим X и Y раздельно, точку
+     * даём, когда оба свежие. Тот же приём, что завёл стилус в mode 2. */
+    v = ((u16)d[0] << 8) | d[1];
+    if (v == 0xFFFF || (v & 0x8000)) return 0;
+    ch = (v >> 12) & 7;
+    if (ch == 0) { lastx_raw = v & 0x0FFF; lastx_j = jiffies; }
+    else if (ch == 1) { lasty_raw = v & 0x0FFF; lasty_j = jiffies; }
+    else return 0;
+    if (lastx_raw < 0 || lasty_raw < 0) return 0;
+    if (jiffies - lastx_j > msecs_to_jiffies(120) ||
+        jiffies - lasty_j > msecs_to_jiffies(120)) return 0;
+    raw_x = lastx_raw; raw_y = lasty_raw;
+    {
+        int px = (4096 - raw_y) * TOUCH_SCALE_X / 4096 - TOUCH_OFF_X;
+        int py = raw_x * TOUCH_SCALE_Y / 4096 - TOUCH_OFF_Y;
+        *rx = px < 0 ? 0 : (px > LCD_W - 1 ? LCD_W - 1 : px);
+        *ry = py < 0 ? 0 : (py > LCD_H - 1 ? LCD_H - 1 : py);
+        if (lcd_rot) { *rx = LCD_W - 1 - *rx; *ry = LCD_H - 1 - *ry; }
+        touch_ok_cnt++;
+        return 1;
+    }
+}
+
+/* ===== Режим 5: ПОБАЙТОВАЯ копия стокового чтения (дизасм almond_touch) =====
+ * Отличия стока от нашего ручного чтения, которые мы НЕ воспроизводили:
+ *  1) задержки: сток udelay(150) ВЕЗДЕ (мы местами ставили udelay(10));
+ *  2) start_i2c перед чтением: сброс контроллера (рег 0x34 бит16), udelay(500),
+ *     CTL1=0x90640042, рег 0x928=1, рег 0x90c=0, DATA=0x48 - мы это пропускали;
+ *  3) START=1 дважды с РАЗДЕЛЬНЫМИ паузами 150мкс;
+ *  4) для X второй байт 0x90, для Y 0x91.
+ * Одно из этого (скорее длинные задержки + честный start_i2c) вытягивает
+ * высокоомный контакт стилуса на маргинальной панели. Всё palmbus, чип в
+ * покое между чтениями (шина свободна для батареи, как в ручном режиме). */
+#define SM0_RST_REG 0x34
+static void sx_start_i2c(void)
+{
+    u32 v = gr(SM0_RST_REG);
+    gw(SM0_RST_REG, v | 0x10000);       /* пульс сброса SM0 */
+    v = gr(SM0_RST_REG);
+    gw(SM0_RST_REG, v & ~0x10000u);
+    udelay(500);
+    gw(SM0_CTL1, 0x90640042);           /* raw master mode (стоковое значение) */
+    gw(0x928, 1);
+    gw(0x90c, 0);
+    gw(SM0_DATA, SX8650_ADDR);
+}
+
+/* Одно чтение канала стоковой последовательностью. sel/sel2: X=0x80/0x90,
+ * Y=0x81/0x91. Возвращает 12 бит (h&0xF)<<8|l или -1 если пера нет (h==0xFF). */
+static int sx_read_ch_stock(int sel, int sel2)
+{
+    u8 h, l;
+    gw(SM0_DATA, SX8650_ADDR);
+    gw(SM0_START, 0); udelay(150);
+    gw(SM0_DATAOUT, sel);  gw(SM0_STATUS, 2); udelay(150);
+    gw(SM0_START, 0); udelay(150);
+    gw(SM0_DATAOUT, sel2); gw(SM0_STATUS, 2); udelay(150);
+    gw(SM0_CFG, 0xFA);
+    gw(SM0_START, 0); udelay(150);
+    gw(SM0_START, 1); udelay(150);
+    gw(SM0_START, 1); udelay(150);
+    gw(SM0_STATUS, 1); udelay(150);
+    h = gr(SM0_DATAIN) & 0xFF; udelay(150);
+    l = gr(SM0_DATAIN) & 0xFF; udelay(150);
+    gw(SM0_START, 0); udelay(150);
+    gw(SM0_START, 1);
+    if (h == 0xFF) return -1;
+    return ((h & 0x0F) << 8) | l;
+}
+
+static int sx8650_read_stock(int *rx, int *ry)
+{
+    int raw_x, raw_y;
+    u32 saved_ctl1 = gr(SM0_CTL1);
+
+    sx_start_i2c();
+    raw_x = sx_read_ch_stock(0x80, 0x90);
+    if (raw_x < 0) { gw(SM0_CTL1, saved_ctl1); udelay(10); touch_drop_cnt++; return 0; }
+    sx_start_i2c();
+    raw_y = sx_read_ch_stock(0x81, 0x91);
+    gw(SM0_CTL1, saved_ctl1); udelay(10);
+    if (raw_y < 0) { touch_drop_cnt++; return 0; }
+
+    {
+        int px = (4096 - raw_y) * TOUCH_SCALE_X / 4096 - TOUCH_OFF_X;
+        int py = raw_x * TOUCH_SCALE_Y / 4096 - TOUCH_OFF_Y;
+        *rx = px < 0 ? 0 : (px > LCD_W - 1 ? LCD_W - 1 : px);
+        *ry = py < 0 ? 0 : (py > LCD_H - 1 ? LCD_H - 1 : py);
+        if (lcd_rot) { *rx = LCD_W - 1 - *rx; *ry = LCD_H - 1 - *ry; }
+        touch_ok_cnt++;
+        return 1;
+    }
+}
+
+/* ===== Режим 4: автомат PENDET<->PENTRG (как заводской almond_touch) =====
+ * Разгадка из дизасма стока: чип НЕ держат в непрерывной конверсии. Покой =
+ * PENDET (0xC0): чип ждёт перо, НЕ конвертит -> шина SM0 свободна -> palmbus
+ * читает батарею PIC. Касание (RegStat.PENIRQ, бит 6) -> PENTRG (0xE0): чип
+ * конвертит X,Y с FILT-усреднением (reg0x01=0x27) - усреднение вытягивает
+ * высокоомный контакт стилуса. Пропало перо -> назад в PENDET. Так стилус и
+ * батарея уживаются на общей шине. NIRQ (GPIO0) не используем - поллим RegStat.
+ * Всё через palmbus (Linux-I2C с ним несовместим). */
+static int pen_active = 0;
+static int sm_empty = 0;
+
+static void sx_pb_cmd(u8 cmd)
+{
+    u32 sc = gr(SM0_CTL1);
+    gw(SM0_CTL1, 0x90640042); udelay(10);
+    gw(SM0_CFG, 0xFA);
+    i2c_raw_start(); i2c_raw_write(cmd); i2c_raw_stop();
+    gw(SM0_CTL1, sc); udelay(10);
+}
+
+static void sx8650_config_sm(void)
+{
+    u32 saved_ctl1 = gr(SM0_CTL1);
+    gw(SM0_CTL1, 0x90640042);
+    i2c_raw_start(); i2c_raw_write(0x1F); i2c_raw_write(0xDE); i2c_raw_stop(); mdelay(50);
+    i2c_raw_start(); i2c_raw_write(0x00); i2c_raw_write(0x00); i2c_raw_stop(); udelay(150); /* CTRL0 RATE=0 */
+    i2c_raw_start(); i2c_raw_write(0x01); i2c_raw_write(0x27); i2c_raw_stop(); udelay(150); /* FILT макс */
+    i2c_raw_start(); i2c_raw_write(0x02); i2c_raw_write(0x00); i2c_raw_stop(); udelay(150);
+    i2c_raw_start(); i2c_raw_write(0x04); i2c_raw_write(0xF0); i2c_raw_stop(); udelay(150); /* X,Y,Z1,Z2 */
+    i2c_raw_start(); i2c_raw_write(0xC0); i2c_raw_stop(); udelay(150);                       /* PENDET - покой */
+    gw(SM0_CFG, 0xFA);
+    gw(SM0_CTL1, saved_ctl1); udelay(10);
+    pen_active = 0; sm_empty = 0;
+}
+
+static int sx8650_read_sm(int *rx, int *ry)
+{
+    int stat, ch, raw_x, raw_y;
+    u16 v; u8 d[2];
+    u32 sc = gr(SM0_CTL1);
+
+    gw(SM0_CTL1, 0x90640042); udelay(10);
+    gw(SM0_DATA, SX8650_ADDR);
+    stat = sx_pb_regread(0x05);
+    gw(SM0_CTL1, sc); udelay(10);
+
+    if (!pen_active) {
+        /* Покой в PENDET: ждём PENIRQ (бит6). Пока пера нет - шину не держим,
+         * между этими опросами батарея читается свободно. */
+        if (stat & 0x40) {              /* перо коснулось */
+            sx_pb_cmd(0xE0);            /* -> PENTRG (усреднённая конверсия) */
+            pen_active = 1; sm_empty = 0;
+            lastx_raw = lasty_raw = -1;
+        }
+        return 0;
+    }
+    /* PENTRG: канал готов по CONVIRQ (бит7). */
+    if (!(stat & 0x80)) {
+        if (++sm_empty > 8) { sx_pb_cmd(0xC0); pen_active = 0; }  /* перо ушло -> PENDET */
+        return 0;
+    }
+    gw(SM0_CTL1, 0x90640042); udelay(10);
+    gw(SM0_DATA, SX8650_ADDR);
+    sx_pb_read(d, 2);
+    gw(SM0_CTL1, sc); udelay(10);
+
+    v = ((u16)d[0] << 8) | d[1];
+    if (v == 0xFFFF || (v & 0x8000)) {
+        if (++sm_empty > 8) { sx_pb_cmd(0xC0); pen_active = 0; }
+        return 0;
+    }
+    sm_empty = 0;
+    ch = (v >> 12) & 7;
+    if (ch == 0) { lastx_raw = v & 0x0FFF; lastx_j = jiffies; }
+    else if (ch == 1) { lasty_raw = v & 0x0FFF; lasty_j = jiffies; }
+    else return 0;
+    if (lastx_raw < 0 || lasty_raw < 0) return 0;
+    if (jiffies - lastx_j > msecs_to_jiffies(120) ||
+        jiffies - lasty_j > msecs_to_jiffies(120)) return 0;
+    raw_x = lastx_raw; raw_y = lasty_raw;
+    {
+        int px = (4096 - raw_y) * TOUCH_SCALE_X / 4096 - TOUCH_OFF_X;
+        int py = raw_x * TOUCH_SCALE_Y / 4096 - TOUCH_OFF_Y;
+        *rx = px < 0 ? 0 : (px > LCD_W - 1 ? LCD_W - 1 : px);
+        *ry = py < 0 ? 0 : (py > LCD_H - 1 ? LCD_H - 1 : py);
+        if (lcd_rot) { *rx = LCD_W - 1 - *rx; *ry = LCD_H - 1 - *ry; }
+        touch_ok_cnt++;
+        return 1;
+    }
+}
+
 static int touch_fn(void *data)
 {
     int x, y, was_pressed = 0;
@@ -2287,9 +2699,14 @@ static int touch_fn(void *data)
     int cfg_counter = 0;
 
     while (!kthread_should_stop()) {
-        /* Touch read (palmbus direct, SM0_CTL1 saved/restored) */
-        if (touch_mode ? sx8650_read_pentrg(&x, &y)
-                       : sx8650_read_xy(&x, &y)) {
+        /* Touch read: 2 = PENTRG по штатному I2C (стоко-подобный, тянет
+         * высокоомный контакт), 1 = старый palmbus-PENTRG, 0 = ручной SELECT. */
+        if (touch_mode == 5 ? sx8650_read_stock(&x, &y)
+            : (touch_mode == 4 ? sx8650_read_sm(&x, &y)
+            : (touch_mode == 3 ? sx8650_read_pmtrg(&x, &y)
+            : (touch_mode == 2 ? sx8650_read_i2c(&x, &y)
+            : (touch_mode ? sx8650_read_pentrg(&x, &y)
+                          : sx8650_read_xy(&x, &y)))))) {
             touch_x = x;
             touch_y = y;
             touch_pressed = 1;
@@ -2309,8 +2726,16 @@ static int touch_fn(void *data)
         if (touch_mode_req >= 0) {
             touch_mode = touch_mode_req;
             touch_mode_req = -1;
-            sx8650_config(touch_mode);
-            pr_info("тач: режим %s\n", touch_mode ? "PENTRG" : "ручной");
+            if (touch_mode == 5) sx8650_config(0);
+            else if (touch_mode == 4) sx8650_config_sm();
+            else if (touch_mode == 3) sx8650_config_pmtrg();
+            else if (touch_mode == 2) sx8650_config_i2c();
+            else sx8650_config(touch_mode);
+            pr_info("тач: режим %s\n",
+                    touch_mode == 5 ? "STOCK" :
+                    (touch_mode == 4 ? "SM" :
+                    (touch_mode == 3 ? "PENTRG-pb" :
+                    (touch_mode == 2 ? "PENTRG-i2c" : (touch_mode ? "PENTRG" : "ручной")))));
         }
 
         if (sx_reg_req >= 0) {
@@ -2328,15 +2753,49 @@ static int touch_fn(void *data)
          * страховка вместо сверки регистров. */
         if (++cfg_counter >= 2000) {
             cfg_counter = 0;
-            if (!touch_pressed && no_touch_count > 150)
-                sx8650_config(touch_mode);
+            if (!touch_pressed && no_touch_count > 150) {
+                if (touch_mode == 5) sx8650_config(0);
+                else if (touch_mode == 4) sx8650_config_sm();
+                else if (touch_mode == 3) sx8650_config_pmtrg();
+                else if (touch_mode == 2) sx8650_config_i2c();
+                else sx8650_config(touch_mode);
+            }
         }
 
-        /* Battery read every ~10 sec (200 * 50ms) */
+        /* Battery read every ~10 sec (200 * 50ms). PIC живёт только через
+         * palmbus (Linux-I2C 0x36 отдаёт застывшие данные - не запускает свежую
+         * конверсию). А palmbus-чтение PIC требует свободной шины: в mode 2 тач
+         * идёт непрерывным PENTRG и держит SM0 занятым. Поэтому на время чтения
+         * батареи ГЛУШИМ PENTRG (RATE=0 через Linux-I2C), читаем PIC palmbus'ом
+         * (чип простаивает, шина свободна), затем перезапускаем PENTRG. Тач
+         * "слепнет" на ~15мс раз в 10с - незаметно. */
         battery_counter++;
         if (battery_counter >= 333) {
             battery_counter = 0;
-            pic_read_battery_palmbus();
+            if (touch_mode == 4) {
+                /* Автомат: батарею читаем только в покое (PENDET, пера нет) -
+                 * тогда шина свободна. Под касанием пропускаем этот цикл. */
+                if (!pen_active) pic_read_battery_palmbus();
+            } else if (touch_mode == 3) {
+                /* Всё palmbus: глушим PENTRG через palmbus (RATE=0), освобождаем
+                 * шину, читаем PIC palmbus'ом живьём, перезапускаем PENTRG.
+                 * Никакого Linux-I2C - он несовместим с palmbus на SM0. */
+                u32 sc = gr(SM0_CTL1);
+                gw(SM0_CTL1, 0x90644042); udelay(10);
+                i2c_raw_start(); i2c_raw_write(0x00); i2c_raw_write(0x00); i2c_raw_stop();  /* CTRL0 RATE=0: стоп авто-конверсии */
+                gw(SM0_CTL1, sc); udelay(10);
+                usleep_range(3000, 4000);
+                pic_read_battery_palmbus();
+                sx8650_config_pmtrg();
+            } else if (touch_mode == 2) {
+                /* mode 2: тач идёт штатным Linux-I2C (непрерывный PENTRG).
+                 * palmbus тут рвёт шину, поэтому PIC читаем ТЕМ ЖЕ Linux-I2C -
+                 * ядровый i2c-core сериализует доступ к SX8650 и PIC, коллизии
+                 * нет. Это и есть замысел «всё через один транспорт». */
+                pic_read_battery();
+            } else {
+                pic_read_battery_palmbus();
+            }
         }
 
         /* Диод: команда ставится в очередь классом светодиодов ядра и
@@ -2736,10 +3195,10 @@ static long lcd_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
         return -EIO;
     }
     if (cmd == 29) {
-        /* Режим тача: 1 = PENTRG (по даташиту), 0 = ручной (легаси).
-         * Страховка на случай, если PENTRG на живом стекле поведёт себя
-         * не так, как обещает документация. */
-        touch_mode_req = arg ? 1 : 0;
+        /* Режим тача: 0 = ручной SELECT (легаси, дефолт), 1 = старый
+         * palmbus-PENTRG (тупик, оставлен как памятник), 2 = PENTRG по
+         * штатному I2C (стоко-подобный, тянет высокоомный контакт/стилус). */
+        touch_mode_req = (arg > 5) ? 5 : (int)arg;
         return 0;
     }
     if (cmd == 28) {

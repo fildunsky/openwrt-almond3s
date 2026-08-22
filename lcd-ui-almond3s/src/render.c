@@ -147,6 +147,46 @@ static void fb_rect_round(int x, int y, int w, int h, uint16_t c, int r)
 /* Вертикальный градиент: цвет c0 сверху -> c1 снизу, интерполяция по строкам.
  * Считаем в компонентах RGB565 - для мягкой подложки точности хватает, а строка
  * заливается одним цветом, так что стоимость почти как у fb_rect. */
+/* Лёгкое свечение акцентным цветом в нижнем правом углу карточки. Считаем
+ * в C, а не десятком прямоугольников из ui.uc: на кадр приходится до десяти
+ * карточек, и каждая лишняя команда - это байты в сокет и разбор JSON.
+ * Прозрачности у панели нет, поэтому смешиваем с тем, что уже лежит в кадре. */
+static void fb_corner(int x, int y, int w, int h, uint16_t c, int strength, int left)
+{
+    int i, j;
+    if (w <= 0 || h <= 0) return;
+    for (j = 0; j < h; j++) {
+        int py = y + j;
+        if (py < 0 || py >= LCD_H) continue;
+        for (i = 0; i < w; i++) {
+            int px = x + i;
+            int a, dx, dy;
+            uint16_t o;
+            if (px < 0 || px >= LCD_W) continue;
+            /* Спад РАДИАЛЬНЫЙ от угла: плотность падает по расстоянию, а не
+             * по сумме координат - иначе граница пятна читается диагональной
+             * складкой. Корень считаем приближением max + min*3/8: ошибка
+             * около четырёх процентов, а умножений на пиксель ни одного
+             * лишнего (на кадр таких пикселей десятки тысяч). */
+            dx = (left ? i : (w - 1 - i)) * 100 / w;
+            dy = (h - 1 - j) * 100 / h;
+            {
+                int mx = dx > dy ? dx : dy, mn = dx > dy ? dy : dx;
+                a = 100 - (mx + mn * 3 / 8);
+            }
+            if (a <= 0) continue;
+            a = a * strength / 100;
+            o = fb[py * LCD_W + px];
+            {
+                int r = (((c >> 11) & 0x1F) * a + ((o >> 11) & 0x1F) * (100 - a)) / 100;
+                int g = (((c >> 5) & 0x3F) * a + ((o >> 5) & 0x3F) * (100 - a)) / 100;
+                int b = ((c & 0x1F) * a + (o & 0x1F) * (100 - a)) / 100;
+                fb[py * LCD_W + px] = (uint16_t)((r << 11) | (g << 5) | b);
+            }
+        }
+    }
+}
+
 static void fb_vgrad(int x, int y, int w, int h, uint16_t c0, uint16_t c1)
 {
     int x1 = x + w, y1 = y + h;
@@ -286,12 +326,72 @@ static const struct { uint16_t cp; uint8_t g[5]; } font5x7_sym[] = {
 };
 
 #include "flipper_fonts.h"
+#include "pixel_fonts.h"
+
+/* Пиксельных шрифтов теперь несколько, выбор приходит командой fontmode:
+ * 1 - haxrcorp (Flipper), 2 - bitcell, 3 - thin pixel. Ноль - встроенный
+ * font5x7. Чего в выбранном шрифте нет, рендерер добирает из font5x7 - там
+ * же лежат все символы, которых пиксельным шрифтам не хватает. */
+static const struct fz_glyph *fz_glyphs = fz_hax_glyphs;
+static const uint8_t *fz_bits = fz_hax_bits;
+static int fz_count = FZ_HAX_COUNT;
+
+/* Комбо (режим 4): крупный текст - заголовки, часы, значения - плотным
+ * bitcell, мелкий - тонким thin pixel. Решает МАСШТАБ строки, поэтому таблицу
+ * выбираем на входе в отрисовку, а не один раз на команду. */
+static void fz_use(int scale);
+
+static void fz_select(int mode)
+{
+    if (mode == 2) { fz_glyphs = fz_bitcell_glyphs; fz_bits = fz_bitcell_bits; fz_count = FZ_BITCELL_COUNT; }
+    else if (mode == 3) { fz_glyphs = fz_thin_glyphs; fz_bits = fz_thin_bits; fz_count = FZ_THIN_COUNT; }
+    else if (mode == 7) { fz_glyphs = fz_lcd_glyphs; fz_bits = fz_lcd_bits; fz_count = FZ_LCD_COUNT; }
+    else if (mode == 8) { fz_glyphs = fz_hard_glyphs; fz_bits = fz_hard_bits; fz_count = FZ_HARD_COUNT; }
+    else { fz_glyphs = fz_hax_glyphs; fz_bits = fz_hax_bits; fz_count = FZ_HAX_COUNT; }
+}
+
+/* Светлый вариант режима: чем рисовать мелкую служебную строку, когда режим
+ * парный. У «Комбо» это тонкий thin, у спектрумовской пары - обычное
+ * начертание. Для одиночных шрифтов - он сам. */
+static int fz_light_of(int mode)
+{
+    if (mode == 4) return 0;    /* «Комбо»: мелкое - встроенным 5x7 */
+    if (mode == 11) return 3;   /* «Pixel»: мелкое - тонким thin */
+    return mode;
+}
 
 /* Режим шрифта: 0 - встроенный 5x7, 1 - haxrcorp4089 из Flipper Zero.
    Рисуем его МОНОШИРИННО в ту же клетку 6x8, что и 5x7: вся геометрия
    страниц посчитана из ширины 6*scale на символ, и пропорциональный вывод
    разъехался бы по всем правым краям и центровкам. */
 static int font_mode = 0;
+
+/* Строка может попросить конкретный шрифт: 0 - как решит режим, 3 - тонкий.
+ * Нужно статус-строке: в «Комбо» часы и заряд идут вторым размером и уезжали
+ * в плотный bitcell, хотя это мелкая служебная строка, а не заголовок. */
+static int fz_force;
+
+/* Строка рисуется встроенным 5x7, хотя режим пиксельный: так устроено
+ * «Комбо 2», где мелкий текст идёт нашим родным шрифтом. */
+static int fz_off;
+
+static void fz_use(int scale)
+{
+    fz_off = 0;
+    /* fz_force == -1 - «светлое начертание текущего режима»: строка сама не
+     * знает, какой шрифт выбран, а просит потоньше. */
+    if (fz_force == -1) {
+        int m = fz_light_of(font_mode);
+        if (m == 0) { fz_off = 1; return; }   /* светлое = встроенный 5x7 */
+        fz_select(m);
+        return;
+    }
+    if (fz_force) { fz_select(fz_force); return; }
+    /* «Комбо»: крупное - плотным bitcell, мелкое - встроенным 5x7. */
+    if (font_mode == 4) { if (scale >= 2) fz_select(2); else fz_off = 1; }
+    /* «Pixel»: крупное - Hardpixel, мелкое - тонким thin. */
+    else if (font_mode == 11) fz_select(scale >= 2 ? 8 : 3);
+}
 
 static const struct fz_glyph *fz_find(const struct fz_glyph *g, int n, unsigned cp)
 {
@@ -318,7 +418,7 @@ static int fz_ink_left(const struct fz_glyph *g, int row)
     int lr = row - top;
     if (lr < 0 || lr >= g->h) return -1;
     for (c = 0; c < g->w; c++)
-        if (fz_hax_bits[g->off + lr * bpr + c / 8] & (0x80 >> (c % 8)))
+        if (fz_bits[g->off + lr * bpr + c / 8] & (0x80 >> (c % 8)))
             return g->x + c;
     return -1;
 }
@@ -329,7 +429,7 @@ static int fz_ink_right(const struct fz_glyph *g, int row)
     int lr = row - top;
     if (lr < 0 || lr >= g->h) return -1;
     for (c = g->w - 1; c >= 0; c--)
-        if (fz_hax_bits[g->off + lr * bpr + c / 8] & (0x80 >> (c % 8)))
+        if (fz_bits[g->off + lr * bpr + c / 8] & (0x80 >> (c % 8)))
             return g->x + c;
     return -1;
 }
@@ -391,7 +491,7 @@ static int fz_kern(const struct fz_glyph *gp, const struct fz_glyph *gc, int wan
 
 static int fz_char_mono(int x, int y, unsigned cp, uint16_t fg, uint16_t bg, int scale, int draw_bg)
 {
-    const struct fz_glyph *g = fz_find(fz_hax_glyphs, FZ_HAX_COUNT, cp);
+    const struct fz_glyph *g = fz_find(fz_glyphs, fz_count, cp);
     int row, col, sx, sy;
     if (!g) return 0;
     if (draw_bg)
@@ -404,7 +504,7 @@ static int fz_char_mono(int x, int y, unsigned cp, uint16_t fg, uint16_t bg, int
         int gy = y + (7 - g->h - g->y) * scale;
         for (row = 0; row < g->h; row++)
             for (col = 0; col < g->w; col++)
-                if (fz_hax_bits[g->off + row * bpr + col / 8] & (0x80 >> (col % 8)))
+                if (fz_bits[g->off + row * bpr + col / 8] & (0x80 >> (col % 8)))
                     for (sy = 0; sy < scale; sy++)
                         for (sx = 0; sx < scale; sx++)
                             fb_pixel(gx + col * scale + sx, gy + row * scale + sy, fg);
@@ -449,7 +549,9 @@ static int fb_tabular(unsigned cp)
  * потому что у «1» чернила уже, чем у остальных цифр). */
 static int fb_adv(unsigned cp)
 {
-    return cp == ':' ? 4 : 6;
+    /* Двоеточие уже, но не 4: при 4 следующий знак прилипал (часы «11:04»,
+       мак «:B»). 5 даёт зазор после него, оставаясь плотнее обычных 6. */
+    return cp == ':' ? 5 : 6;
 }
 
 static int fb_kern(const uint8_t *gp, const uint8_t *gc)
@@ -474,7 +576,8 @@ static void fb_char(int x, int y, unsigned cp, uint16_t fg, uint16_t bg, int sca
     const uint8_t *g;
     int col, row, sx, sy;
 
-    if (font_mode == 1 && fz_char_mono(x, y, cp, fg, bg, scale, !transp))
+    fz_use(scale);
+    if ((font_mode >= 1 && !fz_off) && fz_char_mono(x, y, cp, fg, bg, scale, !transp))
         return;
 
     g = fb_glyph(cp);
@@ -507,6 +610,8 @@ static int fb_text_w(const char *s, int scale)
     unsigned prev = 0;
     int w = 0, first = 1;
 
+    fz_use(scale);
+
     while (*p) {
         unsigned cp;
         if (*p == '\n') { p++; continue; }
@@ -521,15 +626,15 @@ static int fb_text_w(const char *s, int scale)
             cp = *p;
             p++;
         }
-        if (font_mode != 1 && !first && cp != ' ' && prev != ' '
-            && !(fb_tabular(cp) && fb_tabular(prev))) {
+        if ((font_mode < 1 || fz_off) && !first && cp != ' ' && prev != ' '
+            && prev != ':' && !(fb_tabular(cp) && fb_tabular(prev))) {
             int kern = fb_kern(fb_glyph(prev), fb_glyph(cp));
             if (kern) w -= kern * scale;
         }
-        if (font_mode == 1) {
-            const struct fz_glyph *g = fz_find(fz_hax_glyphs, FZ_HAX_COUNT, cp);
+        if ((font_mode >= 1 && !fz_off)) {
+            const struct fz_glyph *g = fz_find(fz_glyphs, fz_count, cp);
             if (!first && fz_kern_pair(prev, cp))
-                w -= fz_kern(fz_find(fz_hax_glyphs, FZ_HAX_COUNT, prev), g,
+                w -= fz_kern(fz_find(fz_glyphs, fz_count, prev), g,
                              fz_kernable(prev) ? 2 : 1) * scale;
             w += (g ? g->adv : 6) * scale;
         } else {
@@ -551,6 +656,8 @@ static void fb_text(int x, int y, const char *s, uint16_t fg, uint16_t bg, int s
     int n = 0, i;
     const unsigned char *p = (const unsigned char *)s;
 
+    fz_use(scale);
+
     while (*p && n < 256) {
         unsigned cp;
         if (*p == '\n') { y += 8 * scale; x = x0; p++; continue; }
@@ -565,23 +672,26 @@ static void fb_text(int x, int y, const char *s, uint16_t fg, uint16_t bg, int s
             cp = *p;
             p++;
         }
-        if (font_mode != 1 && n > 0 && cp != ' ' && cps[n - 1] != ' '
-            && !(fb_tabular(cp) && fb_tabular(cps[n - 1]))) {
+        if ((font_mode < 1 || fz_off) && n > 0 && cp != ' ' && cps[n - 1] != ' '
+            && cps[n - 1] != ':' && !(fb_tabular(cp) && fb_tabular(cps[n - 1]))) {
+            /* После двоеточия кернинг НЕ применяем: глиф уже сдвинут влево и
+             * имеет узкий адванс, а подтяжка соседа съедала последний зазор -
+             * «:E» в мак-адресах слипались. */
             int kern = fb_kern(fb_glyph(cps[n - 1]), fb_glyph(cp));
             if (kern) x -= kern * scale;
         }
         /* Узкую клетку двоеточия компенсируем сдвигом самого глифа: его
          * чернила лежат в колонках 2-3 пятиколоночной сетки, и без сдвига
          * оно прижалось бы к правому соседу. */
-        if (font_mode == 1 && n > 0 && fz_kern_pair(cps[n - 1], cp)) {
-            int k = fz_kern(fz_find(fz_hax_glyphs, FZ_HAX_COUNT, cps[n - 1]),
-                            fz_find(fz_hax_glyphs, FZ_HAX_COUNT, cp),
+        if ((font_mode >= 1 && !fz_off) && n > 0 && fz_kern_pair(cps[n - 1], cp)) {
+            int k = fz_kern(fz_find(fz_glyphs, fz_count, cps[n - 1]),
+                            fz_find(fz_glyphs, fz_count, cp),
                             fz_kernable(cps[n - 1]) ? 2 : 1);
             x -= k * scale;
         }
         cps[n] = cp; cx[n] = x - (cp == ':' ? scale : 0); cy[n] = y;
-        if (font_mode == 1) {
-            const struct fz_glyph *g = fz_find(fz_hax_glyphs, FZ_HAX_COUNT, cp);
+        if ((font_mode >= 1 && !fz_off)) {
+            const struct fz_glyph *g = fz_find(fz_glyphs, fz_count, cp);
             adv[n] = (g ? g->adv : 6) * scale;
         } else {
             adv[n] = fb_adv(cp) * scale;
@@ -590,7 +700,7 @@ static void fb_text(int x, int y, const char *s, uint16_t fg, uint16_t bg, int s
         n++;
     }
 
-    if (font_mode == 1) {
+    if ((font_mode >= 1 && !fz_off)) {
         /* Два прохода: сперва фон всех клеток, затем глифы. Иначе широкий
            глиф (W, Ж, Щ) срезается фоном соседней клетки. Прозрачный текст
            фоновый проход пропускает - под буквами остаётся подложка. */
@@ -601,7 +711,7 @@ static void fb_text(int x, int y, const char *s, uint16_t fg, uint16_t bg, int s
         if (!transp && n > 0) {
             int x0 = cx[0], x1 = cx[0];
             for (i = 0; i < n; i++) {
-                const struct fz_glyph *g = fz_find(fz_hax_glyphs, FZ_HAX_COUNT, cps[i]);
+                const struct fz_glyph *g = fz_find(fz_glyphs, fz_count, cps[i]);
                 int right = cx[i] + adv[i];
                 if (g) {
                     int ink = cx[i] + (g->x + g->w) * scale;
@@ -778,6 +888,16 @@ static void handle_cmd(const char *json)
                                rr > 0 ? rr : rl, rr > 0);
         else fb_rect_round(x, y, w, h, parse_color(color), r);
     }
+    else if (!strcmp(cmd, "corner")) {
+        int x = json_int(json, "x", 0);
+        int y = json_int(json, "y", 0);
+        int w = json_int(json, "w", 10);
+        int h = json_int(json, "h", 10);
+        int st = json_int(json, "a", 30);
+        int lf = json_int(json, "lft", 0);
+        json_str(json, "color", color, sizeof(color));
+        fb_corner(x, y, w, h, parse_color(color[0] ? color : "white"), st, lf);
+    }
     else if (!strcmp(cmd, "vgrad")) {
         int x = json_int(json, "x", 0);
         int y = json_int(json, "y", 0);
@@ -807,14 +927,26 @@ static void handle_cmd(const char *json)
          * тем сильнее, чем короче надпись - цифры в клетках стояли не по центру. */
         char anch[8];
         json_str(json, "anchor", anch, sizeof(anch));
+        /* Просьба о начертании имеет смысл только в парных режимах. */
+        fz_force = (font_mode == 4 || font_mode == 11) ? json_int(json, "fnt", 0) : 0;
+        /* Подгонка по ширине: строка просит размер, но если в отведённое место
+         * она не влезает - роняем на ступень. Мерить должен рендерер: он один
+         * знает настоящую ширину с кернингом и с учётом выбранного шрифта, а
+         * прикидка «знаков на шесть» в ui.uc врала на десяток пикселей. */
+        {
+            int fit = json_int(json, "fit", 0);
+            while (fit > 0 && size > 1 && fb_text_w(text, size) > fit) size--;
+        }
         if (anch[0] == 'r') x -= fb_text_w(text, size);
         else if (anch[0] == 'c') x -= fb_text_w(text, size) / 2;
         fb_text(x, y, text, parse_color(color[0] ? color : "white"),
                 parse_color((bg_color[0] && !transp) ? bg_color : "black"),
                 size, transp);
+        fz_force = 0;
     }
     else if (!strcmp(cmd, "fontmode")) {
         font_mode = json_int(json, "mode", 0);
+        fz_select(font_mode);
     }
     else if (!strcmp(cmd, "flush")) {
         flush_cmd();

@@ -321,12 +321,18 @@ int main(int argc, char **argv)
         return ret < 0 ? 1 : 0;
     }
 
-    /* almond3s-lcd touchmode pentrg|manual — режим опроса SX8650 (ioctl 29):
-     * pentrg = чип сам меряет по касанию, пачка X,Y,Z1,Z2 (по даташиту);
-     * manual = легаси-опрос SELECT/CONVERT (страховка). */
+    /* almond3s-lcd touchmode manual|pentrg|i2c — режим опроса SX8650 (ioctl 29):
+     * manual = ручной SELECT (дефолт); pentrg = старый palmbus-PENTRG (тупик);
+     * i2c = PENTRG по штатному I2C (стоко-подобный, тянет стилус/высокоомный
+     * контакт). Число 0/1/2 тоже принимается. */
     if (argc >= 3 && strcmp(argv[1], "touchmode") == 0) {
-        int ret = ioctl(fd, 29,
-                        (unsigned long)(strcmp(argv[2], "manual") != 0));
+        int m;
+        if (strcmp(argv[2], "manual") == 0) m = 0;
+        else if (strcmp(argv[2], "pentrg") == 0) m = 1;
+        else if (strcmp(argv[2], "i2c") == 0) m = 2;
+        else if (strcmp(argv[2], "pmtrg") == 0) m = 3;
+        else m = atoi(argv[2]);
+        int ret = ioctl(fd, 29, (unsigned long)m);
         close(fd);
         return ret < 0 ? 1 : 0;
     }

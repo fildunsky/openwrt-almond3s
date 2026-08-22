@@ -150,6 +150,23 @@ static int frame_body(const unsigned char *f, int m, const unsigned char **body)
 static unsigned char zkey[16];
 static int zkey_ok;
 
+/* Ключ шифрования телеметрии. Сначала спрашиваем у чипа СЕТЕВОЙ ключ: он
+   одинаков у всех в сети по определению и приезжает вступающему сам, поэтому
+   разносить секрет руками больше не нужно. Файл остаётся запасным путём - для
+   маячкового режима, где сети нет вовсе. */
+static int get_network_key(unsigned char *out16);
+
+static void zkey_from_net(void)
+{
+    unsigned char k[16];
+    if (get_network_key(k) != 0) return;
+    int allz = 1;
+    for (int i = 0; i < 16; i++) if (k[i]) { allz = 0; break; }
+    if (allz) return;
+    memcpy(zkey, k, 16);
+    zkey_ok = 1;
+}
+
 static void zkey_load(void)
 {
     const char *path = getenv("ZIG_KEY") ? getenv("ZIG_KEY") : "/tmp/.zig_key";
@@ -669,16 +686,68 @@ static int mfg_power(int mode, int pw)
     return -1;
 }
 
+/* Общеизвестный link-ключ доверенного центра из стандарта Zigbee. Ровно эта
+   строка лежит и в заводской прошивке Almond (в zigbee_server по смещению
+   0xa98cc): вступающий приходит с ним, а сетевой ключ ему выдаёт координатор.
+   Держать сетевой ключ на обеих сторонах заранее, как делали мы, стандарт не
+   требует - отсюда и морока с ручным копированием. */
+static const unsigned char zb_alliance09[16] =
+    "ZigBeeAlliance09";
+
+/* Текущий сетевой ключ из чипа (EZSP getKey, тип 3). Нужен телеметрии: свой
+   ключ шифрования она теперь берёт отсюда, а не из конфига, и он одинаков у
+   всех в сети просто потому, что это ключ самой сети. */
+static int get_network_key(unsigned char *out16)
+{
+    unsigned char pl[96], d[1] = { 3 };
+    ezsp_cmd(0x6A, d, 1);
+    for (int i = 0; i < 8; i++) {
+        int pn = ezsp_read(pl, sizeof pl, 800);
+        if (pn >= 4 && pl[2] == 0x6A) {
+            if (getenv("ZIG_DEBUG_KEY")) {
+                fprintf(stderr, "getKey ответ (%d байт):", pn);
+                for (int j = 0; j < pn; j++) fprintf(stderr, " %02X", pl[j]);
+                fprintf(stderr, "\n");
+            }
+            if (pl[3] != 0 || pn < 7 + 16) return -1;
+            /* Ответ: seq(1) ctrl(1) frameId(1) status(1), дальше
+               EmberKeyStruct - bitmask(2) type(1) key(16). Ключ начинается на
+               седьмом байте; проверено по сырому кадру от чипа. Смещение 9,
+               которое я поставил сгоряча, прихватывало два байта счётчика
+               кадров - оттого отпечаток ключа всегда заканчивался одинаково. */
+            memcpy(out16, pl + 7, 16);
+            return 0;
+        }
+    }
+    return -1;
+}
+
 static int join_net(int pan, int channel, int power, const unsigned char *key)
 {
     unsigned char par[64], pl[64];
     int n = 0;
 
-    int secmask = getenv("ZIG_SECMASK") ? (int)strtol(getenv("ZIG_SECMASK"), NULL, 0) : 0x0300;
+    /* По стандарту: у нас на руках только link-ключ, сетевой придёт от
+       доверенного центра. Старое поведение (сетевой ключ прописан заранее)
+       осталось запасным - ZIG_LEGACY_KEY=1. */
+    int legacy = getenv("ZIG_LEGACY_KEY") && atoi(getenv("ZIG_LEGACY_KEY"));
+    int secmask = legacy ? 0x0300 : 0x0104;   /* 0x0100 предустановленный ключ,
+                                                 0x0004 - он глобальный TC-шный */
+    if (getenv("ZIG_SECMASK")) secmask = (int)strtol(getenv("ZIG_SECMASK"), NULL, 0);
+    const unsigned char *lk = legacy ? key : zb_alliance09;
+    /* Никакого выравнивания после маски быть не должно: EmberInitialSecurityState
+       это bitmask(2) + preconfiguredKey(16) + networkKey(16) + seq(1) + eui(8).
+       Два лишних нуля сдвигали оба ключа на два байта - чип годами работал с
+       ключом, провёрнутым относительно того, что в конфиге. Ловилось только
+       чтением ключа из самого чипа: он отдавал «DE0123456789@ABC» вместо
+       «0123456789@ABCDE». Раньше это сходило с рук, потому что обе стороны
+       ошибались одинаково, но со стандартным вступлением так уже нельзя -
+       общеизвестный link-ключ должен уйти в чип ровно таким, как в стандарте. */
     par[n++] = (unsigned char)(secmask & 0xFF); par[n++] = (unsigned char)((secmask >> 8) & 0xFF);
-    par[n++] = 0x00; par[n++] = 0x00;
-    memcpy(par + n, key, 16); n += 16;
-    memcpy(par + n, key, 16); n += 16;
+    memcpy(par + n, lk, 16); n += 16;
+    if (legacy) memcpy(par + n, key, 16);
+    else memset(par + n, 0, 16);
+    n += 16;
     par[n++] = 0x00;
     memset(par + n, 0, 8); n += 8;
     ezsp_cmd(0x68, par, n);
@@ -721,11 +790,35 @@ static int form(int pan, int channel, int power, const unsigned char *key)
     unsigned char par[64], pl[64];
     int n = 0;
 
-    int secmask = getenv("ZIG_SECMASK") ? (int)strtol(getenv("ZIG_SECMASK"), NULL, 0) : 0x0200;
+    /* Сетевой ключ поднимающий сеть придумывает сам - случайный, как это
+       делает заводская прошивка (там за это отвечает emberAfGenerateRandomKey).
+       Ключ из конфига идёт только в слот link-ключа, а по стандарту им должен
+       быть общеизвестный ZigBeeAlliance09, иначе вступающие его не знают.
+       Старое поведение (обе роли у ключа из конфига) - ZIG_LEGACY_KEY=1. */
+    int legacy = getenv("ZIG_LEGACY_KEY") && atoi(getenv("ZIG_LEGACY_KEY"));
+    unsigned char nk[16];
+    if (legacy) {
+        memcpy(nk, key, 16);
+    } else {
+        FILE *rf = fopen("/dev/urandom", "r");
+        if (!rf || fread(nk, 1, 16, rf) != 16) memcpy(nk, key, 16);
+        if (rf) fclose(rf);
+    }
+    const unsigned char *lk = legacy ? key : zb_alliance09;
+    int secmask = legacy ? 0x0200 : 0x0304;   /* + предустановленный глобальный
+                                                 link-ключ доверенного центра */
+    if (getenv("ZIG_SECMASK")) secmask = (int)strtol(getenv("ZIG_SECMASK"), NULL, 0);
+    /* Никакого выравнивания после маски быть не должно: EmberInitialSecurityState
+       это bitmask(2) + preconfiguredKey(16) + networkKey(16) + seq(1) + eui(8).
+       Два лишних нуля сдвигали оба ключа на два байта - чип годами работал с
+       ключом, провёрнутым относительно того, что в конфиге. Ловилось только
+       чтением ключа из самого чипа: он отдавал «DE0123456789@ABC» вместо
+       «0123456789@ABCDE». Раньше это сходило с рук, потому что обе стороны
+       ошибались одинаково, но со стандартным вступлением так уже нельзя -
+       общеизвестный link-ключ должен уйти в чип ровно таким, как в стандарте. */
     par[n++] = (unsigned char)(secmask & 0xFF); par[n++] = (unsigned char)((secmask >> 8) & 0xFF);
-    par[n++] = 0x00; par[n++] = 0x00;
-    memcpy(par + n, key, 16); n += 16;
-    memcpy(par + n, key, 16); n += 16;
+    memcpy(par + n, lk, 16); n += 16;
+    memcpy(par + n, nk, 16); n += 16;
     par[n++] = 0x00;
     memset(par + n, 0, 8); n += 8;
     ezsp_cmd(0x68, par, n);
@@ -813,6 +906,37 @@ static int permit_join(int secs)
     return -1;
 }
 
+/* Только состояние сети: 0 - ни в какой, 2 - в сети. Нужен отдельно, чтобы
+   дождаться, когда стек действительно опустит сеть после выхода. */
+static int network_state(void)
+{
+    unsigned char pl[64];
+    ezsp_cmd(0x18, NULL, 0);
+    for (int i = 0; i < 6; i++) {
+        int pn = ezsp_read(pl, sizeof pl, 700);
+        if (pn >= 4 && pl[2] == 0x18) return pl[3];
+    }
+    return -1;
+}
+
+/* Параметры текущей сети: PAN и канал. Нужны телеметрии, чтобы класть их в
+   свой JSON - интерфейс показывал значения из конфига, а они у аппаратов
+   разъезжались с тем, где чип на самом деле сидит. */
+static int net_params(int *pan, int *ch)
+{
+    unsigned char pl[64];
+    ezsp_cmd(0x28, NULL, 0);
+    for (int i = 0; i < 6; i++) {
+        int pn = ezsp_read(pl, sizeof pl, 700);
+        if (pn >= 25 && pl[2] == 0x28) {
+            *pan = pl[13] | (pl[14] << 8);
+            *ch = pl[16];
+            return 0;
+        }
+    }
+    return -1;
+}
+
 static void state(void)
 {
     unsigned char pl[64];
@@ -846,7 +970,19 @@ static void leave(void)
         int pn = ezsp_read(pl, sizeof pl, 700);
         if (pn >= 4 && pl[2] == 0x20) { st = pl[3]; break; }
     }
-    printf("{\"ok\":%d,\"leave\":%d}\n", st == 0 ? 1 : 0, st);
+    /* Команда принята - это ещё не выход. Стек кладёт сеть за пару секунд, а
+       всё, что запускалось следом (чтение состояния, перезапуск телеметрии с
+       networkInit), успевало увидеть старую сеть и вернуть узел в неё. Ждём
+       до пяти секунд, пока состояние станет «ни в какой сети». */
+    int down = 0;
+    if (st == 0) {
+        for (int i = 0; i < 25; i++) {
+            usleep(200000);
+            if (network_state() == 0) { down = 1; break; }
+        }
+    }
+    printf("{\"ok\":%d,\"leave\":%d,\"down\":%d}\n",
+           (st == 0 && down) ? 1 : 0, st, down);
 }
 
 #define ZCMD_MARK 0xC1
@@ -921,9 +1057,16 @@ struct peer_ent { char name[24]; int rssi, lqi; unsigned int src; long seen;
 static struct peer_ent pr[PEER_MAX];
 static int npr;
 
+/* Ставится, когда в таблице появился НОВЫЙ сосед: значит, кто-то только что
+   вступил в сеть и ждёт, пока мы объявимся. Ответить через полминуты - это
+   полминуты пустого списка на его экране, поэтому цикл сдвигает свою рассылку
+   на пару секунд вперёд. */
+static int peer_fresh;
+
 static int peer_slot(const char *nm)
 {
     for (int j = 0; j < npr; j++) if (!strcmp(pr[j].name, nm)) return j;
+    peer_fresh = 1;
     int idx;
     if (npr < PEER_MAX) idx = npr++;
     else {
@@ -1098,7 +1241,7 @@ static void mesh_rx(const unsigned char *pl, int pn, const char *me)
                     } else if (g_coord) {
                         static int rseq;
                         for (int j = 0; j < npr; j++) {
-                            if (strcmp(pr[j].name, dn)) continue;
+                            if (strcmp(pr[j].name, dn) || !pr[j].src) continue;
                             unsigned char z2[96];
                             int zn2 = zcl_report(z2, rseq);
                             zcl_attr_bytes(z2, &zn2, ZATTR_CMD, v, blen);
@@ -1284,9 +1427,13 @@ int main(int argc, char **argv)
         }
         fputs(keep, stdout);
     } else if (!strcmp(cmd, "form")) {
-        int pan = argc > 2 ? (int)strtol(argv[2], NULL, 0) : 0x1A2B;
+        /* PAN обязателен: раньше без него подставлялся зашитый 0x1A2B, и любой
+           промах вызывающего уводил аппарат в чужую сеть с «моим» номером. */
+        if (argc <= 2) die("не задан PAN");
+        int pan = (int)strtol(argv[2], NULL, 0);
         int ch  = argc > 3 ? atoi(argv[3]) : 15;
         int pw  = argc > 4 ? atoi(argv[4]) : 8;
+        if (pan <= 0 || pan >= 0xFFFF) die("плохой PAN");
         unsigned char key[16];
         for (int i = 0; i < 16; i++) key[i] = (unsigned char)(0x30 + i);
         if (argc > 5 && strlen(argv[5]) >= 32)
@@ -1296,8 +1443,10 @@ int main(int argc, char **argv)
             }
         form(pan, ch, pw, key);
     } else if (!strcmp(cmd, "join")) {
-        int pan = argc > 2 ? (int)strtol(argv[2], NULL, 0) : 0x1A2B;
+        if (argc <= 2) die("не задан PAN");
+        int pan = (int)strtol(argv[2], NULL, 0);
         int ch  = argc > 3 ? atoi(argv[3]) : 15;
+        if (pan <= 0 || pan >= 0xFFFF) die("плохой PAN");
         unsigned char key[16];
         for (int i = 0; i < 16; i++) key[i] = (unsigned char)(0x30 + i);
         if (argc > 4 && strlen(argv[4]) >= 32)
@@ -1357,11 +1506,27 @@ int main(int argc, char **argv)
 
         int ep = mesh_endpoint();
         init = network_init();
+        /* Ключ телеметрии - сетевой ключ из чипа: он один на всю сеть и
+           приезжает вступающему автоматически. Файл нужен только маячку. */
+        zkey_load();
+        zkey_from_net();
+        long last_key = (long)time(NULL), last_permit = 0;
+        int permit_on = 0;
+        int net_pan = 0, net_ch = 0;
+        net_params(&net_pan, &net_ch);
         if (init == 0) {
             for (int i = 0; i < 6; i++) ezsp_read(pl, sizeof pl, 500);
             if (node_type() == 1) {
+                /* Политику доверенного центра ставим всегда, а вот окно приёма
+                   вечно открытым не держим: раньше здесь стоял permit(0xFF), то
+                   есть в сеть мог войти кто угодно и когда угодно. Окно
+                   открывает человек кнопкой «Приём» на четыре минуты. */
                 tc_policy();
-                permit_join(0xFF);
+                /* Окно приёма переживает перезапуск демона: сам стек его при
+                   networkInit сбрасывает, поэтому оставшиеся секунды нам
+                   передаёт интерфейс - иначе после команды «Приём» окно
+                   закрывалось через пару секунд, вместе с рестартом. */
+                if (getenv("ZIG_PERMIT_ALWAYS")) permit_join(0xFF);
             }
         }
         printf("{\"ok\":%d,\"endpoint\":%d,\"netinit\":%d,\"mode\":\"mesh\"}\n",
@@ -1371,6 +1536,45 @@ int main(int argc, char **argv)
 
         memset(pr, 0, sizeof pr);
         npr = 0;
+        /* Список соседей переживает перезапуск демона. Его перезапускает любая
+           команда - скан эфира, вступление, переключение телеметрии, - и после
+           каждой список на экране обнулялся и потом полминуты набирался
+           заново: со стороны это выглядело как «сосед то появляется, то
+           пропадает». Поднимаем прежний список из своего же файла, но только
+           если сеть та же: после смены сети старые соседи не наши. */
+        {
+            char rb[4096];
+            FILE *rf = fopen(out, "r");
+            if (rf) {
+                size_t got = fread(rb, 1, sizeof rb - 1, rf);
+                rb[got] = 0;
+                fclose(rf);
+                const char *pp = strstr(rb, "\"pan\":");
+                int oldpan = pp ? atoi(pp + 6) : -1;
+                if (oldpan == net_pan) {
+                    const char *q = rb;
+                    while ((q = strstr(q, "{\"name\":\"")) != NULL) {
+                        q += 9;
+                        char nm[24];
+                        int k = 0;
+                        while (*q && *q != '"' && k < (int)sizeof nm - 1) nm[k++] = *q++;
+                        nm[k] = 0;
+                        if (!nm[0]) break;
+                        int idx = peer_slot(nm);
+                        pr[idx].seen = (long)time(NULL) - 90;   /* заведомо несвежий */
+                        /* Возвращаем и уровень: без него строка показывала
+                           «0 dBm» до первой свежей телеметрии. */
+                        const char *ag = strstr(q, "\"age\":");
+                        const char *rs = strstr(q, "\"rssi\":");
+                        const char *lq = strstr(q, "\"lqi\":");
+                        if (ag) pr[idx].seen = (long)time(NULL) - atoi(ag + 6);
+                        if (rs) pr[idx].rssi = atoi(rs + 7);
+                        if (lq) pr[idx].lqi = atoi(lq + 6);
+                    }
+                    peer_fresh = 0;
+                }
+            }
+        }
         long last_save = 0, last_relay = 0;
         int seq = 0;
         int coord = node_type() == 1;
@@ -1381,6 +1585,32 @@ int main(int argc, char **argv)
 
         while (!stop_flag) {
             long now = (long)time(NULL);
+            /* Сеть могли поднять заново, пока мы работаем: ключ у неё новый.
+               Перечитываем его раз в минуту - иначе телеметрия соседей
+               перестала бы расшифровываться до перезапуска демона. */
+            if (now - last_key >= 60) {
+                last_key = now;
+                zkey_from_net();
+                int opan = net_pan;
+                net_params(&net_pan, &net_ch);
+                /* Роль тоже могла смениться: демон, переживший «Поднять» или
+                   «Вступить», оставался при старой - бывший координатор молча
+                   не ретранслировал и не держал окно приёма. */
+                int nt = node_type();
+                if (nt > 0) {
+                    coord = nt == 1;
+                    g_coord = coord;
+                    my_node = coord ? 1 : 2;
+                }
+                if (net_pan != opan) {
+                    /* Сеть сменилась под ногами: соседи прошлой сети не наши,
+                       а их адреса и подавно. Начинаем список заново и сразу
+                       объявляемся в новой. */
+                    npr = 0;
+                    memset(pr, 0, sizeof pr);
+                    last_tx = now - period + 2;
+                }
+            }
             {
                 /* Команда от интерфейса: файл с парой «кому что». Раньше это
                  * читала только ветка beacon, а на аппаратах работает mesh -
@@ -1429,6 +1659,44 @@ int main(int argc, char **argv)
                     }
                 }
             }
+            /* Окно приёма держит демон - он один владеет портом. Интерфейс
+               лишь кладёт в файл время, до которого окно открыто; мы каждые
+               полминуты продлеваем его, а когда срок вышел - закрываем. Так
+               окно переживает перезапуск телеметрии и не остаётся открытым
+               навечно, как было с permit(0xFF) на старте. */
+            /* Файл смотрим каждые две секунды, а не раз в полминуты: человек
+               открывает приём и тут же идёт сканировать с соседнего аппарата -
+               ждать полминуты, пока мы заметим, он не станет. Само окно потом
+               продлеваем раз в полминуты. */
+            if (coord && now - last_permit >= 2) {
+                long until = 0;
+                FILE *pf2 = fopen("/tmp/.zig_permit_until", "r");
+                if (pf2) {
+                    char pb[32] = "";
+                    if (fgets(pb, sizeof pb, pf2)) until = atol(pb);
+                    fclose(pf2);
+                }
+                long left = until - now;
+                if (left > 0 && (!permit_on || now - last_permit >= 30)) {
+                    permit_join(left > 60 ? 60 : (int)left);
+                    permit_on = 1;
+                    last_permit = now;
+                } else if (left <= 0 && permit_on) {
+                    permit_join(0);
+                    permit_on = 0;
+                    remove("/tmp/.zig_permit_until");
+                    last_permit = now;
+                } else if (now - last_permit >= 30) {
+                    last_permit = now;
+                }
+            }
+
+            /* Услышали незнакомого соседа - представимся ему не по расписанию,
+               а почти сразу: его список иначе стоит пустым до конца периода. */
+            if (peer_fresh) {
+                peer_fresh = 0;
+                if (now - last_tx > 2) last_tx = now - period + 2;
+            }
             if (now - last_tx >= period) {
                 last_tx = now;
                 unsigned char tele[96];
@@ -1475,8 +1743,12 @@ int main(int argc, char **argv)
                         int st2;
                         if (coord) {
                             st2 = -1;
+                            /* Сосед без адреса - восстановленный из файла, его
+                               ещё не слышали: слать «на 0x0000» значит слать
+                               самому себе. */
                             for (int j = 0; j < npr; j++)
-                                st2 = mesh_unicast(pr[j].src, CL_ALMOND, z, zn, seq);
+                                if (pr[j].src)
+                                    st2 = mesh_unicast(pr[j].src, CL_ALMOND, z, zn, seq);
                         } else {
                             st2 = mesh_unicast(0x0000, CL_ALMOND, z, zn, seq);
                         }
@@ -1502,7 +1774,7 @@ int main(int argc, char **argv)
                     for (int q = 0; q < 4; q++) {
                         if (pr[i].rawlen[q] <= 0) continue;
                         for (int j = 0; j < npr; j++) {
-                            if (j == i) continue;
+                            if (j == i || !pr[j].src) continue;
                             mesh_unicast(pr[j].src, CL_ALMOND, pr[i].raw[q],
                                          pr[i].rawlen[q], seq++);
                         }
@@ -1519,10 +1791,15 @@ int main(int argc, char **argv)
                 snprintf(tmp, sizeof tmp, "%s.tmp", out);
                 FILE *f = fopen(tmp, "w");
                 if (f) {
+                    char nkf[16] = "";
+                    if (zkey_ok)
+                        snprintf(nkf, sizeof nkf, "%02X%02X…%02X%02X",
+                                 zkey[0], zkey[1], zkey[14], zkey[15]);
                     fprintf(f, "{\"ok\":1,\"me\":\"%s\",\"mode\":\"mesh\",\"enc\":1,"
-                               "\"node\":%d,"
+                               "\"node\":%d,\"nkey\":\"%s\",\"pan\":%d,\"ch\":%d,"
                                "\"chip\":\"EM357 EZSP v%d %d.%d.%d.%d\",\"ts\":%ld,\"peers\":[",
-                            me, my_node, proto, (sver >> 12) & 15, (sver >> 8) & 15,
+                            me, my_node, nkf, net_pan, net_ch,
+                            proto, (sver >> 12) & 15, (sver >> 8) & 15,
                             (sver >> 4) & 15, sver & 15, now);
                     for (int j = 0; j < npr; j++) {
                         char all[560] = "";
@@ -2274,6 +2551,15 @@ int main(int argc, char **argv)
         while (time(NULL) - t0 < sec) ezsp_read(pl, sizeof pl, 500);
     } else if (!strcmp(cmd, "state")) {
         state();
+    } else if (!strcmp(cmd, "netkey")) {
+        unsigned char k[16];
+        if (get_network_key(k) == 0) {
+            printf("{\"ok\":1,\"key\":\"");
+            for (int i = 0; i < 16; i++) printf("%02X", k[i]);
+            printf("\"}\n");
+        } else {
+            printf("{\"ok\":0}\n");
+        }
     } else if (!strcmp(cmd, "leave")) {
         leave();
     } else {
