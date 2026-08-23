@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=lcd-ui-almond3s
-PKG_RELEASE:=711
+PKG_RELEASE:=725
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -91,6 +91,7 @@ define Package/lcd-ui-almond3s/conffiles
 /etc/almond3s/icons/display.txt
 /etc/almond3s/icons/traffic.txt
 /etc/almond3s/icons/wifi.txt
+/etc/almond3s/icons/eth.txt
 endef
 
 define Package/lcd-ui-almond3s/postinst

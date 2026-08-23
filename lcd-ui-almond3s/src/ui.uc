@@ -875,6 +875,16 @@ let TR_RU = {
     "photo": "фото",
     "video": "видео",
     "Uptime": "Время работы",
+    "Custom widgets": "Виджеты Зигби",
+    "Custom": "Зигби",
+    "Custom 2": "Зигби 2",
+    "Custom 3": "Зигби 3",
+    "Custom 4": "Зигби 4",
+    "tap a cell to assign": "тап по клетке — назначить виджет",
+    "pick a device": "выбери устройство",
+    "pick a metric": "выбери метрику",
+    "pick a size": "выбери размер",
+    "clear slot": "убрать",
     "Free RAM": "ОЗУ свободно",
     "Flash free": "Флеш свободно",
     "Kernel": "Ядро",
@@ -2477,7 +2487,11 @@ function saver_btn(which) {
 }
 
 function svshift_btn() {
-    return { x: GX, y: GVB - 36, w: GW, h: 36 };
+    return { x: GX, y: GVB - 36, w: int(GW / 2) - 3, h: 36 };
+}
+
+function svcust_btn() {
+    return { x: GX + int(GW / 2) + 3, y: GVB - 36, w: GW - int(GW / 2) - 3, h: 36 };
 }
 
 function svnight_btn() {
@@ -5678,9 +5692,15 @@ function draw_saver_page() {
 
     let hb = svshift_btn(), on = burnin_cfg();
     gcard(hb.x, hb.y, hb.w, hb.h, on ? C.green : C.dim);
-    lcd_text(hb.x + 12, mid_y(hb, 2), tr("Shift"), C.white, C.widget, 2);
-    lcd_text_r(hb.x + hb.w - 12, mid_y(hb, 2), on ? tr("on") : tr("off"),
+    lcd_text(hb.x + 10, mid_y(hb, 2), tr("Shift"), C.white, C.widget, 2);
+    lcd_text_r(hb.x + hb.w - 10, mid_y(hb, 2), on ? tr("on") : tr("off"),
                on ? C.green : C.gray, C.widget, 2);
+
+    // Редактор «Своих виджетов»: четвёртая страница карусели «Виджеты».
+    let cb = svcust_btn();
+    gcard(cb.x, cb.y, cb.w, cb.h, C.cyan);
+    lcd_text_c(cb.x + int(cb.w / 2), mid_y(cb, 1), tr("Custom widgets"),
+               C.white, C.widget, 1);
 
     // Ночной режим: зелёная тусклая заставка по расписанию. Тап открывает
     // часы и включает, если был выключен.
@@ -9760,6 +9780,384 @@ function pad_stop() {
     system("killall almond3s-pad >/dev/null 2>&1");
 }
 
+// ===== «Свои виджеты»: настраиваемая страница заставки из слотов пир+метрика.
+// Слоты хранятся строкой в uci almond3s.display.dcust: "клетка:имя:метрика"
+// через запятую, клетка 0..15 в сетке 4x4. Страница появляется в карусели
+// заставки, когда есть хоть один слот; данные - из телеметрии Zigbee (тот же
+// /tmp/lcd_zig_peers.json, что и список соседей).
+let DCUST = null;
+let DCUST_PAGES = null;
+let ZP_CACHE = null, ZP_TS = 0;
+
+let DC_METS = [
+    { k: "sig",  l: "Signal",  a: "#10B981" }, { k: "batt", l: "Battery", a: "#10B981" },
+    { k: "temp", l: "Temp",    a: "#E8853A" }, { k: "cpu",  l: "CPU",     a: "#58A6FF" },
+    { k: "mem",  l: "Memory",  a: "#58A6FF" }, { k: "ping", l: "Ping",    a: "#10B981" },
+    { k: "up",   l: "Uptime",  a: "#58A6FF" }, { k: "vpn",  l: "VPN",     a: "#A78BFA" },
+    { k: "link", l: "link",    a: "#10B981" }, { k: "tx",   l: "TX",      a: "#14B8A6" },
+];
+
+function dc_met_accent(k) {
+    for (let x in DC_METS) if (x.k == k) return x.a;
+    return C.cyan;
+}
+
+function dc_met_label(k) {
+    for (let x in DC_METS) if (x.k == k) return tr(x.l);
+    return k;
+}
+
+// Автоуплотнение: слоты страницы в порядке клеток прижимаются влево-вверх,
+// первая свободная позиция, куда виджет влезает целиком, - его место. Дыр
+// между виджетами не остаётся; удалил один - соседи подъезжают. Позиция
+// клетки при добавлении остаётся подсказкой порядка.
+function dc_pack() {
+    let out = {};
+    for (let pg = 0; pg < 4; pg++) {
+        let list = [];
+        for (let k, v in DCUST)
+            if (int(int(k) / 16) == pg) push(list, { k: int(k), v: v });
+        sort(list, (a, b) => a.k - b.k);
+        let occ = [];
+        for (let i = 0; i < 16; i++) push(occ, false);
+        for (let s in list) {
+            let cw = s.v.cw ?? 1, ch = s.v.ch ?? 1, placed = false;
+            for (let idx = 0; idx < 16 && !placed; idx++) {
+                let c = idx % 4, r = int(idx / 4);
+                if (c + cw > 4 || r + ch > 4) continue;
+                let ok = true;
+                for (let dy = 0; dy < ch && ok; dy++)
+                    for (let dx = 0; dx < cw && ok; dx++)
+                        if (occ[(r + dy) * 4 + c + dx]) ok = false;
+                if (!ok) continue;
+                for (let dy = 0; dy < ch; dy++)
+                    for (let dx = 0; dx < cw; dx++)
+                        occ[(r + dy) * 4 + c + dx] = true;
+                out[pg * 16 + idx] = s.v;
+                placed = true;
+            }
+            if (!placed) out[s.k] = s.v;
+        }
+    }
+    DCUST = out;
+}
+
+function dcust_load() {
+    if (DCUST != null) return DCUST;
+    DCUST = {};
+    let raw = ucur ? ucur.get("almond3s", "display", "dcust") : null;
+    if (type(raw) == "string" && raw != "") {
+        for (let s in split(raw, ",")) {
+            let p = split(s, ":");
+            if (length(p) < 3) continue;
+            let cell = int(p[0]);
+            let cw = 1, ch = 1;
+            if (length(p) >= 4) {
+                let sz = split(p[3], "x");
+                if (length(sz) == 2) { cw = int(sz[0]); ch = int(sz[1]); }
+                if (cw < 1 || cw > 4) cw = 1;
+                if (ch < 1 || ch > 4) ch = 1;
+            }
+            // Клетка абсолютная: страница*16 + позиция, до четырёх страниц.
+            if (cell >= 0 && cell <= 63 && p[1] != "" && p[2] != "")
+                DCUST[cell] = { p: p[1], m: p[2], cw: cw, ch: ch };
+        }
+    }
+    dc_pack();
+    return DCUST;
+}
+
+function dcust_save() {
+    dc_pack();
+    let out = [];
+    for (let k, v in DCUST)
+        push(out, sprintf("%s:%s:%s:%dx%d", k, v.p, v.m, v.cw ?? 1, v.ch ?? 1));
+    if (ucur) {
+        if (length(out) > 0) ucur.set("almond3s", "display", "dcust", join(",", out));
+        else ucur.delete("almond3s", "display", "dcust");
+        ucur.commit("almond3s");
+    }
+    DCUST_PAGES = null;
+}
+
+function zp_data() {
+    let now = time();
+    if (ZP_CACHE != null && now - ZP_TS < 5) return ZP_CACHE;
+    ZP_TS = now;
+    ZP_CACHE = zig_json(ZIG_PEERS);
+    return ZP_CACHE;
+}
+
+// Карточка зигби-виджета: та же плашка и свечение, что у родных плиток, но
+// полоска-акцент ПУНКТИРНАЯ - фирменный маркер «приехало по радио», в одном
+// языке с пунктиром ожидания STA. Ни пикселя текста не тратит, читается на
+// любом размере.
+function zp_card(b, o, acc) {
+    lcd_rect(b.x, b.y, b.w, b.h, o.card);
+    if (BARS_ON) {
+        // Ритм сегментов - канонический, как у прогрессбаров (SEG_W/SEG_GAP
+        // через seg_geom). Якорь к нижнему краю, как у seg_vbar; верхний
+        // сегмент дотягивается до верха - полоска касается обоих краёв.
+        let g = seg_geom(b.h);
+        for (let i = 0; i < g.n; i++) {
+            let sy = b.y + b.h - i * g.pitch - g.sz;
+            let sh = g.sz;
+            if (i == g.n - 1) { sh = sy + sh - b.y; sy = b.y; }
+            lcd_rect(b.x, sy, 3, sh, o.mono ?? acc);
+        }
+    }
+    dash_glow(b, o, acc);
+}
+
+// Различительный хвост имени элмонда: суффикс после последнего «_» -
+// «Pro», «13»; на 1x1 полное имя не влезает, а хвоста достаточно.
+function zp_tail(p) {
+    let parts = split(p ?? "", "_");
+    return tcut(parts[length(parts) - 1] ?? "", 4);
+}
+
+// Плитка слота: иерархия как у родных виджетов - метрика верхней строкой,
+// значение крупно, гейдж/доп.инфа внизу. Владелец - приглушённо в правом
+// углу (на 1x1 - хвост имени). После минуты тишины акцент гаснет до серого,
+// после трёх минут значения сменяются на «--».
+function dash_zmetric(b, o, t, n) {
+    let name = tcut(t.p, 11);
+    let m = n?.m ?? {};
+    let fresh = n != null && int(+(n.age ?? 999)) < 180;
+    let met = t.m, lbl = dc_met_label(met);
+    let wide = (t.cw ?? 1) >= 2, tall = (t.ch ?? 1) >= 2;
+
+    let val = "--", col = C.dim, pct = -1, extra = null, extra2 = null;
+    if (fresh) {
+        if (met == "sig") {
+            let sp = m.sig != null ? int(+m.sig) : -1;
+            col = dash_lvl_col(sp);
+            if (sp >= 0) { val = sprintf("%d%%", sp); pct = sp; }
+            extra = trim(sprintf("%s %s %s", m.oper ?? "", m.mode ?? "", m.band ?? ""));
+            if (m.rsrp != null) extra2 = sprintf("RSRP %d dBm", int(+m.rsrp));
+        } else if (met == "batt") {
+            let pc = m.batt != null ? int(+m.batt) : -1;
+            col = pc < 0 ? C.dim : (pc >= 40 ? C.green : (pc >= 15 ? C.orange : C.red));
+            if (pc >= 0) {
+                val = sprintf("%d%%%s", pc, int(+(m.chg ?? 0)) == 1 ? "+" : "");
+                pct = pc;
+                extra = int(+(m.chg ?? 0)) == 1 ? tr("charging") : tr("on battery");
+            }
+        } else if (met == "temp") {
+            let tv = m.temp != null ? int(+m.temp) : 0;
+            if (tv != 0) { val = sprintf("%d°C", tv); col = tv >= 70 ? C.red : A_ORANGE; }
+        } else if (met == "cpu" || met == "mem") {
+            let v = m[met] != null ? int(+m[met]) : -1;
+            if (v >= 0) { val = sprintf("%d%%", v); pct = v; col = v >= 85 ? C.orange : C.cyan; }
+            if (met == "cpu" && m.mem != null)
+                extra = sprintf("%s %d%%", tr("Memory"), int(+m.mem));
+            if (met == "mem" && m.disk != null)
+                extra = sprintf("%s %d%%", tr("Disk"), int(+m.disk));
+        } else if (met == "ping") {
+            let ms = m.ping != null ? int(+m.ping) : -1;
+            if (ms >= 0) {
+                val = sprintf("%d %s", ms, tr("ms"));
+                col = ms < 80 ? C.green : (ms < 250 ? C.orange : C.red);
+            }
+        } else if (met == "up") {
+            if (m.up != null) {
+                let s = int(+m.up) * 60;
+                val = wide ? fmt_uptime(s) : fmt_uptime_c(s);
+                col = A_CYAN;
+            }
+        } else if (met == "vpn") {
+            let von = int(+(m.vpn ?? 0)) == 1;
+            val = von ? tr("on") : tr("off");
+            col = von ? A_PURPLE : C.dim;
+            if ((m.vpn_node ?? "") != "") extra = tcut(m.vpn_node, 24);
+        } else if (met == "link") {
+            let zr = int(+(n.rssi ?? 0));
+            val = sprintf("%d dBm", zr);
+            col = zig_rssi_col(zr);
+            pct = zig_rssi_bar(zr);
+            extra = sprintf("LQI %d", int(+(n.lqi ?? 0)));
+            extra2 = sprintf("%d %s", int(+(n.age ?? 0)), tr("sec"));
+        } else if (met == "tx") {
+            if (m.tx != null) { val = fmt_bytes(int(+m.tx)); col = A_TEAL; }
+            if (m.rx != null) extra = "RX " + fmt_bytes(int(+m.rx));
+        }
+    }
+
+    // Тишина дольше минуты приглушает акцент, значения ещё живут.
+    let semi = fresh && int(+(n.age ?? 999)) >= 60;
+    let acc = semi ? C.dim : col;
+
+    zp_card(b, o, acc);
+    if (!wide && !tall) {
+        // 1x1: метрика сверху (как у родных), хвост имени в углу, значение;
+        // у гейджей внизу полоса, у остальных - полное имя владельца.
+        let tl = zp_tail(t.p);
+        lcd_text_r(b.x + b.w - 6, b.y + 6, tl, o.dim, "none", 1);
+        lcd_text(b.x + 12, b.y + 6,
+                 tcut(lbl, int((b.w - 22 - tlen(tl) * 6) / 6)), o.dim, "none", 1);
+        dash_val(b, o, val, col);
+        if (pct >= 0) dash_bar(b, o, pct, col, sprintf("z%d_%d_%s", b.x, b.y, met));
+        else dash_sub(b, o, tcut(t.p, 9));
+        return;
+    }
+
+    dash_lab(b, o, lbl);
+    dash_right(b, o, b.y + 6, tcut(t.p, (t.cw ?? 1) >= 4 ? 14 : 10));
+    if (tall) {
+        // 2x2: значение крупным кеглем, ниже доп.строки, у гейджей полоса.
+        lcd_text_fit(b.x + 12, b.y + 20, val, o.mono ?? col, "none", 3, b.w - 24);
+        if (extra) lcd_text(b.x + 12, b.y + 56, tcut(extra, 22), o.dim, "none", 1);
+        if (extra2) lcd_text(b.x + 12, b.y + 70, tcut(extra2, 22), o.dim, "none", 1);
+    } else {
+        dash_val(b, o, val, col);
+        // В один ряд высоты доп.строка одна: на 4x1 вторая приклеивается к
+        // первой, ниже места нет - там полоса.
+        let ex = extra;
+        if (extra2 && (t.cw ?? 1) >= 4) ex = ex ? ex + "  " + extra2 : extra2;
+        if (ex) dash_right(b, o, b.y + 21, tcut(ex, (t.cw ?? 1) >= 4 ? 34 : 20));
+    }
+    if (pct >= 0)
+        dash_bar(b, o, pct, col, sprintf("z%d_%d_%s", b.x, b.y, met));
+}
+
+// Редактор: сетка 4x4 и двухшаговый выбор (устройство, затем метрика).
+function dc_cell_rect(i) {
+    let cw = int((GW - 3 * GG) / 4), chh = int((GVB - GVT - 14 - 3 * GG) / 4);
+    return { x: GX + (i % 4) * (cw + GG),
+             y: GVT + 14 + int(i / 4) * (chh + GG), w: cw, h: chh };
+}
+
+function dc_opt_rect(i) {
+    let w = int((GW - GG) / 2);
+    return { x: GX + (i % 2) * (w + GG), y: GVT + 16 + int(i / 2) * 28,
+             w: w, h: 24 };
+}
+
+// Прямоугольник слота с размером: те же клетки, растянутые через зазоры.
+function dc_slot_rect(i, cw, ch) {
+    let b = dc_cell_rect(i);
+    return { x: b.x, y: b.y,
+             w: cw * b.w + (cw - 1) * GG,
+             h: ch * b.h + (ch - 1) * GG };
+}
+
+// Чья это клетка: номер слота, который её накрывает, или -1. Клетки
+// абсолютные (страница*16+позиция), слоты не пересекают границы страниц.
+function dc_covered(d, cell) {
+    let pg = int(cell / 16), c = (cell % 16) % 4, r = int((cell % 16) / 4);
+    for (let k, v in d) {
+        if (int(int(k) / 16) != pg) continue;
+        let c0 = (int(k) % 16) % 4, r0 = int((int(k) % 16) / 4);
+        if (c >= c0 && c < c0 + (v.cw ?? 1) && r >= r0 && r < r0 + (v.ch ?? 1))
+            return int(k);
+    }
+    return -1;
+}
+
+// Сколько страниц показывает редактор: занятые плюс одна пустая про запас
+// (потолок - четыре). Заполнил последнюю - появляется следующая.
+function dc_edit_pages() {
+    let mx = -1;
+    for (let k, v in dcust_load()) {
+        let pg = int(int(k) / 16);
+        if (pg > mx) mx = pg;
+    }
+    let n = mx + 2;
+    if (n < 1) n = 1;
+    if (n > 4) n = 4;
+    return n;
+}
+
+let DC_SIZES = [ [1,1], [2,1], [4,1], [2,2] ];
+
+function dc_opts() {
+    let o = [];
+    if (st.dcp?.stage == "peer") {
+        let zd = zp_data();
+        let peers = type(zd?.peers) == "array" ? zd.peers : [];
+        for (let p in peers)
+            if ((p.name ?? "") != "") push(o, { l: tcut(p.name, 20), v: p.name });
+    } else if (st.dcp?.stage == "size") {
+        let c = (st.dcp.cell % 16) % 4, r = int((st.dcp.cell % 16) / 4);
+        for (let s in DC_SIZES)
+            if (c + s[0] <= 4 && r + s[1] <= 4)
+                push(o, { l: sprintf("%d x %d", s[0], s[1]),
+                          v: sprintf("%dx%d", s[0], s[1]) });
+    } else {
+        for (let x in DC_METS) push(o, { l: dc_met_label(x.k), v: x.k });
+    }
+    return o;
+}
+
+// Пустой слот - пунктирной рамкой с плюсом, как карточка ожидания STA в
+// «Сети»: то же перо (штрих 3px с шагом 6), тот же приглушённый цвет.
+function dc_dashed_cell(b) {
+    for (let dx = 0; dx < b.w - 3; dx += 6) {
+        lcd_rect(b.x + dx, b.y, 3, 1, C.dim);
+        lcd_rect(b.x + dx, b.y + b.h - 1, 3, 1, C.dim);
+    }
+    for (let dy = 0; dy < b.h - 3; dy += 6) {
+        lcd_rect(b.x, b.y + dy, 1, 3, C.dim);
+        lcd_rect(b.x + b.w - 1, b.y + dy, 1, 3, C.dim);
+    }
+    lcd_text_c(b.x + int(b.w / 2), mid_y(b, 2), "+", C.dim, C.bg, 2);
+}
+
+function draw_dcust_page() {
+    lcd_clear(C.bg);
+    draw_header(tr("Custom widgets"));
+    let d = dcust_load();
+    if (st.dcp == null) {
+        lcd_text(GX + 2, GVT, tr("tap a cell to assign"), C.ontop_dim, C.bg, 1);
+        let pg = st.dc_pg ?? 0;
+        for (let i = 0; i < 16; i++) {
+            let cell = pg * 16 + i;
+            let own = dc_covered(d, cell);
+            if (own == cell) {
+                // Та же плитка, что в меню и на заставке: полоска-акцент,
+                // свечение, мелкая строка сверху, название вторым кеглем.
+                let s = d[cell];
+                draw_btn(dc_slot_rect(i, s.cw ?? 1, s.ch ?? 1), null,
+                         dc_met_label(s.m), null, null, null, null,
+                         null, null, dc_met_accent(s.m), tcut(s.p, 11));
+            } else if (own < 0) {
+                dc_dashed_cell(dc_cell_rect(i));
+            }
+            // клетка под чужим слотом не рисуется - её накрыла плитка
+        }
+        draw_back_pager(pg, dc_edit_pages());
+        lcd_flush();
+        return;
+    } else {
+        lcd_text(GX + 2, GVT,
+                 st.dcp.stage == "peer" ? tr("pick a device")
+                 : (st.dcp.stage == "size" ? tr("pick a size") : tr("pick a metric")),
+                 C.ontop_dim, C.bg, 1);
+        let o = dc_opts();
+        if (length(o) == 0)
+            lcd_text(GX + 12, GVT + 40, tr("no peers heard"), C.ontop_dim, C.bg, 2);
+        for (let i = 0; i < length(o) && i < 12; i++) {
+            let b = dc_opt_rect(i);
+            let acc = st.dcp.stage == "met" ? dc_met_accent(o[i].v) : C.cyan;
+            let c = gcard(b.x, b.y, b.w, b.h, acc);
+            lcd_text(c.ix, mid_y(b, 1), tcut(o[i].l, 22), C.white, C.widget, 1);
+        }
+        // Настроенный слот: внизу его строка с красным минусом за
+        // разделителем - как карточка интерфейса в «Сети». Тап - удалить.
+        let s = st.dcp.stage == "peer" ? d[st.dcp.cell] : null;
+        if (s != null) {
+            let ry = GVB - 32;
+            let c = gcard(GX, ry, GW, 30, dc_met_accent(s.m));
+            lcd_text(c.ix, ry + 11, tcut(dc_met_label(s.m) + "  " + s.p, 32),
+                     C.white, C.widget, 1);
+            lcd_rect(GX + GW - 34, ry + 4, 1, 22, C.border);
+            lcd_text(GX + GW - 24, ry + 4, "-", C.red, C.widget, 3);
+        }
+    }
+    draw_back();
+    lcd_flush();
+}
+
 function draw_current() {
     // Идёт выключение/перезагрузка - на экране заставка «Выключаю...» /
     // «Перезагружаюсь...», и перерисовывать поверх неё нельзя: reboot лишь
@@ -9811,6 +10209,7 @@ function draw_current() {
     case "battery":   draw_battery_page(); break;
     case "savercfg":  draw_savercfg_page(); break;
     case "saver":     draw_saver_page(); break;
+    case "dcust":     draw_dcust_page(); break;
     case "debug":     draw_debug_page(); break;
     case "iconedit":  draw_iconedit_page(); break;
     case "zigbee":    draw_zigbee_page(); break;
@@ -9882,6 +10281,32 @@ let DASH_PAGES = [
     ] },
 ];
 
+// Карусель заставки: базовые страницы плюс «Свои виджеты» (до четырёх
+// собственных страниц, в карусель попадают только непустые).
+function dash_pages() {
+    if (DCUST_PAGES != null) return DCUST_PAGES;
+    let d = dcust_load();
+    let pages = [];
+    for (let pgd in DASH_PAGES) push(pages, pgd);
+    let cn = 0;
+    for (let pg = 0; pg < 4; pg++) {
+        let tiles = [];
+        for (let k, v in d) {
+            if (int(int(k) / 16) != pg) continue;
+            let idx = int(k) % 16;
+            push(tiles, { k: "zp", c: idx % 4, r: int(idx / 4),
+                          cw: v.cw ?? 1, ch: v.ch ?? 1, p: v.p, m: v.m });
+        }
+        if (length(tiles) > 0) {
+            cn++;
+            push(pages, { title: cn == 1 ? "Custom" : sprintf("Custom %d", cn),
+                          tiles: tiles });
+        }
+    }
+    DCUST_PAGES = pages;
+    return DCUST_PAGES;
+}
+
 let dash_vpn = { ts: 0, node: "", group: "", cc: "" };
 
 function dash_vpn_now() {
@@ -9934,7 +10359,7 @@ function dash_hold_set(on) {
 }
 
 function dash_page() {
-    let n = length(DASH_PAGES);
+    let n = length(dash_pages());
     if (st.dash_t0 == null) { st.dash_t0 = time(); st.dash_cur = 0; }
     if (dash_hold()) {
         // Отсчёт держим сдвинутым, иначе при снятии паузы страница
@@ -9951,7 +10376,7 @@ function dash_page() {
 }
 
 function dash_goto(i) {
-    st.dash_cur = i % length(DASH_PAGES);
+    st.dash_cur = i % length(dash_pages());
     st.dash_t0 = time();
 }
 
@@ -9978,7 +10403,7 @@ function dash_hold_at(tx, ty) {
 
 function dash_dot_at(tx, ty) {
     let ox = st.ox ?? 0, oy = st.oy ?? 0;
-    let n = length(DASH_PAGES);
+    let n = length(dash_pages());
     if (ty < 218 + oy || ty > 240 + oy) return -1;
     for (let i = 0; i < n; i++) {
         let dx = LCD_W - 10 - (n - i) * 12 + ox;
@@ -9999,6 +10424,14 @@ function dash_box(t) {
 
 function dash_tile(t, d, o) {
     let b = dash_box(t);
+
+    if (t.k == "zp") {
+        let zd = zp_data(), n = null;
+        let peers = type(zd?.peers) == "array" ? zd.peers : [];
+        for (let q in peers) if ((q.name ?? "") == t.p) { n = q; break; }
+        dash_zmetric(b, o, t, n);
+        return;
+    }
 
     if (t.k == "clock") {
         dash_card(b, o, A_CYAN);
@@ -10306,7 +10739,8 @@ function dash_tile(t, d, o) {
 
 function draw_dash_saver(o) {
     let d = st.data;
-    let pg = dash_page(), page = DASH_PAGES[pg];
+    let dps = dash_pages();
+    let pg = dash_page(), page = dps[pg];
     for (let i = 0; i < length(page.tiles); i++)
         dash_tile(page.tiles[i], d, o);
 
@@ -10314,8 +10748,8 @@ function draw_dash_saver(o) {
     // Цвет тот же, что у активной точки страницы.
     dash_hold_btn(9 + ox, 230 + oy, o.mono ?? "#FFFFFF");
     lcd_text(22 + ox, 230 + oy, tr(page.title), o.mono ?? C.ontop, o.bg, 1);
-    for (let i = 0; i < length(DASH_PAGES); i++) {
-        let dx = LCD_W - 10 - (length(DASH_PAGES) - i) * 12 + ox;
+    for (let i = 0; i < length(dps); i++) {
+        let dx = LCD_W - 10 - (length(dps) - i) * 12 + ox;
         // Активная точка своим цветом, а не цветом текста: в светлой теме текст
         // почти чёрный, и точка выглядела чернильной кляксой на синем фоне.
         lcd_rect(dx, 230 + oy, 7, 7, i == pg ? (o.mono ?? "#FFFFFF")
@@ -10725,6 +11159,7 @@ function run_script(name, bg) {
 function go_page(p, is_back) {
     if (st.page == "term" && p != "term") term_stop();   // уходим - гасим шелл
     if (st.page == "alarm" && p != "alarm") alarm_save(); // сохраняем будильник
+    if (p == "dcust" && st.page != "dcust") st.dcp = null; // редактор всегда с сетки
     // Стек переходов для честного «назад»: вперёд - кладём текущую страницу,
     // «назад» (is_back) - не кладём. Меню - корень: сбрасываем стек.
     if (!is_back) {
@@ -11415,7 +11850,7 @@ function handle_touch(tx, ty, tmove) {
     if (st.page != "menu" && st.page != "sms" && st.page != "sms1" &&
         st.page != "kbd" && st.page != "term" &&
         st.page != "cell" && st.page != "games" && st.page != "vpn" &&
-        st.page != "stascan" &&
+        st.page != "stascan" && st.page != "dcust" &&
         ty >= BACK_Y) {
         // Из развёрнутой карточки «назад» ведёт к списку карточек, а не
         // сразу в меню: разворот - это подстраница.
@@ -12416,11 +12851,12 @@ function handle_touch(tx, ty, tmove) {
             draw_power_page();
             st.pwr_press = null;
             if (i == 0) {
-                // Лестница сброса уходит в фон одним скриптом (~14с): страница
-                // остаётся живой, модем поднимется сам.
+                // Лестница сброса уходит в фон одним скриптом (~14с). Окно
+                // питания сразу закрываем в меню: оставаясь открытым, оно
+                // ловило второй тап и запускало сброс дважды.
                 run_script("lte_reset.sh", true);
+                go_page("menu");
                 toast(tr("Resetting modem..."), C.orange, "#201406", 3);
-                draw_power_page();
                 return;
             }
             if (i == 2) {
@@ -12545,6 +12981,88 @@ function handle_touch(tx, ty, tmove) {
         return;
     }
 
+    if (st.page == "dcust") {
+        if (ty >= BACK_Y) {
+            // На сетке нижняя полоса - пейджер своих страниц; в пикере
+            // стрелок нет, любой тап по низу возвращает к сетке.
+            if (st.dcp == null) {
+                let npg = dc_edit_pages();
+                let h = pager_hit(tx, ty, npg);
+                if (h == PAGER_PREV || h == PAGER_NEXT) {
+                    st.dc_pg = ((st.dc_pg ?? 0) + npg + h) % npg;
+                    draw_dcust_page();
+                    return;
+                }
+                back_press_fx();
+                go_back();
+                return;
+            }
+            back_press_fx();
+            st.dcp = null;
+            draw_dcust_page();
+            return;
+        }
+        if (st.dcp == null) {
+            for (let i = 0; i < 16; i++) {
+                let b = dc_cell_rect(i);
+                if (in_rect(tx, ty, b.x, b.y, b.w, b.h)) {
+                    // Тап по клетке под большим слотом правит сам слот.
+                    let cell = (st.dc_pg ?? 0) * 16 + i;
+                    let own = dc_covered(dcust_load(), cell);
+                    st.dcp = { cell: own >= 0 ? own : cell, stage: "peer" };
+                    draw_dcust_page();
+                    return;
+                }
+            }
+            return;
+        }
+        // Строка удаления настроенного слота (низ пикера устройств).
+        if (st.dcp.stage == "peer" && dcust_load()[st.dcp.cell] != null &&
+            in_rect(tx, ty, GX, GVB - 32, GW, 30)) {
+            delete dcust_load()[st.dcp.cell];
+            dcust_save();
+            st.dcp = null;
+            draw_dcust_page();
+            return;
+        }
+        let o = dc_opts();
+        for (let i = 0; i < length(o) && i < 12; i++) {
+            let b = dc_opt_rect(i);
+            if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
+            if (st.dcp.stage == "peer") {
+                st.dcp.peer = o[i].v;
+                st.dcp.stage = "met";
+            } else if (st.dcp.stage == "met") {
+                st.dcp.met = o[i].v;
+                st.dcp.stage = "size";
+            } else {
+                let sz = split(o[i].v, "x");
+                let cw = int(sz[0]), ch = int(sz[1]);
+                let d = dcust_load();
+                let pg0 = int(st.dcp.cell / 16);
+                let c0 = (st.dcp.cell % 16) % 4, r0 = int((st.dcp.cell % 16) / 4);
+                // Новый слот вытесняет всё, что накрыл, - как перестановка
+                // мебели: собрать пересечения и удалить, потом ставить.
+                let kill = [];
+                for (let k, v in d) {
+                    if (int(int(k) / 16) != pg0) continue;
+                    let c1 = (int(k) % 16) % 4, r1 = int((int(k) % 16) / 4);
+                    if (int(k) != st.dcp.cell &&
+                        c1 < c0 + cw && c0 < c1 + (v.cw ?? 1) &&
+                        r1 < r0 + ch && r0 < r1 + (v.ch ?? 1))
+                        push(kill, k);
+                }
+                for (let k in kill) delete d[k];
+                d[st.dcp.cell] = { p: st.dcp.peer, m: st.dcp.met, cw: cw, ch: ch };
+                dcust_save();
+                st.dcp = null;
+            }
+            draw_dcust_page();
+            return;
+        }
+        return;
+    }
+
     if (st.page == "saver") {
         let cur = saver_cfg();
         let idx = 0;
@@ -12584,6 +13102,13 @@ function handle_touch(tx, ty, tmove) {
         if (in_rect(tx, ty, hb.x, hb.y, hb.w, hb.h)) {
             burnin_set(!burnin_cfg());
             draw_saver_page();
+            return;
+        }
+
+        let cb = svcust_btn();
+        if (in_rect(tx, ty, cb.x, cb.y, cb.w, cb.h)) {
+            st.dcp = null;
+            go_page("dcust");
             return;
         }
 
@@ -13146,11 +13671,16 @@ function main() {
                           "|" + int(+(st.data?.battery?.percent ?? 0)) +
                           "|" + sig_state().bars +
                           "|" + int(st.data?.sms_new ?? 0);
-                if (saver_style() == "dash")
+                if (saver_style() == "dash") {
                     sig += sprintf("|%d|%d|%s|%s", dash_page(),
                                    int(+(st.data?.cpu_busy ?? 0)),
                                    fmt_bytes(length(hist.rx) > 0 ? hist.rx[length(hist.rx) - 1] : 0),
                                    fmt_bytes(length(hist.tx) > 0 ? hist.tx[length(hist.tx) - 1] : 0));
+                    // На «Своей» странице данные пиров обновляются мимо st.data -
+                    // подмешиваем момент их последнего чтения, иначе плитки замрут.
+                    if (dash_page() >= length(DASH_PAGES))
+                        sig += "|" + ZP_TS;
+                }
                 if (sig != st.saver_sig) {
                     st.saver_sig = sig;
                     draw_saver_tick();
