@@ -1,0 +1,13 @@
+{"ts":0,"uptime":73140,"cpu_busy":23,"cpu_load":"0.61 0.75 0.65","cpu_cores":4,"cpu_core_busy":[18,25,31,12],
+"mem_free_mb":68,"mem_total_mb":123,"storage":{"free_kb":31234,"total_kb":54120},
+"battery":{"percent":87,"adc":712,"charging":true,"full":false,"no_battery":false,"remain_min":180},
+"lte":{"modem":"Quectel EP06","operator":"Beeline","mode":"4G+","band":"B3","signal":74,"rsrp":-98,"rsrq":-11,"sinr":12,"csq":24,
+ "ip":"100.87.140.127","apn":"internet.beeline.ru","conn_time":73000,"rx_bytes":812345678,"tx_bytes":91234567,
+ "cell":{"mcc":"250","mnc":"99","tac":"1A2B","cid":"0123ABC","pci":211,"earfcn":1602,
+  "ca":"B3+B7","s1band":"B7","s1state":"activated","s1pci":213,"s1earfcn":3102}},
+"wifi":{"clients":[{"name":"phone","mac":"AA:BB:CC:DD:EE:01","signal":-48},{"name":"laptop","mac":"AA:BB:CC:DD:EE:02","signal":-55}]},
+"lan":{"ip":"192.168.13.1"},
+"vpn":{"active":1,"name":"nl-ams-1"},
+"ping":{"google_ms":41},
+"sms_new":2,
+"weather":{"temp":24,"cond":"ясно","city":"Воронеж"}}

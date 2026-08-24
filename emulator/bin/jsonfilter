@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+# Шим jsonfilter для песочницы эмулятора: подмножество
+# `jsonfilter [-s строка|-i файл] -e '@.путь'` (и JSON с stdin через пайп).
+import json, re, sys
+src, exprs, args = None, [], sys.argv[1:]
+i = 0
+while i < len(args):
+    if args[i] == "-s":
+        src = args[i + 1]; i += 2
+    elif args[i] == "-i":
+        src = open(args[i + 1]).read(); i += 2
+    elif args[i] == "-e":
+        exprs.append(args[i + 1]); i += 2
+    else:
+        i += 1
+if src is None:
+    src = sys.stdin.read()
+try:
+    data = json.loads(src)
+except ValueError:
+    sys.exit(1)
+rc = 1
+for e in exprs:
+    v = data
+    ok = True
+    for key, idx in re.findall(r"\.([A-Za-z0-9_]+)|\[(\d+)\]", e):
+        try:
+            v = v[key] if key else v[int(idx)]
+        except Exception:
+            ok = False
+            break
+    if ok and not isinstance(v, (dict, list)):
+        print(("1" if v else "0") if isinstance(v, bool) else v)
+        rc = 0
+sys.exit(rc)

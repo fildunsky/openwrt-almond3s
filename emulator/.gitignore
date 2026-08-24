@@ -1,0 +1,5 @@
+prefix/
+bin/render-emu
+bin/term-emu
+__pycache__/
+*.pyc

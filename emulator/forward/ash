@@ -1,0 +1,12 @@
+#!/bin/sh
+# Терминал: forkpty дал нам pty как stdin/stdout, прокидываем его в живой
+# шелл роутера. БЕЗ setsid (иначе рвётся управляющий tty) и с -tt для
+# принудительного выделения псевдотерминала на той стороне.
+CFG=/tmp/almond3s-emu/rsh.conf
+if [ -r "$CFG" ]; then
+    . "$CFG"
+    exec env -u SSH_AUTH_SOCK SSH_ASKPASS="$RSH_AP" SSH_ASKPASS_REQUIRE=force \
+        ssh -tt -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new \
+        "root@$RSH_IP"
+fi
+exec /bin/sh

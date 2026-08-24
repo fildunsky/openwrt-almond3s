@@ -980,8 +980,12 @@ int main(int argc, char *argv[])
     int sock_fd, client_fd;
     struct sockaddr_un addr;
 
-    /* Open /dev/lcd */
-    lcd_fd = open("/dev/lcd", O_RDWR);
+    /* Open /dev/lcd. ALMOND_LCD_DEV подменяет узел обычным файлом - так
+     * рендер без изменений работает в эмуляторе на ПК; на роутере
+     * переменная не выставлена и путь прежний. */
+    const char *lcd_path = getenv("ALMOND_LCD_DEV");
+    lcd_fd = open(lcd_path ? lcd_path : "/dev/lcd",
+                  O_RDWR | (lcd_path ? O_CREAT : 0), 0644);
     if (lcd_fd < 0) { perror("/dev/lcd"); return 1; }
 
     printf("almond3s render: framebuffer %dx%d (%d bytes), write mode\n", LCD_W, LCD_H, FB_SIZE);

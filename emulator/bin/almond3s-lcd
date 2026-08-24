@@ -1,0 +1,32 @@
+#!/bin/sh
+# Заглушка almond3s-lcd для эмулятора: реален только waittouch (фронт касания
+# ловится по появлению файла /tmp/.lcd_touch, как настоящий - по ioctl);
+# остальные подкоманды правят железо и здесь превращаются в no-op.
+case "$1" in
+waittouch)
+    ms=${2:-1000}
+    i=0
+    while [ "$i" -lt "$ms" ]; do
+        if [ -f /tmp/.lcd_touch ]; then
+            head -1 /tmp/.lcd_touch
+            exit 0
+        fi
+        sleep 0.03
+        i=$((i + 30))
+    done
+    exit 1
+    ;;
+led)
+    D=/sys/class/leds/white:status
+    case "$2" in
+    blink) echo timer > $D/trigger 2>/dev/null
+           echo 250 > $D/delay_on 2>/dev/null; echo 250 > $D/delay_off 2>/dev/null ;;
+    on)    echo none > $D/trigger 2>/dev/null; echo 1 > $D/brightness 2>/dev/null ;;
+    *)     echo none > $D/trigger 2>/dev/null; echo 0 > $D/brightness 2>/dev/null ;;
+    esac
+    exit 0
+    ;;
+*)
+    exit 0
+    ;;
+esac

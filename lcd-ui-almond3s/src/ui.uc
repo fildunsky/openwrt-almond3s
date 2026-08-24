@@ -1865,8 +1865,11 @@ function refresh_data() {
     // поэтому на спящем устройстве их пропускаем. Плюс на STA-страницах
     // (скан/пароль): после `wifi reload` netifd занят, и `network.interface.wan
     // status` виснет секундами, морозя весь uloop - клавиатура не печатала.
-    // Этим страницам uptime/wan не нужны, опрос пропускаем.
-    if (uconn && !st.blank && st.page != "kbd" && st.page != "stascan") {
+    // Этим страницам uptime/wan не нужны, опрос пропускаем. И на время окна
+    // после переключения Wi-Fi (netifd перезагружает радио) - тоже: иначе
+    // ubus-вызов ниже блокируется на всю перезагрузку и вешает UI.
+    let wifi_busy = st.wifi_cd != null && (time() - st.wifi_cd) < 8;
+    if (uconn && !st.blank && !wifi_busy && st.page != "kbd" && st.page != "stascan") {
         let si = uconn.call("system", "info", {});
         if (si) {
             if (si.uptime) d.uptime = si.uptime;
@@ -5120,8 +5123,27 @@ function qr_box(y) {
 
 // Имя сети кликабельно - тап открывает переименование. Ширину обрезаем до QR:
 // иначе тап по коду попадал бы сюда же.
+// Тумблер Wi-Fi: кнопка в общем стиле UI (sub-panel + акцентная полоса слева,
+// как плитки меню), высотой во весь текстовый блок карточки, в фиксированной
+// колонке слева от QR. Одна геометрия для отрисовки и тача - не налезает на
+// код и стоит на сетке одинаково в обеих карточках. Определена ЗДЕСЬ (выше
+// wifi_name_box/wifi_cli_rect и draw_wifi_page), т.к. ucode не хойстит.
+function wifi_onoff_box(cy) {
+    let qx = GX + (st.ox ?? 0) + GW - 68;   // левый край QR-бокса
+    let w = 66;
+    return { x: qx - 10 - w, y: cy + 18, w: w, h: 48 };
+}
+
+function wifi_onoff_rect(cy) {
+    return wifi_onoff_box(cy);
+}
+
 function wifi_name_box(y) {
-    return { x: GX + (st.ox ?? 0) + 6, y: y + 18, w: GW - 80, h: 26 };
+    // Зона переименования - только по строке SSID и строго ЛЕВЕЕ кнопки-
+    // тумблера, иначе тап по «ВКЛ/ВЫКЛ» открывал клавиатуру.
+    let bx = wifi_onoff_box(y).x;
+    let x = GX + (st.ox ?? 0) + 6;
+    return { x: x, y: y + 18, w: bx - x - 8, h: 26 };
 }
 
 // === Страница «Дебаг»: тонкие настройки вывода панели ===
@@ -8842,7 +8864,13 @@ function draw_qr_page() {
 
     lcd_clear(C.bg);
     draw_header(st.qr_band ?? "WiFi");
-    lcd_text(10, 28, ssid, C.ontop_hi, C.bg, 2);
+    // Имя сети по центру, ТОНКИМ начертанием (fnt:3 = тонкий пиксельный шрифт):
+    // стандартный крупный Combo (bitcell) выглядит жирным, здесь нужно тоньше.
+    let nm = tcut(ssid, 26);
+    nm = strip_ctrl(replace(replace(replace(nm ?? "", '\\', '\\\\'), '"', '\\"'), "\n", "\\n"));
+    let qb = GRAD_ON ? "none" : C.bg;
+    Q(sprintf('{"cmd":"text","x":%d,"y":%d,"text":"%s","color":"%s","bg":"%s","size":2,"fnt":3,"anchor":"c"}',
+        int(LCD_W / 2), 28, nm, C.ontop_hi, qb));
 
     if (rows) {
         let n = length(rows);
@@ -8861,21 +8889,28 @@ function draw_qr_page() {
 }
 
 
-function wifi_onoff_rect(cy) {
-    // Зона тача - постоянная (шире текста), чтобы ВКЛ/ВЫКЛ ловились одинаково.
-    return { x: GX + st.ox + 176, y: cy + 40, w: 62, h: 28 };
-}
-
-function wifi_onoff_box(cy, label) {
-    // Видимая рамка - впритык к тексту, прижата к правому краю зоны. Правый край
-    // держим левее QR-бокса (он с GX+GW-68=244), иначе кнопка касалась кода.
-    let w = tlen(label) * 12 + 10;
-    let rx = GX + st.ox + 232;
-    return { x: rx - w, y: cy + 43, w: w, h: 22 };
+// Кнопка-тумблер в стиле кнопок UI: подложка C.btn (sub-panel), слева
+// акцентная полоса (зелёная «включено» / серая «выключено»), подпись по
+// центру. Подложка выделяет её на фоне плашки-карточки (C.widget).
+function wifi_toggle_draw(cy, on) {
+    let b = wifi_onoff_box(cy);
+    let acc = on ? C.green : C.dim;
+    lcd_rect(b.x, b.y, b.w, b.h, C.btn);
+    astripe(b.x, b.y, b.h, acc);
+    dash_glow({ x: b.x, y: b.y, w: b.w, h: b.h }, { card: C.btn, mono: null }, acc);
+    let lbl = on ? tr("ON") : tr("OFF");
+    // Центрируем в области ПОСЛЕ акцентной полосы (её ширина 3px + отступ),
+    // иначе длинное «ВЫКЛ» прилипает к полоске.
+    let inset = (BARS_ON ? 3 : 0) + 6;
+    lcd_text_c(b.x + inset + int((b.w - inset - 4) / 2),
+               b.y + int((b.h - 16) / 2), lbl, on ? C.green : C.gray, C.btn, 2);
 }
 
 function wifi_cli_rect(cy) {
-    return { x: GX + st.ox + 4, y: cy + 40, w: 148, h: 30 };
+    // Строка «Клиентов» - левее кнопки-тумблера, чтобы не перехватывать её тап.
+    let x = GX + st.ox + 4;
+    let w = wifi_onoff_box(cy).x - x - 6;
+    return { x: x, y: cy + 40, w: w < 40 ? 40 : w, h: 30 };
 }
 
 function wifi_band_match(cb, want) {
@@ -8974,10 +9009,12 @@ function draw_wifi_page() {
         let key_2g = ucur.get("wireless", "default_radio1", "key") ?? "N/A";
         let disabled_2g = wifi_is_disabled("radio1", "default_radio1");
         
-        // Пароль на экране не показываем: длинный ключ не помещается, а
-        // для подключения есть QR - он и есть пароль.
-        lcd_text(cx + 10, y1 + 22, tcut(ssid_2g, 20), C.white, C.widget, 2);
-        
+        // Текст-колонка слева обрезается по левому краю пилюли, чтобы длинный
+        // SSID не заезжал под кнопку. Пароль на экране не показываем - QR и
+        // есть пароль.
+        let tw1 = wifi_onoff_box(y1).x - (cx + 10) - 8;
+        lcd_text(cx + 10, y1 + 22, tcut(ssid_2g, int(tw1 / 12)), C.white, C.widget, 2);
+
         // Count clients on 2.4GHz
         let clients_2g = 0;
         let clients = d?.wifi?.clients;
@@ -8988,11 +9025,7 @@ function draw_wifi_page() {
         }
         lcd_text(cx + 10, y1 + 48, sprintf(tr("Clients: %d"), clients_2g), C.cyan, C.widget, 2);
 
-        let bt1 = disabled_2g ? tr("OFF") : tr("ON");
-        let bb1 = wifi_onoff_box(y1, bt1);
-        let bc1 = disabled_2g ? C.gray : C.green;
-        rborder(bb1.x, bb1.y, bb1.w, bb1.h, bc1);
-        lcd_text(bb1.x + int((bb1.w - tlen(bt1) * 12) / 2), bb1.y + 4, bt1, bc1, C.widget, 2);
+        wifi_toggle_draw(y1, !disabled_2g);
         if (!disabled_2g) {
             let qb = qr_box(y1);
             draw_qr(wifi_qr_rows(ssid_2g, key_2g), qb.x + 2, qb.y + 2, 2, "#000000", "#FFFFFF");
@@ -9010,8 +9043,9 @@ function draw_wifi_page() {
         let key_5g = ucur.get("wireless", "default_radio0", "key") ?? "N/A";
         let disabled_5g = wifi_is_disabled("radio0", "default_radio0");
         
-        lcd_text(cx + 10, y2 + 22, tcut(ssid_5g, 20), C.white, C.widget, 2);
-        
+        let tw2 = wifi_onoff_box(y2).x - (cx + 10) - 8;
+        lcd_text(cx + 10, y2 + 22, tcut(ssid_5g, int(tw2 / 12)), C.white, C.widget, 2);
+
         // Count clients on 5GHz
         let clients_5g = 0;
         let clients = d?.wifi?.clients;
@@ -9022,11 +9056,7 @@ function draw_wifi_page() {
         }
         lcd_text(cx + 10, y2 + 48, sprintf(tr("Clients: %d"), clients_5g), C.cyan, C.widget, 2);
 
-        let bt2 = disabled_5g ? tr("OFF") : tr("ON");
-        let bb2 = wifi_onoff_box(y2, bt2);
-        let bc2 = disabled_5g ? C.gray : C.green;
-        rborder(bb2.x, bb2.y, bb2.w, bb2.h, bc2);
-        lcd_text(bb2.x + int((bb2.w - tlen(bt2) * 12) / 2), bb2.y + 4, bt2, bc2, C.widget, 2);
+        wifi_toggle_draw(y2, !disabled_5g);
         if (!disabled_5g) {
             let qb = qr_box(y2);
             draw_qr(wifi_qr_rows(ssid_5g, key_5g), qb.x + 2, qb.y + 2, 2, "#000000", "#FFFFFF");
@@ -11411,9 +11441,13 @@ function wifi_toggle_radio(radio, sec) {
         ucur.set("wireless", sec, "disabled", "1");
     }
     ucur.commit("wireless");
-    // Фоново, без заглушки: uci уже сменён, поэтому кнопка сразу показывает новое
-    // состояние; `wifi reload` в фоне применяет его к радио, не вешая uloop.
-    system("wifi reload >/dev/null 2>&1 &");
+    // Фоново, без заглушки: uci уже сменён, кнопка сразу показывает новое
+    // состояние. Перезагружаем ТОЛЬКО затронутое радио (короче окно), а не
+    // всю беспроводку. Плюс ставим кулдаун: пока идёт reload, netifd занят и
+    // ubus-вызовы в refresh_data блокировали бы весь UI (нельзя было нажать
+    // второй тумблер или выйти) - на это время refresh их пропускает.
+    st.wifi_cd = time();
+    system(sprintf("wifi reload %s >/dev/null 2>&1 &", sh_quote(radio)));
     draw_wifi_page();
 }
 
@@ -13248,7 +13282,14 @@ function handle_touch(tx, ty, tmove) {
         let cw = GW;
 
         // Card 1: 2.4GHz (radio1)
-        let y1 = GY + oy;
+        let y1 = GVT + oy;
+        // Кнопка ВКЛ/ВЫКЛ проверяется ПЕРВОЙ: её зона отдельная, но так тап по
+        // ней гарантированно не проваливается в переименование.
+        let br1 = wifi_onoff_rect(y1);
+        if (in_rect(tx, ty, br1.x, br1.y, br1.w, br1.h)) {
+            wifi_toggle_radio("radio1", "default_radio1");
+            return;
+        }
         let n1 = wifi_name_box(y1);
         if (in_rect(tx, ty, n1.x, n1.y, n1.w, n1.h) && ucur) {
             st.ssidsec = "default_radio1";
@@ -13265,12 +13306,6 @@ function handle_touch(tx, ty, tmove) {
             go_page("qr");
             return;
         }
-        // Кнопка ВКЛ/ВЫКЛ - радио переключаем ТОЛЬКО по её области.
-        let br1 = wifi_onoff_rect(y1);
-        if (in_rect(tx, ty, br1.x, br1.y, br1.w, br1.h)) {
-            wifi_toggle_radio("radio1", "default_radio1");
-            return;
-        }
         // Тап по числу клиентов - список подключённых устройств диапазона.
         let cr1 = wifi_cli_rect(y1);
         if (in_rect(tx, ty, cr1.x, cr1.y, cr1.w, cr1.h)
@@ -13280,8 +13315,13 @@ function handle_touch(tx, ty, tmove) {
             return;
         }
 
-        // Card 2: 5GHz (radio0)
-        let y2 = y1 + 80 + GG;
+        // Card 2: 5GHz (radio0) - тот же порядок и та же высота, что в отрисовке
+        let y2 = y1 + int((GVB - GVT - GG) / 2) + GG;
+        let br2 = wifi_onoff_rect(y2);
+        if (in_rect(tx, ty, br2.x, br2.y, br2.w, br2.h)) {
+            wifi_toggle_radio("radio0", "default_radio0");
+            return;
+        }
         let n2 = wifi_name_box(y2);
         if (in_rect(tx, ty, n2.x, n2.y, n2.w, n2.h) && ucur) {
             st.ssidsec = "default_radio0";
@@ -13296,11 +13336,6 @@ function handle_touch(tx, ty, tmove) {
             && ucur && !wifi_is_disabled("radio0", "default_radio0")) {
             st.qr_sec = "default_radio0"; st.qr_band = "5 GHz";
             go_page("qr");
-            return;
-        }
-        let br2 = wifi_onoff_rect(y2);
-        if (in_rect(tx, ty, br2.x, br2.y, br2.w, br2.h)) {
-            wifi_toggle_radio("radio0", "default_radio0");
             return;
         }
         let cr2 = wifi_cli_rect(y2);
@@ -13448,6 +13483,16 @@ function main() {
     // скажут networkInit. Поднятая сеть иначе перестаёт отвечать на запросы
     // маяка, и соседи её не видят. Делаем это фоном при старте службы.
     system(sprintf("%s state > /tmp/lcd_zig_state.json 2>/dev/null &", ZIG_BIN));
+
+    // Погода на буте: cron обновляет раз в 15 мин, но сразу после старта
+    // первого фетча нет - до ближайшего */15 экран показывает пустую погоду
+    // (/tmp стирается ребутом). Плюс RTC-less: пока NTP не выставит время,
+    // TLS к API падает на неверной дате. Поэтому в фоне повторяем фетч, пока
+    // не появится кэш (до ~3.5 мин), затем эстафету держит cron.
+    if (!fs.readfile("/tmp/lcd_weather.txt"))
+        system("(for i in 1 2 3 4 5; do /etc/almond3s/scripts/weather_fetch.sh; " +
+               "[ -s /tmp/lcd_weather.txt ] && break; sleep 40; done) >/dev/null 2>&1 &");
+
     let last = fs.readfile("/tmp/.lcd_page");
     st.page = (last != null && trim(last) != "") ? trim(last) : "lte";
     draw_current();
