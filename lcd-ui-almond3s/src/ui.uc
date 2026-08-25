@@ -56,7 +56,9 @@ let C = {
     // Weather icon shading tones
     sun_core:   "#FFD866", // bright sun disc
     sun_ray:    "#D29922", // dimmer amber rays (== yellow)
+    cloud_hi:   "#C2CBD6", // cloud, top rim highlight
     cloud_lit:  "#9BA7B4", // cloud, lit top
+    cloud_mid:  "#79838F", // cloud, mid tone (мягкий переход лит->тень)
     cloud_shd:  "#5A6270", // cloud, shadowed underside
     bolt:       "#FFF176", // lightning bolt
 };
@@ -511,6 +513,28 @@ let TR_RU = {
     "vpn is on": "включен",
     "vpn is off": "выключен",
     "screen, LED, night": "экран, диод, ночь",
+    "Update": "Обновление",
+    "packages": "пакеты",
+    "Almond kmod": "Almond kmod",
+    "Almond lcd": "Almond lcd",
+    "Almond nes": "Almond nes",
+    "Checking…": "Проверяю…",
+    "Installing…": "Устанавливаю…",
+    "Check": "Проверить",
+    "Install": "Обновить",
+    "Release notes": "Что нового",
+    "Loading…": "Загрузка…",
+    "Could not load": "Не удалось загрузить",
+    "Kernel module": "Модуль ядра",
+    "Router will reboot": "Роутер перезагрузится",
+    "right after install": "сразу после установки",
+    "OK": "OK",
+    "Cancel": "Отмена",
+    "No build for your OpenWrt": "Нет сборки под ядро",
+    "Download failed": "Ошибка загрузки",
+    "Version unchanged": "Версия не изменилась",
+    "Build not ready yet": "Сборка ещё не готова",
+    "Could not check": "Ошибка проверки",
     "System Info": "Система",
     "SYSTEM": "СИСТЕМА",
     "POWER": "ПИТАНИЕ",
@@ -3823,52 +3847,52 @@ function draw_btn(b, act, title, subtitle, title_c, sub_c, bg_c, middle, icon, i
 let WICONS = {
     sun: {
         grid: [
-            "............B...........",
+            "...........B............",
             "........................",
-            "............B...........",
+            "...........B............",
             "........................",
             "....B..............B....",
-            ".....B...AAAAA....B.....",
+            ".....B..AAAAAAA...B.....",
             ".......AAAAAAAAA........",
             "......AAAAAAAAAAA.......",
-            "......AAAAAAAAAAA.......",
             ".....AAAAAAAAAAAAA......",
             ".....AAAAAAAAAAAAA......",
-            "B.B..AAAAAAAAAAAAA......",
+            ".....AAAAAAAAAAAAA......",
             "B.B..AAAAAAAAAAAAA..B.B.",
             ".....AAAAAAAAAAAAA......",
-            "......AAAAAAAAAAA.......",
+            ".....AAAAAAAAAAAAA......",
+            ".....AAAAAAAAAAAAA......",
             "......AAAAAAAAAAA.......",
             ".......AAAAAAAAA........",
-            ".........AAAAA..........",
+            "........AAAAAAA.........",
             ".....B............B.....",
             "....B..............B....",
-            "...........BB...........",
+            "...........B............",
             "........................",
-            "...........BB...........",
+            "...........B............",
             "........................",
         ],
         colors: { A: C.sun_core, B: C.sun_ray },
     },
     partly: {
         grid: [
-            "........D...............",
+            "........C...............",
             "........................",
-            "........D...............",
-            "...D.CCCCCC..D..........",
+            "........C...............",
+            "...C.CCCCCC..C..........",
             "....CCCCCCCC............",
             "...CCCCCCCCCC...........",
             "...CCCCCCCCCC...........",
-            "...CCCCCCCBBBB..........",
-            "D.DCCCBBBBBBBBBBB.......",
-            "...CCBBBBBBBBBBBBBB.....",
-            "...CCBBBBBBBBBBBBBBB....",
-            "....CBBBBBBBBBBBBBBB....",
-            ".....AAAAAAAAAAAAAAA....",
-            "...D..AAAAAAAAAAAAAA....",
-            "........AAAAAAA.AAA.....",
-            "........BBBBBB..........",
-            "........D.BBB...........",
+            "...CCCCCCCMMMB..........",
+            "C.CCCCCCCMBBBBBBB.......",
+            "...CCCCCMBBBBBBBBBB.....",
+            "...CCCCMBBBBBBBBBBBB....",
+            "....CCMBBBBBBBBBBBBBB...",
+            ".....CMBBBBBBBBBBBBBB...",
+            "...C..MMMMMMMMMMMMMM....",
+            ".......MMMMMMMMMMMM.....",
+            "........AAAAAAAAA.......",
+            "........C.AAA...........",
             "........................",
             "........................",
             "........................",
@@ -3877,65 +3901,65 @@ let WICONS = {
             "........................",
             "........................",
         ],
-        colors: { A: C.cloud_shd, B: C.cloud_lit, C: C.sun_core, D: C.sun_ray },
+        colors: { A: C.cloud_shd, B: C.cloud_lit, M: C.cloud_mid, C: C.sun_core, D: C.sun_ray },
     },
     cloud: {
         grid: [
             "........................",
-            "........................",
-            "........................",
-            "..........BBBB..........",
-            "........BBBBBBBB........",
-            ".......BBBBBBBBBB.......",
-            "......BBBBBBBBBBBB..BB..",
-            ".....BBBBBBBBBBBBBBBBBB.",
-            "...BBBBBBBBBBBBBBBBBBBBB",
+            ".......HHHHH............",
+            "......HBBBBBH...........",
+            ".....HBBBBBBBH..........",
+            "....HBBBBBBBBBH.........",
+            "...HBBBBBBBBBBB...HHHH..",
+            "..HBBBBBBBBBBBBB.HBBBBH.",
+            ".HBBBBBBBBBBBBBBBBBBBBBH",
+            ".HBBBBBBBBBBBBBBBBBBBBBB",
+            ".BBBBBBBBBBBBBBBBBBBBBBB",
+            ".BBBBBBBBBBBBBBBBBBBBBBB",
             "..BBBBBBBBBBBBBBBBBBBBBB",
-            "..BBBBBBBBBBBBBBBBBBBBBB",
-            "..BBBBBBBBBBBBBBBBBBBBBB",
-            "..AAAAAAAAAAAAAAAAAAAAAA",
-            "...AAAAAAAAAAAAAAAAAAAA.",
-            ".....AAAAAAAAAAAAAAAA...",
+            "..MBMBMBMBMBMBMBMBMBMBM.",
+            "...MBMBMBMBMBMBMBMBMBM..",
+            "....MAMAMAMAMAMAMAMAM...",
+            "......AAAAAAAAAAAAAA....",
+            "........AAAAAAAAAA......",
+            "..........AAAAA.........",
             "........................",
             "........................",
             "........................",
             "........................",
             "........................",
             "........................",
-            "........................",
-            "........................",
-            "........................"
         ],
-        colors: { A: C.cloud_shd, B: C.cloud_lit },
+        colors: { A: C.cloud_shd, B: C.cloud_lit, M: C.cloud_mid, H: C.cloud_hi },
     },
     rain: {
         grid: [
             "........................",
-            "..........B.............",
-            "........BBBBBBB.........",
+            ".......BBBBBBB..........",
+            "......BBBBBBBBB.........",
             ".....BBBBBBBBBBBB.......",
             "....BBBBBBBBBBBBBBB.....",
             "....BBBBBBBBBBBBBBBB....",
-            "....BBBBBBBBBBBBBBBB....",
-            "....AAAAAAAAAAAAAAAA....",
-            ".....AAAAAAAAAAAAAAA....",
-            ".......AAAAAAAAAAAA.....",
-            ".......BBBBBBB..........",
-            "........BBBBB...........",
+            "....MMMMMMMMMMMMMMMM....",
+            "....MMMMMMMMMMMMMMMM....",
+            ".....AMAMAMAMAMAMAMA....",
+            "......AAAAAAAAAAAAA.....",
+            ".......MMMMMMMMMMM......",
+            "........................",
+            ".......C...C...C........",
+            ".......C...C...C........",
+            ".....C...C...C..........",
+            ".....C...C...C..........",
             "........................",
             "........................",
             "........................",
             "........................",
             "........................",
-            "....C.......C...........",
-            "....C.......C...........",
-            "........C.......C.......",
-            "........C.......C.......",
-            "......C.......C.........",
-            "......C.......C.........",
+            "........................",
+            "........................",
             "........................",
         ],
-        colors: { A: C.cloud_shd, B: C.cloud_lit, C: C.cyan },
+        colors: { A: C.cloud_shd, B: C.cloud_lit, M: C.cloud_mid, C: C.cyan },
     },
     snow: {
         grid: [
@@ -3945,7 +3969,7 @@ let WICONS = {
             ".....BBBBBBBBBBBB.......",
             "....BBBBBBBBBBBBBBB.....",
             "....BBBBBBBBBBBBBBBB....",
-            "....BBBBBBBBBBBBBBBB....",
+            "....MMMMMMMMMMMMMMMM....",
             "....AAAAAAAAAAAAAAAA....",
             ".....AAAAAAAAAAAAAAA....",
             ".......AAAAAAAAAAAA.....",
@@ -3964,7 +3988,7 @@ let WICONS = {
             "......C....C....C.......",
             "........................",
         ],
-        colors: { A: C.cloud_shd, B: C.cloud_lit, C: C.white },
+        colors: { A: C.cloud_shd, B: C.cloud_lit, M: C.cloud_mid, C: C.white },
     },
     fog: {
         grid: [
@@ -4001,7 +4025,7 @@ let WICONS = {
             "....BBBBBBBBBBBBBB......",
             "....BBBBBBBBBBBBBBBB....",
             "...BBBBBBBBBBBBBBBBBB...",
-            "...BBBBBBBBBBBBBBBBBB...",
+            "...MMMMMMMMMMMMMMMMMM...",
             "....AAAAAAAAAAAAAAAAA...",
             "....AAAAAAAAAAAAAAAAA...",
             "......AAAAAAAAAAAAAA....",
@@ -4022,7 +4046,7 @@ let WICONS = {
             ".........C..............",
             "........................",
         ],
-        colors: { A: C.cloud_shd, B: C.cloud_lit, C: C.bolt },
+        colors: { A: C.cloud_shd, B: C.cloud_lit, M: C.cloud_mid, C: C.bolt },
     },
 };
 
@@ -4128,6 +4152,16 @@ function weather_icon_color(key) {
 function draw_weather_icon(x, y, desc, cell, color_override) {
     cell ??= 3; // grid is 24x24, so cell=3 keeps the old default footprint (~72px)
     let key = weather_icon_key(desc);
+    // Отредактированная в редакторе версия (wx_<ключ>) перекрывает вшитую.
+    let cu = MICON_CUSTOM["wx_" + key];
+    if (cu) {
+        for (let r = 0; r < cu.h; r++)
+            for (let c = 0; c < cu.w; c++)
+                if (cu.g[r][c])
+                    lcd_rect(x + c * cell, y + r * cell, cell, cell,
+                             color_override ?? cu.pal[cu.g[r][c] - 1]);
+        return;
+    }
     let icon = WICONS[key];
     let grid = icon.grid;
     let cmap = icon.colors;
@@ -4878,6 +4912,21 @@ function weather_sub() {
     return sprintf("%s, %s", city_name(w.city) ?? "", w.temp ?? "");
 }
 
+// Цвет температуры воздуха по шкале «тепло-холод» (как у температуры модема,
+// но диапазон уличный, -30..+40): мороз - синий, прохладно - голубой, комфорт
+// - зелёный, тепло - янтарь, жара - оранжевый/красный. По строке вида "+15°C".
+// Единый цвет температуры по всему UI - строго на палитре виджетов
+// (голубой/зелёный/оранжевый/красный, без янтаря). Динамический тепло-холод.
+function weather_temp_col(ts) {
+    let m = match(trim(ts ?? ""), /(-?[0-9]+)/);
+    if (!m) return C.white;
+    let t = int(m[1]);
+    if (t <=  8) return C.cyan;      // холод/прохлада
+    if (t <= 18) return C.green;     // комфорт
+    if (t <= 30) return C.orange;    // тепло
+    return C.red;                    // жара
+}
+
 // Подпись плитки «Будильник»: время, если он включён; иначе «подъём».
 function alarm_sub() {
     if (!ucur || ucur.get("almond3s", "alarm", "enabled") != "1") return tr("wake up");
@@ -4974,9 +5023,10 @@ function menu_items() {
                sc: ns > 0 ? C.green : C.gray, icon: "sms", ic: ns > 0 ? C.green : C.gray, act: "sms" });
     push(it, { label: tr("Weather"), sub: weather_sub(), icon: "weather", ic: C.yellow, act: "weather" });
     push(it, { label: tr("Alarm"), sub: alarm_sub(), icon: "sound", ic: C.yellow, act: "alarm" });
+    let bfull = (bt?.full || (bt?.charging && bp >= 100)) && !bt?.no_battery;
     push(it, { label: tr("Battery"), top: bp >= 0 ? sprintf("%d%%", bp) : "--",
-               sub: bt?.charging ? tr("charging") : tr("on battery"),
-               sc: bt?.charging ? bcol : C.gray, icon: "bolt", ic: bcol, act: "battery" });
+               sub: bfull ? tr("Plugged in") : (bt?.charging ? tr("charging") : tr("on battery")),
+               sc: bfull ? C.green : (bt?.charging ? bcol : C.gray), icon: "bolt", ic: bcol, act: "battery" });
     push(it, { label: tr("Terminal"), sub: tr("shell"), icon: "term", ic: TOOL, act: "term" });
     push(it, { label: tr("Zigbee"), sub: "EM357", icon: "zigbee", ic: TOOL, act: "zigbee" });
     push(it, { label: tr("Games"), sub: games_sub(), icon: "game", ic: TOOL, act: "games" });
@@ -5263,6 +5313,32 @@ let ED_SLOTS = [
     { name: "eth",      pal: 6 }, { name: "fn",     pal: 5 },
     { name: "rot",      pal: 6 }, { name: "home",   pal: 6 },
 ];
+
+// Иконки состояний погоды (WICONS) - в редактор. Конвертируем буквенную
+// палитру каждой в цифровой формат {art, pal}, регистрируем под именем
+// wx_<ключ> в MICONS и добавляем слот в редактор. Отредактированную версию
+// (файл /etc/almond3s/icons/wx_<ключ>.txt -> MICON_CUSTOM) draw_weather_icon
+// подхватывает поверх вшитой. Один раз на старте.
+for (let wkey, wic in WICONS) {
+    let pal = [], idx = {};
+    for (let ch, col in wic.colors) {
+        push(pal, col);
+        idx[ch] = length(pal);
+    }
+    let art = [];
+    for (let row in wic.grid) {
+        let line = "";
+        for (let c = 0; c < length(row); c++) {
+            let ch = substr(row, c, 1);
+            line += (ch == "." || idx[ch] == null) ? "." : ("" + idx[ch]);
+        }
+        push(art, line);
+    }
+    while (length(pal) < 8) push(pal, "#000000");
+    MICONS["wx_" + wkey] = { art: art, pal: pal };
+    push(ED_SLOTS, { name: "wx_" + wkey, pal: 1 });
+}
+
 let ed_pick = false;
 let ed_cpick = false;
 let ed_target = null;
@@ -5390,8 +5466,8 @@ function draw_iconedit_page() {
         // Пикер: все иконки меню сеткой на месте холста.
         lcd_text(ED_X, ED_Y, tr("Pick an icon to edit"), C.ontop, C.bg, 1);
         for (let i = 0; i < length(ED_SLOTS); i++) {
-            let px = ED_X + (i % 6) * 34;
-            let py = ED_Y + 14 + int(i / 6) * 36;
+            let px = ED_X + (i % 8) * 37;
+            let py = ED_Y + 14 + int(i / 8) * 34;
             lcd_rect(px, py, 32, 32, ed_target == ED_SLOTS[i].name ? C.accent : C.btn);
             // Масштаб под размер: широкая иконка (напр. wifi_st) в scale 1,
             // центрируем в клетке 32x32.
@@ -5529,6 +5605,7 @@ let SETTINGS = [
     { label: "Night",        sub: "schedule and actions",       act: "night",   ic: "#39C5CF" },
     { label: "LED",          sub: "above the screen",           act: "led" },
     { label: "Editor",       sub: "pixel art",                  act: "iconedit", ic: "#DB61A2" },
+    { label: "Update",       sub: "packages",                   act: "update",  ic: "#3FB950" },
 ];
 // Плитка «Дебаг» из настроек убрана: страница служебная, снаружи она путала.
 // Сама страница жива - echo debug > /tmp/.lcd_goto.
@@ -5539,6 +5616,92 @@ function settings_btn(i) {
     let h = gcard_h(3);
     return { x: GX + (i % 2) * (GCOL + GG), y: GVT + int(i / 2) * (h + GG),
              w: GCOL, h: h };
+}
+
+let UPD_SCRIPT = "almond_update.sh";
+
+function upd_file(key) {
+    return "/tmp/almond_upd_" + key + ".json";
+}
+
+function upd_read(key) {
+    let raw = fs.readfile(upd_file(key));
+    if (!raw) return null;
+    try { return json(raw); } catch (e) { return null; }
+}
+
+function upd_ver_disp(v) {
+    v = "" + (v ?? "?");
+    let c = substr(v, 0, 1);
+    return (c == "v" || c == "V") ? substr(v, 1) : v;
+}
+
+function upd_avail(j) {
+    return j != null && (j.update_available == 1 || j.update_available == true);
+}
+
+function upd_err_msg(code) {
+    if (code == "no_build") return tr("No build for your OpenWrt");
+    if (code == "download") return tr("Download failed");
+    if (code == "unchanged") return tr("Version unchanged");
+    if (code == "asset_pending") return tr("Build not ready yet");
+    return tr("Could not check");
+}
+
+function upd_run(action, key) {
+    system(sprintf("setsid %s/%s %s %s >/dev/null 2>&1 &", SCRIPTS, UPD_SCRIPT, action, key));
+}
+
+// Наши пакеты + 5gmodem (если установлен). kmod помечен - у него особый путь:
+// предупреждение и перезагрузка после установки.
+function upd_pkgs() {
+    let a = [
+        { key: "kmod", label: tr("Almond kmod"), kmod: true },
+        { key: "lcd",  label: tr("Almond lcd") },
+        { key: "nes",  label: tr("Almond nes") },
+    ];
+    if (fs.stat("/usr/share/5gmodem/update.sh"))
+        push(a, { key: "5g", label: "5gmodem" });
+    return a;
+}
+
+// Фоновая проверка всех пакетов при заходе на страницу: пишем running сразу
+// (мгновенный отклик), скрипты уходят в setsid и рендер не держат. Все три наши
+// пакета проверяются одним запросом к API (check almond), 5gmodem - отдельно.
+// Без force не частим - не чаще раза в 8 секунд.
+// Пакет «занят», если у него идёт операция (свежая метка running). Метку
+// старше 4 минут считаем зависшей и не блокируем ей проверку.
+function upd_busy(key) {
+    let j = upd_read(key);
+    if (!(j != null && j.running == true)) return false;
+    let f = fs.stat(upd_file(key));
+    return f && (time() - f.mtime) < 240;
+}
+
+function upd_kick_all(force) {
+    if (!force && (time() - (st.upd_kick_ts ?? 0)) < 8) return;
+    // Не мешаем идущей установке/проверке: не перезаписываем её статус и не
+    // дёргаем check параллельно (иначе 5gmodem update.sh конфликтует сам с
+    // собой, а строка мигает между «Устанавливаю…» и «Проверяю…»).
+    let busy_almond = upd_busy("kmod") || upd_busy("lcd") || upd_busy("nes");
+    if (!busy_almond) {
+        st.upd_kick_ts = time();
+        for (let k in [ "kmod", "lcd", "nes" ])
+            fs.writefile(upd_file(k), '{"running":true,"act":"check"}');
+        upd_run("check", "almond");
+    }
+    if (fs.stat("/usr/share/5gmodem/update.sh") && !upd_busy("5g")) {
+        fs.writefile(upd_file("5g"), '{"running":true,"act":"check"}');
+        upd_run("check", "5g");
+    }
+}
+
+// Тап по строке пакета открывает релиз-ноты его репозитория. Наши пакеты и
+// 5gmodem живут в разных репах - src их различает. Старый файл сносим, чтобы
+// страница показала «Загрузка…», пока фоновый фетч не принесёт свежие.
+function upd_kick_notes(src) {
+    fs.unlink("/tmp/almond_notes_" + src + ".txt");
+    upd_run("notes", src);
 }
 
 function draw_settings_page() {
@@ -5567,6 +5730,143 @@ function draw_settings_page() {
     }
 
     draw_back();
+    lcd_flush();
+}
+
+// Обновление: две карточки - наши пакеты Almond и модем 5G. Работа идёт через
+// almond_update.sh, статус ui.uc читает из /tmp одним форматом. Карточка 5G
+// появляется только если на аппарате есть luci-app-5gmodem с его апдейтером.
+// Ряды-строки списка + нижняя кнопка «Проверить»: равные веса, ровно
+// заполняют полезную область по сетке.
+function upd_rows() {
+    let n = length(upd_pkgs());
+    let w = [];
+    for (let i = 0; i <= n; i++) push(w, 1);   // n пакетов + ряд кнопок
+    return stack_rects(w);
+}
+
+// Две кнопки в ряд по сетке. idx 0 - левая.
+function upd_row_btn(r, idx) {
+    let bw = int((GW - GG) / 2);
+    let x = (idx == 0) ? GX : (GX + bw + GG);
+    let w = (idx == 0) ? bw : (GX + GW - x);
+    return { x: x, y: r.y, w: w, h: r.h };
+}
+
+// Пометить пакет «в работе» (мгновенный отклик): act различает проверку и
+// установку - от него зависит подпись в строке.
+function upd_mark(key, act) {
+    fs.writefile(upd_file(key), sprintf('{"running":true,"act":"%s"}', act));
+}
+
+function upd_any_avail() {
+    for (let p in upd_pkgs())
+        if (upd_avail(upd_read(p.key))) return true;
+    return false;
+}
+
+// Правая колонка строки: состояние пакета одной подписью и цвет полоски.
+function upd_row_state(j) {
+    if (j != null && j.running == true)
+        return { acc: C.orange, col: C.orange,
+                 txt: (j.act == "install") ? tr("Installing…") : tr("Checking…") };
+    if (j == null)          return { acc: C.dim, txt: tr("…"), col: C.gray };
+    if (j.success == false) return { acc: C.red, txt: upd_err_msg(j.error), col: C.red };
+    if (upd_avail(j))       return { acc: C.green,
+                                     txt: sprintf("%s → %s", upd_ver_disp(j.current), upd_ver_disp(j.latest)),
+                                     col: C.green };
+    return { acc: C.cyan, txt: upd_ver_disp(j.current), col: C.gray };
+}
+
+// Модалка-предупреждение перед установкой модуля ядра.
+function upd_confirm_geo() {
+    let w = 288, h = 128, x = int((LCD_W - w) / 2), y = int((LCD_H - h) / 2);
+    let bw = 122, bh = 34, by = y + h - bh - 12;
+    return { x: x, y: y, w: w, h: h,
+             ok:     { x: x + 16,          y: by, w: bw, h: bh },
+             cancel: { x: x + w - bw - 16, y: by, w: bw, h: bh } };
+}
+
+function draw_upd_confirm() {
+    let g = upd_confirm_geo();
+    lcd_rect(g.x - 2, g.y - 2, g.w + 4, g.h + 4, C.red);
+    lcd_rect(g.x, g.y, g.w, g.h, C.widget);
+    lcd_text_c(LCD_W / 2, g.y + 14, tr("Kernel module"), C.orange, C.widget, 2);
+    lcd_text_c(LCD_W / 2, g.y + 42, tr("Router will reboot"), C.white, C.widget, 1);
+    lcd_text_c(LCD_W / 2, g.y + 58, tr("right after install"), C.white, C.widget, 1);
+    gcard(g.ok.x, g.ok.y, g.ok.w, g.ok.h, C.green);
+    lcd_text_c(g.ok.x + int(g.ok.w / 2), g.ok.y + int((g.ok.h - 16) / 2), tr("OK"), C.white, C.widget, 2);
+    gcard(g.cancel.x, g.cancel.y, g.cancel.w, g.cancel.h, C.dim);
+    lcd_text_c(g.cancel.x + int(g.cancel.w / 2), g.cancel.y + int((g.cancel.h - 16) / 2),
+               tr("Cancel"), C.gray, C.widget, 2);
+}
+
+function draw_update_page() {
+    lcd_clear(C.bg);
+    draw_header(tr("Update"));
+    let pk = upd_pkgs(), n = length(pk), R = upd_rows();
+    for (let i = 0; i < n; i++) {
+        let p = pk[i], r = R[i];
+        let s = upd_row_state(upd_read(p.key));
+        gcard(r.x, r.y, r.w, r.h, s.acc);
+        let ty = r.y + int((r.h - 16) / 2);
+        lcd_text(r.x + 13, ty, p.label, C.white, C.widget, 2);
+        lcd_text_r(r.x + r.w - 12, ty, tcut(s.txt, 22), s.col, C.widget, 1);
+    }
+    // Две кнопки в ряд: Проверить и Обновить (обновляет все доступные).
+    let br = R[n];
+    let cb = upd_row_btn(br, 0);
+    gcard(cb.x, cb.y, cb.w, cb.h, C.cyan);
+    lcd_text_c(cb.x + int(cb.w / 2), cb.y + int((cb.h - 16) / 2), tr("Check"), C.white, C.widget, 2);
+    let any = upd_any_avail();
+    let ub = upd_row_btn(br, 1);
+    gcard(ub.x, ub.y, ub.w, ub.h, any ? C.green : C.dim);
+    lcd_text_c(ub.x + int(ub.w / 2), ub.y + int((ub.h - 16) / 2), tr("Install"),
+               any ? C.white : C.gray, C.widget, 2);
+
+    if (st.upd_confirm) draw_upd_confirm();
+    draw_back();
+    lcd_flush();
+}
+
+function relnotes_read(src) {
+    return fs.readfile("/tmp/almond_notes_" + src + ".txt");
+}
+
+function draw_relnotes_page() {
+    let src = st.notes_src ?? "almond";
+    lcd_clear(C.bg);
+    draw_header(tr("Release notes"));
+    let raw = relnotes_read(src);
+    if (raw == null) {
+        lcd_text_c(int(LCD_W / 2), 108, tr("Loading…"), C.gray, C.bg, 2);
+        draw_back();
+        lcd_flush();
+        return;
+    }
+    if (trim(raw) == "__ERR__") {
+        lcd_text_c(int(LCD_W / 2), 108, tr("Could not load"), C.red, C.bg, 2);
+        draw_back();
+        lcd_flush();
+        return;
+    }
+    let nl = index(raw, "\n");
+    let tag = (nl >= 0) ? substr(raw, 0, nl) : raw;
+    let body = (nl >= 0) ? substr(raw, nl + 1) : "";
+    lcd_rect(GX, 28, GW, 22, C.widget);
+    astripe(GX, 28, 22, C.green);
+    lcd_text(GX + 13, 34, tcut(tag, 24), C.green, C.widget, 1);
+
+    let lines = sms_wrap(body, SMS_COLS);
+    let pages = int((length(lines) + SMS_LINES - 1) / SMS_LINES);
+    if (pages < 1) pages = 1;
+    if ((st.notes_pg ?? 0) >= pages) st.notes_pg = pages - 1;
+    for (let i = 0; i < SMS_LINES; i++) {
+        let li = (st.notes_pg ?? 0) * SMS_LINES + i;
+        if (li >= length(lines)) break;
+        lcd_text(16, 58 + i * 12, lines[li], C.ontop_hi, C.bg, 1);
+    }
+    draw_back_pager(st.notes_pg ?? 0, pages);
     lcd_flush();
 }
 
@@ -9419,10 +9719,12 @@ function draw_weather_page() {
     let X = GX + ox;
     // Герой: температура крупно, город под ней, иконка справа (высота 84).
     let WR = stack_rects([ 84, 32, 44 ]);
-    let h = gcard(X, WR[0].y + oy, GW, WR[0].h, C.yellow);
+    // Акцент-полоса героя - динамическая по температуре (тепло-холод), как у
+    // виджетов температуры модема/чипа.
+    let h = gcard(X, WR[0].y + oy, GW, WR[0].h, weather_temp_col(w.temp));
     draw_weather_icon(h.r - 82, h.y + 8, desc, 3, null);   // 72x72
     // Температура в главной карточке - крупно и целиком (как было).
-    lcd_text(h.ix, h.y + 14, w.temp ?? "?", C.white, C.widget, 4);
+    lcd_text(h.ix, h.y + 14, w.temp ?? "?", weather_temp_col(w.temp), C.widget, 4);
     lcd_text(h.ix, h.y + 52, city_name(w?.city) ?? "", C.gray, C.widget, 1);
     let wupd = weather_updated_str();
     if (wupd != "") lcd_text(h.ix, h.y + 66, wupd, C.dim, C.widget, 1);
@@ -9775,6 +10077,18 @@ function page_sig() {
         let cs = fs.stat(SMS_CACHE);
         return base + sprintf("|%d|%d|%d|%d", st.sms_pg, st.sms_i,
                               cs ? cs.mtime : 0, st.sms_nobridge ? 1 : 0);
+    }
+    case "update": {
+        let sg = "";
+        for (let k in [ "kmod", "lcd", "nes", "5g" ]) {
+            let f = fs.stat(upd_file(k));
+            sg += sprintf("|%d|%d", f ? f.mtime : 0, f ? f.size : 0);
+        }
+        return base + sg + "|" + (st.upd_confirm ?? "");
+    }
+    case "relnotes": {
+        let f = fs.stat("/tmp/almond_notes_" + (st.notes_src ?? "almond") + ".txt");
+        return base + sprintf("|%d|%d|%d", f ? f.mtime : 0, f ? f.size : 0, st.notes_pg ?? 0);
     }
     case "netpri":
         return base + sprintf("|%J", netpri_list());
@@ -10234,6 +10548,8 @@ function draw_current() {
     case "sms1":      draw_sms_one(); break;
     case "night":     draw_night_page(); break;
     case "settings":  draw_settings_page(); break;
+    case "update":    draw_update_page(); break;
+    case "relnotes":  draw_relnotes_page(); break;
     case "power":     draw_power_page(); break;
     case "led":       draw_led_page(); break;
     case "battery":   draw_battery_page(); break;
@@ -10740,10 +11056,13 @@ function dash_tile(t, d, o) {
 
     if (t.k == "weather") {
         let w2 = d?.weather;
-        dash_card(b, o, A_ORANGE);
+        // Акцент и цифра температуры - одним динамическим цветом по значению
+        // (тепло-холод), как у других температурных виджетов дашборда.
+        let wcol = w2 ? (o.mono ?? weather_temp_col(w2.temp)) : (o.mono ?? A_ORANGE);
+        dash_card(b, o, wcol);
         dash_lab(b, o, w2 ? tcut(city_name(w2.city) ?? tr("Weather"), 16) : tr("Weather"));
         if (w2) {
-            lcd_text(b.x + 12, b.y + 19, tcut(w2.temp ?? "?", 5), o.mono ?? A_ORANGE, "none", 2);
+            lcd_text(b.x + 12, b.y + 19, tcut(w2.temp ?? "?", 5), wcol, "none", 2);
             dash_sub(b, o, tcut(wcond_tr(w2.desc ?? ""), 18));
             if (!o.mono) draw_weather_icon(b.x + b.w - 36, b.y + 13, w2.desc ?? "", 1, null);
         } else {
@@ -10847,14 +11166,14 @@ function draw_screensaver_body() {
         // что 4G+ и конвертик нового SMS не пересекаются с первой цифрой часов.
         // Прозрачный фон ("none"): под цифрами остаётся подложка-градиент, а не
         // чёрная плашка. В ночном режиме под ними всё равно ровный чёрный.
-        // Часы/дата были прижаты к статус-строке, а внизу карточек - пустоты.
-        // Опускаем верх (воздух берём из низа): часы 20->26, дата 50->58.
+        // Единая сетка: часы/дата сверху, ниже равномерно — герой, условие,
+        // ряд метрик, у низа остаётся воздух (раньше метрики прилипали к краю).
         lcd_text(int((LCD_W - tlen(ts) * 24) / 2), 26, ts, primary, "none", 4);
         if (fl.date)
-            lcd_text(int((LCD_W - tlen(ds) * 12) / 2), 58, ds, secondary, "none", 2);
+            lcd_text_thin(int(LCD_W / 2), 58, ds, secondary, "none", 2, "c");
 
         if (!w2) {
-            let c = gcard_pos(GX, 80, GW, 76);
+            let c = gcard_pos(GX, 84, GW, 76);
             lcd_text(c.ix, c.iy + 20, tr("No data yet"), secondary, "none", 2);
             lcd_text(c.ix, c.iy + 44, tr("Open menu > Weather to fetch"), secondary, "none", 1);
             lcd_flush();
@@ -10862,39 +11181,38 @@ function draw_screensaver_body() {
         }
 
         let desc = w2.desc ?? "";
-        // Высоту героя держит иконка (72px), поэтому текст слева прижимаем к
-        // верху, а город ставим сразу под цифрами - иначе под ними дыра.
-        let h = gcard_pos(GX, 84, GW, 76);
-        draw_weather_icon(h.r - 82, h.y + 2, desc, 3, night ? primary : null);
-        lcd_text(h.ix, h.y + 6, w2.temp ?? "?", primary, "none", 4);
-        lcd_text(h.ix, h.y + 40, city_name(w2.city) ?? "", secondary, "none", 1);
+        // Герой: температура крупно, иконка справа; город и «обновлено N назад»
+        // под ней с одинарным межстрочным отступом (12px при кегле 1).
+        let h = gcard_pos(GX, 80, GW, 70);
+        draw_weather_icon(h.r - 82, h.y + 4, desc, 3, night ? primary : null);
+        lcd_text(h.ix, h.y + 8, w2.temp ?? "?",
+                 night ? primary : weather_temp_col(w2.temp), "none", 4);
+        lcd_text(h.ix, h.y + 42, city_name(w2.city) ?? "", secondary, "none", 1);
+        {
+            let ws = fs.stat("/tmp/lcd_weather.txt");
+            if (ws && ws.mtime)
+                lcd_text(h.ix, h.y + 54,
+                         sprintf("%s %s", tr("Updated"), fmt_ago(ws.mtime)),
+                         night ? primary : C.dim, "none", 1);
+        }
 
-        // Условие подтянуто к герою и ужато по высоте: над и под словом было
-        // поровну пусто.
-        let cc = gcard_pos(GX, 162, GW, 24);
-        lcd_text(cc.ix, cc.y + 5, tcut(wcond_tr(desc), 24), accent, "none", 2);
+        // Условие
+        let cc = gcard_pos(GX, 156, GW, 22);
+        lcd_text(cc.ix, cc.y + 4, tcut(wcond_tr(desc), 24), accent, "none", 2);
 
+        // Метрики тремя карточками, подняты от нижнего края.
         let mw = int((GW - 2 * GG) / 3);
         let mets = [ [ tr("Feels"), w2.feels ?? "?" ],
                      [ tr("Humidity"), w2.humidity ?? "?" ],
                      [ tr("Wind"), wind_fmt(w2.wind ?? "") ] ];
         for (let i = 0; i < 3; i++) {
             let mx = GX + i * (mw + GG);
-            let mc = gcard_pos(mx, 194, (i < 2) ? mw : (GX + GW - mx), 44);
-            lcd_text(mc.ix, mc.y + 8, mets[i][0], secondary, "none", 1);
+            let mc = gcard_pos(mx, 184, (i < 2) ? mw : (GX + GW - mx), 42);
+            lcd_text(mc.ix, mc.y + 7, mets[i][0], secondary, "none", 1);
             let mv = split_unit(mets[i][1]);
-            lcd_text(mc.ix, mc.y + 21, mv[0], primary, "none", 2);
+            lcd_text(mc.ix, mc.y + 20, mv[0], primary, "none", 2);
             if (mv[1] != "")
-                lcd_text(mc.ix + tlen(mv[0]) * 12 + 1, mc.y + 20, mv[1], secondary, "none", 1);
-        }
-        // Когда данные снимались - внизу мелко: на заставке этой строки не было
-        // вовсе, и понять, свежая ли погода, было неоткуда.
-        {
-            let ws = fs.stat("/tmp/lcd_weather.txt");
-            if (ws && ws.mtime)
-                lcd_text_c(int(LCD_W / 2), 228,
-                           sprintf("%s %s", tr("Updated"), fmt_ago(ws.mtime)),
-                           night ? primary : C.dim, "none", 1);
+                lcd_text(mc.ix + tlen(mv[0]) * 12 + 1, mc.y + 19, mv[1], secondary, "none", 1);
         }
         lcd_flush();
         return;
@@ -10944,7 +11262,9 @@ function draw_screensaver_body() {
         let date_y = (style == "clock") ? clk_y + 7 * clk_sz + date_gap : 54;
         let dx = (style == "clock" && fl.wander)
                ? clk_x + int((clk_w - date_w) / 2) : int((LCD_W - date_w) / 2);
-        lcd_text(dx, date_y, ds, secondary, bg, date_sz);
+        // Дата тонким начертанием: на парных шрифтах (Комбо/Pixel) заголовок
+        // жирный, а служебная строка - светлая; на остальных fnt:-1 игнорится.
+        lcd_text_thin(dx, date_y, ds, secondary, bg, date_sz);
     }
 
     // Та же статусная полоса, что и в шапке, но без времени и процентов:
@@ -11189,6 +11509,10 @@ function run_script(name, bg) {
 function go_page(p, is_back) {
     if (st.page == "term" && p != "term") term_stop();   // уходим - гасим шелл
     if (st.page == "alarm" && p != "alarm") alarm_save(); // сохраняем будильник
+    // Автопроверка только при первом заходе (из настроек), не при возврате из
+    // релиз-нот - иначе чтение нот сбрасывало бы уже готовый результат.
+    if (p == "update" && p != st.page && !is_back) upd_kick_all(false);
+    if (p == "relnotes" && p != st.page && !is_back) upd_kick_notes(st.notes_src ?? "almond");
     if (p == "dcust" && st.page != "dcust") st.dcp = null; // редактор всегда с сетки
     // Стек переходов для честного «назад»: вперёд - кладём текущую страницу,
     // «назад» (is_back) - не кладём. Меню - корень: сбрасываем стек.
@@ -12701,8 +13025,8 @@ function handle_touch(tx, ty, tmove) {
         if (ed_pick) {
             if (tmove) return;
             for (let i = 0; i < length(ED_SLOTS); i++) {
-                let px = ED_X + (i % 6) * 34;
-                let py = ED_Y + 14 + int(i / 6) * 36;
+                let px = ED_X + (i % 8) * 37;
+                let py = ED_Y + 14 + int(i / 8) * 34;
                 if (in_rect(tx, ty, px, py, 32, 32)) {
                     ed_load(ED_SLOTS[i].name);
                     ed_pick = false;
@@ -12923,6 +13247,77 @@ function handle_touch(tx, ty, tmove) {
             if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
             go_page(SETTINGS[i].act);
             return;
+        }
+        return;
+    }
+
+    if (st.page == "update") {
+        // Модалка перехватывает все тапы: только ОК/Отмена. ОК ставит всё
+        // доступное; так как в наборе модуль ядра - следом уйдём в ребут.
+        if (st.upd_confirm) {
+            let g = upd_confirm_geo();
+            if (in_rect(tx, ty, g.ok.x, g.ok.y, g.ok.w, g.ok.h)) {
+                st.upd_confirm = null;
+                for (let p in upd_pkgs())
+                    if (upd_avail(upd_read(p.key))) upd_mark(p.key, "install");
+                upd_run("install", "all");
+                draw_update_page();
+                return;
+            }
+            if (in_rect(tx, ty, g.cancel.x, g.cancel.y, g.cancel.w, g.cancel.h)) {
+                st.upd_confirm = null;
+                draw_update_page();
+            }
+            return;
+        }
+        let pk = upd_pkgs(), n = length(pk), R = upd_rows();
+        // Тап по строке пакета - его релиз-ноты.
+        for (let i = 0; i < n; i++) {
+            let p = pk[i], r = R[i];
+            if (!in_rect(tx, ty, r.x, r.y, r.w, r.h)) continue;
+            st.notes_src = (p.key == "5g") ? "5g" : "almond";
+            st.notes_pg = 0;
+            go_page("relnotes");
+            return;
+        }
+        // Проверить.
+        let cb = upd_row_btn(R[n], 0);
+        if (in_rect(tx, ty, cb.x, cb.y, cb.w, cb.h)) {
+            upd_kick_all(true);
+            draw_update_page();
+            return;
+        }
+        // Обновить всё доступное. Если среди доступного модуль ядра - сперва
+        // предупреждение о перезагрузке.
+        let ub = upd_row_btn(R[n], 1);
+        if (in_rect(tx, ty, ub.x, ub.y, ub.w, ub.h)) {
+            if (!upd_any_avail()) return;
+            if (upd_avail(upd_read("kmod"))) { st.upd_confirm = "all"; draw_update_page(); return; }
+            for (let p in upd_pkgs())
+                if (upd_avail(upd_read(p.key))) upd_mark(p.key, "install");
+            upd_run("install", "all");
+            draw_update_page();
+            return;
+        }
+        return;
+    }
+
+    if (st.page == "relnotes") {
+        let raw = relnotes_read(st.notes_src ?? "almond");
+        let body = "";
+        if (raw != null && trim(raw) != "__ERR__") {
+            let nl = index(raw, "\n");
+            body = (nl >= 0) ? substr(raw, nl + 1) : "";
+        }
+        let pages = int((length(sms_wrap(body, SMS_COLS)) + SMS_LINES - 1) / SMS_LINES);
+        if (pages < 1) pages = 1;
+        if (ty >= BACK_Y) {
+            let hit = pager_hit(tx, ty, pages);
+            if (hit == PAGER_BACK) { back_press_fx(); go_back(); return; }
+            if (hit != PAGER_NONE) {
+                st.notes_pg = ((st.notes_pg ?? 0) + pages + hit) % pages;
+                draw_relnotes_page();
+            }
         }
         return;
     }
@@ -13606,6 +14001,15 @@ function main() {
             refresh_data();
             st.alarm_on = alarm_is_on();   // статус-иконка будильника
             night_tick();
+            // Периодический фетч погоды из самого UI: cron */15 ненадёжен на
+            // RTC-less буте (кривое время - задание не срабатывает), а на
+            // заставке «Погода» данные тогда замерзают до захода в меню. Тик
+            // по счётчику (uptime, не по времени), раз в ~15 мин.
+            st.wx_tick = (st.wx_tick ?? 0) + 1;
+            if (st.wx_tick >= int(900 / T.data)) {
+                st.wx_tick = 0;
+                system("/etc/almond3s/scripts/weather_fetch.sh >/dev/null 2>&1 &");
+            }
             if (zig_cfg().beacon) {
                 zig_tele_write();
                 // Сторож маячка: он же и первый запуск. На старте службы uci
