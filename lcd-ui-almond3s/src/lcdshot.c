@@ -11,27 +11,29 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <sys/mman.h>
-
-#define LCD_W 320
-#define LCD_H 240
+#include <sys/ioctl.h>
 
 int main(void)
 {
 	int fd = open("/dev/lcd", O_RDWR);
+	int lcd_w = 320, lcd_h = 240, g;
 	if (fd < 0) {
 		perror("open /dev/lcd");
 		return 1;
 	}
 
-	uint16_t *fb = mmap(NULL, LCD_W * LCD_H * 2, PROT_READ, MAP_SHARED, fd, 0);
+	g = ioctl(fd, 34, 0);
+	if (g > 0) { lcd_w = (g >> 16) & 0xFFFF; lcd_h = g & 0xFFFF; }
+
+	uint16_t *fb = mmap(NULL, lcd_w * lcd_h * 2, PROT_READ, MAP_SHARED, fd, 0);
 	if (fb == MAP_FAILED) {
 		perror("mmap");
 		close(fd);
 		return 1;
 	}
 
-	printf("P6\n%d %d\n255\n", LCD_W, LCD_H);
-	for (int i = 0; i < LCD_W * LCD_H; i++) {
+	printf("P6\n%d %d\n255\n", lcd_w, lcd_h);
+	for (int i = 0; i < lcd_w * lcd_h; i++) {
 		uint16_t p = fb[i];
 		unsigned char rgb[3];
 
@@ -41,7 +43,7 @@ int main(void)
 		fwrite(rgb, 1, 3, stdout);
 	}
 
-	munmap(fb, LCD_W * LCD_H * 2);
+	munmap(fb, lcd_w * lcd_h * 2);
 	close(fd);
 	return 0;
 }

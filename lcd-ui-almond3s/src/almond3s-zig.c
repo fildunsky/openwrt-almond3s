@@ -478,19 +478,34 @@ static void on_term(int sig)
     stop_flag = 1;
 }
 
-static int port_open(const char *dev)
+static int board_almondplus(void)
+{
+    char b[64] = "";
+    FILE *f = fopen("/tmp/sysinfo/board_name", "r");
+    if (!f) return 0;
+    if (!fgets(b, sizeof b, f)) b[0] = 0;
+    fclose(f);
+    return strstr(b, "almondplus") != NULL;
+}
+
+static int port_open(const char *dev, int speed)
 {
     struct termios t;
+    speed_t s = speed == 115200 ? B115200 : speed == 38400 ? B38400 :
+                speed == 19200 ? B19200 : speed == 9600 ? B9600 : B57600;
     fd = open(dev, O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (fd < 0) return -1;
     fcntl(fd, F_SETFL, 0);
     tcgetattr(fd, &t);
     cfmakeraw(&t);
-    cfsetispeed(&t, B57600);
-    cfsetospeed(&t, B57600);
+    cfsetispeed(&t, s);
+    cfsetospeed(&t, s);
     t.c_cflag |= CLOCAL | CREAD;
     t.c_cflag &= ~CRTSCTS;
-    t.c_iflag &= ~(IXON | IXOFF | IXANY);
+    if (board_almondplus())
+        t.c_iflag |= (IXON | IXOFF);
+    else
+        t.c_iflag &= ~(IXON | IXOFF | IXANY);
     tcsetattr(fd, TCSANOW, &t);
     tcflush(fd, TCIOFLUSH);
     return 0;
@@ -1304,6 +1319,7 @@ int main(int argc, char **argv)
     setvbuf(stdout, NULL, _IONBF, 0);
     const char *cmd = argc > 1 ? argv[1] : "info";
     const char *dev = getenv("ZIG_TTY") ? getenv("ZIG_TTY") : "/dev/ttyS2";
+    int baud = getenv("ZIG_BAUD") ? atoi(getenv("ZIG_BAUD")) : 57600;
 
     int lk = open("/var/lock/almond3s-zig.lock", O_CREAT | O_RDWR, 0600);
     if (lk >= 0) {
@@ -1315,7 +1331,7 @@ int main(int argc, char **argv)
         if (!got) die("занято");
     }
 
-    if (port_open(dev) < 0) die("нет порта");
+    if (port_open(dev, baud) < 0) die("нет порта");
 
     int ver = 0, reason = 0;
     int flashing = !strcmp(cmd, "flash") || !strcmp(cmd, "btlscan");

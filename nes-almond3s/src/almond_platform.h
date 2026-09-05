@@ -10,10 +10,26 @@
 #ifndef ALMOND_PLATFORM_H
 #define ALMOND_PLATFORM_H
 
+/* Размер панели можно задать сборкой (-DLCD_W/-DLCD_H): Almond 3S = 320x240,
+   Almond+ = нативные 480x320. Эмулятор пишет кадр целиком в /dev/lcd, поэтому
+   размер ДОЛЖЕН совпадать с нативным, иначе драйвер не выводит кадр. */
+#ifndef LCD_W
 #define LCD_W 320
+#endif
+#ifndef LCD_H
 #define LCD_H 240
+#endif
 #define NES_W 256
 #define NES_H 240
+/* Игровое окно вписываем по ВЫСОТЕ панели (сохраняя пропорции 256:240), картинку
+   масштабируем ближайшим соседом и ставим по центру. На 3S GAME_H=240=NES_H -
+   масштаб 1:1, поведение прежнее. На Almond+ (320) окно 341x320, поля под кнопки. */
+#define GAME_H LCD_H
+#define GAME_W (NES_W * GAME_H / NES_H)
+#define GX_OFF ((LCD_W - GAME_W) / 2)
+#define GY_OFF ((LCD_H - GAME_H) / 2)
+/* Совместимость со старым кодом (1:1 путь на 3S). */
+#define Y_OFF GY_OFF
 
 /* Биты джойстика NES в порядке, принятом в оболочке. */
 #define P_A      0x01

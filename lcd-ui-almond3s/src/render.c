@@ -12,18 +12,20 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <stdint.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <signal.h>
 
-#define LCD_W 320
-#define LCD_H 240
+#define LCD_W 480
+#define LCD_H 320
 #define FB_SIZE (LCD_W * LCD_H * 2)
 #define SOCK_PATH "/tmp/lcd.sock"
 
-static uint16_t fb[320 * 240]; /* local framebuffer */
+static uint16_t fb[LCD_W * LCD_H]; /* local framebuffer */
 static int lcd_fd;
 
 /* RGB888 → RGB565 */
@@ -571,12 +573,34 @@ static int fb_kern(const uint8_t *gp, const uint8_t *gc)
     return best;
 }
 
+/* Экран Almond+ нативный 480x320 - вдвое-втрое больше пикселей, чем 320x240 у
+ * 3S, поэтому пиксельный шрифт того же кегля мелковат. Увеличиваем РАСТР (целым
+ * множителем, чтобы остался чётким), но НАЧЕРТАНИЕ выбираем по ИСХОДНОМУ кеглю:
+ * иначе «Комбо» (тонкий для мелкого, жирный для scale>=2) считал бы весь текст
+ * крупным и рисовал всё жирным. Поэтому fz_use(логический) делается ДО zoom, а
+ * дальше геометрия идёт по увеличенному. На 3S (LCD_W<480) карта единичная. */
+/* Часы в шапке и стрелки навбара просят «без зума»: там крупный растр велик. */
+static int g_nozoom;
+
+static int fzoom(int s)
+{
+#if LCD_W >= 480
+    static const int m[] = { 0, 1, 3, 4, 6 };
+    if (g_nozoom) return s;
+    return (s >= 1 && s <= 4) ? m[s] : s;
+#else
+    return s;
+#endif
+}
+
+/* Начертание выбрано вызывающим (fb_text/fb_text_w) по логическому кеглю; здесь
+ * scale уже увеличенный, повторно fz_use НЕ зовём. fb_char вызывается только из
+ * fb_text. */
 static void fb_char(int x, int y, unsigned cp, uint16_t fg, uint16_t bg, int scale, int transp)
 {
     const uint8_t *g;
     int col, row, sx, sy;
 
-    fz_use(scale);
     if ((font_mode >= 1 && !fz_off) && fz_char_mono(x, y, cp, fg, bg, scale, !transp))
         return;
 
@@ -611,6 +635,7 @@ static int fb_text_w(const char *s, int scale)
     int w = 0, first = 1;
 
     fz_use(scale);
+    scale = fzoom(scale);
 
     while (*p) {
         unsigned cp;
@@ -657,6 +682,7 @@ static void fb_text(int x, int y, const char *s, uint16_t fg, uint16_t bg, int s
     const unsigned char *p = (const unsigned char *)s;
 
     fz_use(scale);
+    scale = fzoom(scale);
 
     while (*p && n < 256) {
         unsigned cp;
@@ -745,8 +771,8 @@ static void fb_text(int x, int y, const char *s, uint16_t fg, uint16_t bg, int s
 
 static void flush_cmd(void);
 
-static uint16_t fb_prev[320 * 240];
-static uint16_t fb_mix[320 * 240];
+static uint16_t fb_prev[LCD_W * LCD_H];
+static uint16_t fb_mix[LCD_W * LCD_H];
 static int fb_prev_ok;
 
 static void snap_cmd(void)
@@ -764,7 +790,7 @@ static void blend_cmd(int a)
     if (!fb_prev_ok) { flush_cmd(); return; }
     if (a < 0) a = 0;
     if (a > 16) a = 16;
-    for (i = 0; i < 320 * 240; i++) {
+    for (i = 0; i < LCD_W * LCD_H; i++) {
         uint16_t o = fb_prev[i], w = fb[i];
         int r = ((((o >> 11) & 31) * (16 - a)) + (((w >> 11) & 31) * a)) >> 4;
         int g = ((((o >> 5) & 63) * (16 - a)) + (((w >> 5) & 63) * a)) >> 4;
@@ -927,6 +953,8 @@ static void handle_cmd(const char *json)
          * тем сильнее, чем короче надпись - цифры в клетках стояли не по центру. */
         char anch[8];
         json_str(json, "anchor", anch, sizeof(anch));
+        /* noz:1 - рисовать без укрупнения (часы шапки, стрелки навбара). */
+        g_nozoom = json_int(json, "noz", 0);
         /* Просьба о начертании имеет смысл только в парных режимах. */
         fz_force = (font_mode == 4 || font_mode == 11) ? json_int(json, "fnt", 0) : 0;
         /* Подгонка по ширине: строка просит размер, но если в отведённое место
@@ -943,6 +971,7 @@ static void handle_cmd(const char *json)
                 parse_color((bg_color[0] && !transp) ? bg_color : "black"),
                 size, transp);
         fz_force = 0;
+        g_nozoom = 0;
     }
     else if (!strcmp(cmd, "fontmode")) {
         font_mode = json_int(json, "mode", 0);
@@ -975,10 +1004,57 @@ static void handle_cmd(const char *json)
     /* No auto-flush — only "flush" command triggers write to LCD */
 }
 
+/* SIGTERM от procd/upgraded прерывает accept()/read() (sigaction без
+ * SA_RESTART), цикл видит флаг и выходит. */
+static volatile sig_atomic_t g_term = 0;
+static void on_term(int s) { (void)s; g_term = 1; }
+
+/* Карточка «Прошивка…» прямо в фреймбуфер. Рисуется, когда нас гасит
+ * upgraded во время sysupgrade: ucode-демон к этому моменту заблокирован
+ * умирающим ubus и своё сообщение вывести уже не может, а render владеет
+ * панелью и жив до последнего. Полный кадр с нулевого смещения - иначе
+ * драйвер не выведет панель. */
+/* Язык интерфейса кладёт ui.uc в /tmp/.lcd_lang ("en"/"ru"); по умолчанию ru. */
+static int lang_is_en(void)
+{
+    int f = open("/tmp/.lcd_lang", O_RDONLY);
+    char b[4] = { 0 };
+    if (f < 0) return 0;
+    if (read(f, b, 2) != 2) { close(f); return 0; }
+    close(f);
+    return b[0] == 'e' && b[1] == 'n';
+}
+
+static void draw_fw_flash(void)
+{
+    int x, total = 0, n, en = lang_is_en();
+    const char *t1 = en ? "Flashing..." : "Прошивка...";
+    const char *t2 = en ? "Do not power off" : "Не выключайте питание";
+    const char *t3 = en ? "Screen will freeze for a few minutes"
+                        : "Экран замрёт на несколько минут";
+    font_mode = 0;
+    fb_fill(0x0000);
+    fb_rect(7, 28, LCD_W - 14, LCD_H - 56, 0x10C4);   /* тёмная карточка */
+    fb_rect(7, 28, 4, LCD_H - 56, 0xFA89);            /* красная акцент-полоса */
+    x = (LCD_W - fb_text_w(t1, 4)) / 2;
+    fb_text(x, LCD_H / 2 - 48, t1, 0xFA89, 0, 4, 1);
+    x = (LCD_W - fb_text_w(t2, 2)) / 2;
+    fb_text(x, LCD_H / 2, t2, 0xFFFF, 0, 2, 1);
+    x = (LCD_W - fb_text_w(t3, 1)) / 2;
+    fb_text(x, LCD_H / 2 + 30, t3, 0x8CB3, 0, 1, 1);
+    lseek(lcd_fd, 0, SEEK_SET);
+    while (total < FB_SIZE) {
+        n = write(lcd_fd, (char *)fb + total, FB_SIZE - total);
+        if (n <= 0) break;
+        total += n;
+    }
+}
+
 int main(int argc, char *argv[])
 {
     int sock_fd, client_fd;
     struct sockaddr_un addr;
+    struct sigaction sa;
 
     /* Open /dev/lcd. ALMOND_LCD_DEV подменяет узел обычным файлом - так
      * рендер без изменений работает в эмуляторе на ПК; на роутере
@@ -987,6 +1063,9 @@ int main(int argc, char *argv[])
     lcd_fd = open(lcd_path ? lcd_path : "/dev/lcd",
                   O_RDWR | (lcd_path ? O_CREAT : 0), 0644);
     if (lcd_fd < 0) { perror("/dev/lcd"); return 1; }
+
+    if (!lcd_path)
+        ioctl(lcd_fd, 33, (unsigned long)((LCD_W << 16) | LCD_H));
 
     printf("almond3s render: framebuffer %dx%d (%d bytes), write mode\n", LCD_W, LCD_H, FB_SIZE);
 
@@ -1014,9 +1093,16 @@ int main(int argc, char *argv[])
 
     printf("almond3s render: listening on %s\n", SOCK_PATH);
 
-    while (1) {
+    /* Без SA_RESTART: SIGTERM прерывает accept()/read() с EINTR, и цикл
+     * успевает увидеть g_term - иначе syscall перезапустился бы молча. */
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_term;
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT, &sa, NULL);
+
+    while (!g_term) {
         client_fd = accept(sock_fd, NULL, NULL);
-        if (client_fd < 0) continue;
+        if (client_fd < 0) { if (g_term) break; continue; }
 
         /*
          * read() на потоковом сокете режет данные по ПРОИЗВОЛЬНОЙ границе, а не
@@ -1047,6 +1133,12 @@ int main(int argc, char *argv[])
         /* хвост без перевода строки не исполняем: команда неполная */
         close(client_fd);
     }
+
+    /* Нас гасит upgraded во время прошивки - оставляем на панели карточку
+     * «Прошивка…», а не застывший кадр интерфейса. При обычном рестарте
+     * службы маркера нет - выходим тихо. */
+    if (access("/tmp/sysupgrade", F_OK) == 0 || access("/tmp/sysupgrade.img", F_OK) == 0)
+        draw_fw_flash();
 
     close(lcd_fd);
     close(sock_fd);

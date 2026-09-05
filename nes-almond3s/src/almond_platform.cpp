@@ -14,13 +14,13 @@
 
 #define FB_SZ (LCD_W * LCD_H * 2)
 #define FRAME_US (1000000 / 60)
-#define X_OFF ((LCD_W - NES_W) / 2)
+#define X_OFF GX_OFF
 
 #define TOUCH_PATH "/tmp/.lcd_touch"
 #define TOUCH_MOVE "/tmp/.lcd_touch.move"
 
-#define BAR_L_X1   32
-#define BAR_R_X0   288
+#define BAR_L_X1   GX_OFF
+#define BAR_R_X0   (GX_OFF + GAME_W)
 #define BTN_EXIT_Y1   28
 #define BTN_B_Y0      58
 #define BTN_B_Y1      144
@@ -560,30 +560,54 @@ static void settings_reload(void)
 static unsigned short scratch[NES_W * NES_H];
 static unsigned short prevf[NES_W * NES_H];
 
+/* Смешивание соседних кадров прямо в scratch (256x240): нужно и для 1:1, и перед
+   масштабированием. */
+static void blend_scratch(void)
+{
+    for (int i = 0; i < NES_W * NES_H; i++) {
+        unsigned short a = scratch[i], b = prevf[i];
+        if (blend_mode == 1) {
+            scratch[i] = (unsigned short)(((a & 0xF7DE) >> 1) + ((b & 0xF7DE) >> 1));
+        } else {
+            unsigned short r = (a & 0xF800) > (b & 0xF800) ? (a & 0xF800) : (b & 0xF800);
+            unsigned short g = (a & 0x07E0) > (b & 0x07E0) ? (a & 0x07E0) : (b & 0x07E0);
+            unsigned short bl = (a & 0x001F) > (b & 0x001F) ? (a & 0x001F) : (b & 0x001F);
+            scratch[i] = r | g | bl;
+        }
+        prevf[i] = a;
+    }
+}
+
 static void present(const nes_core_t *core)
 {
-    if (!blend_mode) {                       /* обычный путь: ядро пишет прямо в кадр */
-        core->picture(&fb[X_OFF], LCD_W);
+#if (GAME_W == NES_W) && (GAME_H == NES_H)
+    /* Almond 3S: панель ровно под картинку, масштаб не нужен - прежний путь. */
+    if (!blend_mode) {
+        core->picture(&fb[Y_OFF * LCD_W + X_OFF], LCD_W);
         return;
     }
     core->picture(scratch, NES_W);
-    for (int y = 0; y < NES_H; y++) {
-        unsigned short *s = &scratch[y * NES_W];
-        unsigned short *p = &prevf[y * NES_W];
-        unsigned short *d = &fb[y * LCD_W + X_OFF];
-        for (int x = 0; x < NES_W; x++) {
-            unsigned short a = s[x], b = p[x];
-            if (blend_mode == 1) {
-                d[x] = (unsigned short)(((a & 0xF7DE) >> 1) + ((b & 0xF7DE) >> 1));
-            } else {
-                unsigned short r = (a & 0xF800) > (b & 0xF800) ? (a & 0xF800) : (b & 0xF800);
-                unsigned short g = (a & 0x07E0) > (b & 0x07E0) ? (a & 0x07E0) : (b & 0x07E0);
-                unsigned short bl = (a & 0x001F) > (b & 0x001F) ? (a & 0x001F) : (b & 0x001F);
-                d[x] = r | g | bl;
-            }
-            p[x] = a;
-        }
+    blend_scratch();
+    for (int y = 0; y < NES_H; y++)
+        memcpy(&fb[(y + Y_OFF) * LCD_W + X_OFF], &scratch[y * NES_W], NES_W * 2);
+#else
+    /* Almond+ и т.п.: вписываем картинку в игровое окно GAME_WxGAME_H (по высоте
+       панели) масштабированием ближайшим соседом. Карты координат считаем один раз. */
+    static int xmap[GAME_W], ymap[GAME_H], maps_ready = 0;
+    if (!maps_ready) {
+        for (int dx = 0; dx < GAME_W; dx++) xmap[dx] = dx * NES_W / GAME_W;
+        for (int dy = 0; dy < GAME_H; dy++) ymap[dy] = dy * NES_H / GAME_H;
+        maps_ready = 1;
     }
+    core->picture(scratch, NES_W);
+    if (blend_mode) blend_scratch();
+    for (int dy = 0; dy < GAME_H; dy++) {
+        const unsigned short *s = &scratch[ymap[dy] * NES_W];
+        unsigned short *d = &fb[(dy + GY_OFF) * LCD_W + GX_OFF];
+        for (int dx = 0; dx < GAME_W; dx++)
+            d[dx] = s[xmap[dx]];
+    }
+#endif
 }
 
 int platform_main(int argc, char **argv, const nes_core_t *core)

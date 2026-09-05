@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=lcd-ui-almond3s
-PKG_RELEASE:=761
+PKG_RELEASE:=768
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -10,7 +10,9 @@ define Package/lcd-ui-almond3s
   SECTION:=utils
   CATEGORY:=Utilities
   TITLE:=LCD dashboard for Securifi Almond 3S
-  DEPENDS:=@TARGET_ramips_mt7621 +kmod-lcd-almond3s +libmbedtls +ucode +ucode-mod-fs \
+  DEPENDS:=@(TARGET_ramips_mt7621||TARGET_cortina) \
+	+TARGET_ramips_mt7621:kmod-lcd-almond3s +TARGET_cortina:kmod-lcd-almondplus \
+	+libmbedtls +ucode +ucode-mod-fs \
 	+ucode-mod-socket +ucode-mod-ubus +ucode-mod-uci +ucode-mod-uloop +qrencode
 endef
 
@@ -37,6 +39,8 @@ define Build/Compile
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
 		-o $(PKG_BUILD_DIR)/almond3s-mqtt $(PKG_BUILD_DIR)/almond3s-mqtt.c
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
+		-o $(PKG_BUILD_DIR)/almond3s-zwave $(PKG_BUILD_DIR)/almond3s-zwave.c
+	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
 		-std=c99 -I$(PKG_BUILD_DIR)/vterm/include \
 		-o $(PKG_BUILD_DIR)/almond3s-term \
 		$(PKG_BUILD_DIR)/almond3s-term.c $(PKG_BUILD_DIR)/vterm/src/*.c \
@@ -54,6 +58,7 @@ define Package/lcd-ui-almond3s/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/collector $(1)/usr/libexec/almond3s/collector
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/almond3s-term $(1)/usr/libexec/almond3s/almond3s-term
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/almond3s-zig $(1)/usr/libexec/almond3s/almond3s-zig
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/almond3s-zwave $(1)/usr/libexec/almond3s/almond3s-zwave
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/almond3s-mqtt $(1)/usr/libexec/almond3s/almond3s-mqtt
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/ui.uc $(1)/usr/libexec/almond3s/ui.uc
 	$(INSTALL_DIR) $(1)/etc/init.d

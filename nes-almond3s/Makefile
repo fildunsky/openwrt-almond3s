@@ -13,11 +13,24 @@ PKG_BUILD_FLAGS:=no-mips16
 
 include $(INCLUDE_DIR)/package.mk
 
+ifeq ($(ARCH),mipsel)
+  NES_TUNE:=-mtune=1004kc
+else
+  NES_TUNE:=
+endif
+
+# Almond+ (cortina/arm) — нативная панель 480x320; Almond 3S (mt7621/mipsel) — 320x240.
+ifeq ($(ARCH),arm)
+  NES_LCD:=-DLCD_W=480 -DLCD_H=320
+else
+  NES_LCD:=
+endif
+
 define Package/nes-almond3s
   SECTION:=utils
   CATEGORY:=Utilities
   TITLE:=NES emulator for the Securifi Almond 3S display
-  DEPENDS:=@TARGET_ramips_mt7621 +kmod-lcd-almond3s
+  DEPENDS:=@(TARGET_ramips_mt7621||TARGET_cortina) +TARGET_ramips_mt7621:kmod-lcd-almond3s +TARGET_cortina:kmod-lcd-almondplus
 endef
 
 define Package/nes-almond3s/description
@@ -35,10 +48,10 @@ endef
 # это лишние ~400 КБ в образе ради ничего.
 define Build/Compile
 	$(TARGET_CXX) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -Os -w \
-		-nostdlib++ -static-libgcc \
+		-nostdlib++ -static-libgcc -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables \
 		-o $(PKG_BUILD_DIR)/keygrab $(PKG_BUILD_DIR)/keygrab.cpp
 	$(TARGET_CXX) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
-		-O3 -mtune=1004kc -funroll-loops -D_GNU_SOURCE -DNO_UNALIGNED_ACCESS \
+		-O3 $(NES_TUNE) -funroll-loops -D_GNU_SOURCE -DNO_UNALIGNED_ACCESS \
 		-fno-exceptions -fno-rtti -w \
 		-I$(PKG_BUILD_DIR) -I$(PKG_BUILD_DIR)/nes_emu \
 		-nostdlib++ -static-libgcc -lpthread \
@@ -49,7 +62,7 @@ define Build/Compile
 		$(PKG_BUILD_DIR)/almond_cxx.cpp \
 		$(PKG_BUILD_DIR)/pad_file.cpp
 	$(TARGET_CXX) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -Os -w \
-		-nostdlib++ -static-libgcc \
+		-nostdlib++ -static-libgcc -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables \
 		-o $(PKG_BUILD_DIR)/almond3s-pad $(PKG_BUILD_DIR)/almond_pad.cpp
 endef
 

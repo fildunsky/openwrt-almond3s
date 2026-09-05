@@ -165,14 +165,14 @@ static int cpu_top_json(char *out, int outsz, int want)
     static struct proc_prev prev[PROC_PREV_MAX];
     static int prev_n;
     struct proc_prev cur[PROC_PREV_MAX];
-    struct { char name[20]; int pct; unsigned long long d; } top[12];
+    struct { char name[20]; int pct; unsigned long long d; } top[16];
     int cur_n = 0, top_n = 0;
     DIR *d = opendir("/proc");
     struct dirent *e;
 
     out[0] = '['; out[1] = ']'; out[2] = 0;
     if (!d) return 0;
-    if (want > 12) want = 12;
+    if (want > 16) want = 16;
 
     while ((e = readdir(d)) != NULL && cur_n < PROC_PREV_MAX) {
         char path[64], buf[512], name[20] = "";
@@ -1424,8 +1424,8 @@ int main(void) {
         int cpu_b = cpu_busy_pct();
         /* Десять имён - столько влезает в правую половину большой карточки
          * виджета; на каждое уходит около 27 байт JSON. */
-        char top_json[448];
-        cpu_top_json(top_json, sizeof top_json, 10);
+        char top_json[640];
+        cpu_top_json(top_json, sizeof top_json, 14);
         char core_json[96];
         {
             int cb[8], cn = cpu_core_busy(cb, 8), off = 1;
