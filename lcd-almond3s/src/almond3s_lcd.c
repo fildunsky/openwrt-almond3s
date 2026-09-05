@@ -332,7 +332,7 @@ static void bl_set_level(int level)
  * Сравнить скорость: ioctl 18 отдаёт мкс на кадр. */
 static int fast_bus = 1;
 module_param(fast_bus, int, 0644);
-MODULE_PARM_DESC(fast_bus, "1 = данные+строб одной записью (быстрее), 0 = старый путь");
+MODULE_PARM_DESC(fast_bus, "1 = data and strobe in one write (faster), 0 = legacy path");
 
 /* Те же биты, что кладёт gpio_set_byte, но БЕЗ записи в регистр. */
 static inline u32 byte_bits(u8 val)
@@ -402,12 +402,12 @@ static void lcd_dat(u8 dat)
  *   echo 1 > /sys/module/almond3s_lcd/parameters/interlace */
 static int interlace;
 module_param(interlace, int, 0644);
-MODULE_PARM_DESC(interlace, "1 = обновлять через строку (быстрее, но гребёнка)");
+MODULE_PARM_DESC(interlace, "1 = refresh every other row per frame (faster, combing on motion)");
 static int il_field;
 
 static int color12;
 module_param(color12, int, 0644);
-MODULE_PARM_DESC(color12, "1 = 12-битный цвет (быстрее на ~25%), 0 = 16-битный");
+MODULE_PARM_DESC(color12, "1 = 12-bit colour (about 25% faster), 0 = 16-bit");
 static int color12_applied = -1;
 
 static int panel = -1;
@@ -2215,7 +2215,7 @@ static void pic_read_battery_palmbus(void)
         {
             static u8 last_stat = 0xFF;
             if (resp[4] == 0x04 && resp[5] != last_stat) {
-                pr_info("PIC статус 0x%02x -> 0x%02x (adc=%d)\n",
+                pr_info("PIC status 0x%02x -> 0x%02x (adc=%d)\n",
                         last_stat, resp[5], adc);
                 last_stat = resp[5];
             }
@@ -2845,11 +2845,11 @@ static int touch_fn(void *data)
             else if (touch_mode == 3) sx8650_config_pmtrg();
             else if (touch_mode == 2) sx8650_config_i2c();
             else sx8650_config(touch_mode);
-            pr_info("тач: режим %s\n",
+            pr_info("touch: mode %s\n",
                     touch_mode == 5 ? "STOCK" :
                     (touch_mode == 4 ? "SM" :
                     (touch_mode == 3 ? "PENTRG-pb" :
-                    (touch_mode == 2 ? "PENTRG-i2c" : (touch_mode ? "PENTRG" : "ручной")))));
+                    (touch_mode == 2 ? "PENTRG-i2c" : (touch_mode ? "PENTRG" : "manual")))));
         }
 
         if (sx_reg_req >= 0) {
@@ -2947,7 +2947,7 @@ static int touch_fn(void *data)
          * старшим байтом вперёд. */
         if (pic_raw_len > 0 && touch_mode == 2) {
             pic_i2c_write(pic_raw_buf, pic_raw_len);
-            pr_debug("PIC пакет %d байт (i2c), первый 0x%02x\n",
+            pr_debug("PIC packet %d bytes (i2c), first 0x%02x\n",
                      pic_raw_len, pic_raw_buf[0]);
             pic_raw_len = 0;
         }
@@ -2970,7 +2970,7 @@ static int touch_fn(void *data)
                 gw(SM0_DATAOUT, pic_raw_buf[i]);
             }
             gw(SM0_CTL1, s_ctl1); udelay(10);
-            pr_debug("PIC пакет %d байт, первый 0x%02x\n", pic_raw_len, pic_raw_buf[0]);
+            pr_debug("PIC packet %d bytes, first 0x%02x\n", pic_raw_len, pic_raw_buf[0]);
             pic_raw_len = 0;
         }
 
@@ -3184,7 +3184,7 @@ static void pic_power_off(void)
         gw(SM0_DATAOUT, 0x38);
         gw(SM0_STATUS, 0);
         for (w = 0; w < 500; w++) { if (gr(0x918) & 0x01) break; udelay(10); }
-        pr_info("PIC 0x38: просим отключить питание (попытка %d)\n", try + 1);
+        pr_info("PIC 0x38: requesting power off (attempt %d)\n", try + 1);
         mdelay(300);
     }
     if (old_pm_power_off)
@@ -3328,7 +3328,7 @@ static long lcd_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
         if (us < 50) us = 50;
         if (us > 20000) us = 20000;
         bl_period_ns = us * 1000L;
-        pr_info("ШИМ подсветки: период %ld мкс (%ld Гц)\n", us, 1000000L / us);
+        pr_info("backlight PWM: period %ld us (%ld Hz)\n", us, 1000000L / us);
         return 0;
     }
     if (cmd == 23) {
@@ -3391,8 +3391,8 @@ static long lcd_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
         if (arg == 1) panel_init_alt = 1;
         else if (arg == 2) panel_init_alt = 0;
         panel_reinit_pending = 1;
-        pr_info("панель: переинициализация, таблица %s\n",
-                panel_init_alt ? "заводского ядра" : "загрузчика");
+        pr_info("panel: reinit with the %s table\n",
+                panel_init_alt ? "stock kernel" : "bootloader");
         return 0;
     }
     if (cmd == 21) {
@@ -3632,9 +3632,9 @@ static int __init lcd_drv_init(void)
     if (led_rgb) {
         for (i = 0; i < 3; i++)
             if (led_classdev_register(NULL, &almond_rgb[i]))
-                pr_warn("almond3s-lcd: диод %d не зарегистрирован\n", i);
+                pr_warn("almond3s-lcd: LED %d not registered\n", i);
     } else if (led_classdev_register(NULL, &almond_led)) {
-        pr_warn("almond3s-lcd: диод не зарегистрирован\n");
+        pr_warn("almond3s-lcd: LED not registered\n");
     }
 
     ret = misc_register(&lcd_dev);
@@ -3726,7 +3726,7 @@ static int __init lcd_drv_init(void)
             for (p = 0; p < 100000; p++) if (gr(0x918) & 0x02) break;
             mdelay(15); gw(SM0_DATAOUT, 0x02);
             mdelay(15);
-            pr_info("PIC init done, воспроизведение остановлено\n");
+            pr_info("PIC init done, playback stopped\n");
         }
 
         /* Wait for PIC to process calibration */
