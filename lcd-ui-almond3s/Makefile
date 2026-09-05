@@ -1,10 +1,16 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=lcd-ui-almond3s
-PKG_RELEASE:=770
+PKG_RELEASE:=776
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
+
+ifeq ($(CONFIG_TARGET_cortina),y)
+  UI_LCD:=-DLCD_W=480 -DLCD_H=320
+else
+  UI_LCD:=
+endif
 
 define Package/lcd-ui-almond3s
   SECTION:=utils
@@ -25,7 +31,7 @@ define Package/lcd-ui-almond3s/description
 endef
 
 define Build/Compile
-	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
+	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) $(UI_LCD) \
 		-o $(PKG_BUILD_DIR)/render $(PKG_BUILD_DIR)/render.c
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
 		-o $(PKG_BUILD_DIR)/almond3s-lcd $(PKG_BUILD_DIR)/almond3s-lcd.c

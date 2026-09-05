@@ -4,7 +4,20 @@ START=99
 STOP=10
 USE_PROCD=1
 
+lcd_kmod_params() {
+	case "$(cat /tmp/sysinfo/board_name 2>/dev/null),$(uci -q get almond3s.hw.model)" in
+		securifi,almond-3,*|*,almond3) echo "panel=1 led_rgb=1" ;;
+	esac
+}
+
 start_service() {
+	local want
+	want="$(lcd_kmod_params)"
+	if [ -n "$want" ] && [ "$(cat /sys/module/almond3s_lcd/parameters/led_rgb 2>/dev/null)" != "1" ]; then
+		rmmod almond3s_lcd 2>/dev/null
+		insmod /lib/modules/$(uname -r)/almond3s_lcd.ko $want
+		sleep 1
+	fi
 	[ -c /dev/lcd ] || return
 
 	echo -n "touch_start" > /dev/lcd 2>/dev/null

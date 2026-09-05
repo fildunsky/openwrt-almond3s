@@ -20,8 +20,12 @@
 #include <time.h>
 #include <signal.h>
 
-#define LCD_W 480
-#define LCD_H 320
+#ifndef LCD_W
+#define LCD_W 320
+#endif
+#ifndef LCD_H
+#define LCD_H 240
+#endif
 #define FB_SIZE (LCD_W * LCD_H * 2)
 #define SOCK_PATH "/tmp/lcd.sock"
 

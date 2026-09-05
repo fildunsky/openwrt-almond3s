@@ -25,10 +25,12 @@ try { uci_mod = require("uci"); } catch(e) {}
 try { uloop_mod = require("uloop"); } catch(e) {}
 
 // --- Constants ---
-let LCD_W = 480, LCD_H = 320;
-
-let IS_ALMONDPLUS = index(fs.readfile("/tmp/sysinfo/board_name") ?? "", "almondplus") >= 0;
-let HAS_BATTERY = !IS_ALMONDPLUS;
+let BOARD_NAME = fs.readfile("/tmp/sysinfo/board_name") ?? "";
+let IS_ALMONDPLUS = index(BOARD_NAME, "almondplus") >= 0;
+let IS_ALMOND3 = fs.access("/sys/class/leds/red:status") ||
+                 (index(BOARD_NAME, "almond-3") >= 0 && index(BOARD_NAME, "almond-3s") < 0);
+let LCD_W = IS_ALMONDPLUS ? 480 : 320, LCD_H = IS_ALMONDPLUS ? 320 : 240;
+let HAS_BATTERY = !IS_ALMONDPLUS && !IS_ALMOND3;
 let HAS_LED = !IS_ALMONDPLUS;      // над экраном Almond+ индикатора нет
 let HAS_SOUND = !IS_ALMONDPLUS;    // нет зуммера/звука - будильник бессмыслен
 let SOCK_PATH = "/tmp/lcd.sock";
@@ -669,6 +671,15 @@ let TR_RU = {
     "buzzer test": "проверка бипера",
     "Factory tones and volume from stock firmware": "Тоны и громкость из заводской прошивки",
     "Blink on SMS": "Мигать при SMS",
+    "Color": "Цвет",
+    "led white": "белый",
+    "led red": "красный",
+    "led green": "зелёный",
+    "led blue": "синий",
+    "led yellow": "жёлтый",
+    "led cyan": "бирюзовый",
+    "led magenta": "пурпурный",
+    "led orange": "оранжевый",
     "Widgets": "Виджеты",
     "Air": "Эфир",
     "Peers": "Соседи",
@@ -781,6 +792,7 @@ let TR_RU = {
     "signal": "сигнал",
     "blink on SMS": "мигание при SMS",
     "above the screen": "над экраном",
+    "below the screen": "под экраном",
     "while unread remain": "пока есть непрочитанные",
     "blinking": "мигает",
     "Blinking: unread SMS": "Мигает: есть непрочитанные SMS",
@@ -1826,12 +1838,36 @@ function arr_minmax(arr) {
 let led_blinking = false;
 
 
+let LED_COLORS = [ [ "ffffff", "led white" ], [ "ff0000", "led red" ],
+                   [ "00ff00", "led green" ], [ "0000ff", "led blue" ],
+                   [ "ffff00", "led yellow" ], [ "00ffff", "led cyan" ],
+                   [ "ff00ff", "led magenta" ], [ "ff4000", "led orange" ] ];
+
+function led_rgb() {
+    return fs.access("/sys/class/leds/red:status/brightness");
+}
+
+function led_color_name(hex) {
+    for (let c in LED_COLORS)
+        if (c[0] == hex) return tr(c[1]);
+    return hex;
+}
+
+function led_color_next(hex) {
+    for (let i = 0; i < length(LED_COLORS); i++)
+        if (LED_COLORS[i][0] == hex)
+            return LED_COLORS[(i + 1) % length(LED_COLORS)][0];
+    return LED_COLORS[0][0];
+}
+
 function led_cfg() {
     let st_ = ucur ? ucur.get("almond3s", "led", "state") : null;
     let sm = ucur ? ucur.get("almond3s", "led", "sms_blink") : null;
+    let col = ucur ? ucur.get("almond3s", "led", "color") : null;
     return {
         on:  (st_ == null || st_ == "") ? true : (st_ == "1"),
         sms: (sm == "1"),
+        color: (col == null || col == "") ? "ffffff" : col,
     };
 }
 
@@ -1846,7 +1882,7 @@ function led_set(key, v) {
 }
 
 function led_write(mode) {
-    system(sprintf("almond3s-lcd led %s >/dev/null 2>&1", mode));
+    system(sprintf("almond3s-lcd led %s %s >/dev/null 2>&1", mode, led_cfg().color));
 }
 
 function led_apply() {
@@ -2900,6 +2936,14 @@ let MENU_LAYOUT = [
         { act: "info",      c: 3, r: 2, cw: 1 },
     ],
 ];
+if (!HAS_BATTERY)
+    for (let gi = 0; gi < length(MENU_LAYOUT); gi++) {
+        if (!length(filter(MENU_LAYOUT[gi], (t) => t.act == "battery"))) continue;
+        MENU_LAYOUT[gi] = filter(MENU_LAYOUT[gi], (t) => t.act != "battery");
+        for (let t in MENU_LAYOUT[gi])
+            if (t.act == "settings") t.cw = 4;
+    }
+
 
 // Almond+: нет батареи и звука - на их место (будильник+батарея) ставим Z-Wave,
 // раскладку 2-й страницы задаём явно.
@@ -5197,9 +5241,10 @@ function menu_items() {
     push(it, { label: tr("Weather"), sub: weather_sub(), icon: "weather", ic: C.yellow, act: "weather" });
     push(it, { label: tr("Alarm"), sub: alarm_sub(), icon: "sound", ic: C.yellow, act: "alarm" });
     let bfull = (bt?.full || (bt?.charging && bp >= 100)) && !bt?.no_battery;
-    push(it, { label: tr("Battery"), top: bp >= 0 ? sprintf("%d%%", bp) : "--",
-               sub: bfull ? tr("Plugged in") : (bt?.charging ? tr("charging") : tr("on battery")),
-               sc: bfull ? C.green : (bt?.charging ? bcol : C.gray), icon: "bolt", ic: bcol, act: "battery" });
+    if (HAS_BATTERY)
+        push(it, { label: tr("Battery"), top: bp >= 0 ? sprintf("%d%%", bp) : "--",
+                   sub: bfull ? tr("Plugged in") : (bt?.charging ? tr("charging") : tr("on battery")),
+                   sc: bfull ? C.green : (bt?.charging ? bcol : C.gray), icon: "bolt", ic: bcol, act: "battery" });
     push(it, { label: tr("Terminal"), sub: tr("shell"), icon: "term", ic: TOOL, act: "term" });
     push(it, { label: tr("Zigbee"), sub: "EM357", icon: "zigbee", ic: TOOL, act: "zigbee" });
     push(it, { label: "Z-Wave", sub: "SD3503", icon: "zigbee", ic: "#D2A8FF", act: "zwave" });
@@ -6324,7 +6369,7 @@ function draw_saver_page() {
 
 // Часы ночного режима - отдельной страницей: открывается тапом по «Ночь».
 function led_row(i) {
-    return rows_rect(i, 2, 80);
+    return led_rgb() ? rows_rect(i, 3, 56) : rows_rect(i, 2, 80);
 }
 
 // ===== Будильник =====
@@ -9331,18 +9376,24 @@ function draw_led_page() {
 
     let c = led_cfg();
     let rows = [
-        { label: tr("LED"),          on: c.on,  hint: tr("above the screen") },
+        { label: tr("LED"),          on: c.on,  hint: tr(led_rgb() ? "below the screen" : "above the screen") },
         { label: tr("Blink on SMS"), on: c.sms, hint: tr("while unread remain") },
     ];
+    if (led_rgb())
+        push(rows, { label: tr("Color"), on: c.on, hint: "", color: c.color });
     for (let i = 0; i < length(rows); i++) {
         let r = rows[i], b = led_row(i);
         lcd_rect(b.x, b.y, b.w, b.h, C.widget);
-        astripe(b.x, b.y, b.h, r.on ? C.green : C.dim);
+        astripe(b.x, b.y, b.h, r.color != null ? "#" + r.color : (r.on ? C.green : C.dim));
         let ty = b.y + int((b.h - 26) / 2);
         lcd_text(b.x + 16, ty, r.label, C.white, C.widget, 2);
         lcd_text(b.x + 16, ty + 18, r.hint, C.dim, C.widget, 1);
-        lcd_text_r(b.x + b.w - 16, mid_y(b, 2), r.on ? tr("on") : tr("off"),
-                 r.on ? C.green : C.gray, C.widget, 2);
+        if (r.color != null)
+            lcd_text_r(b.x + b.w - 16, mid_y(b, 2), led_color_name(r.color),
+                       "#" + r.color, C.widget, 2);
+        else
+            lcd_text_r(b.x + b.w - 16, mid_y(b, 2), r.on ? tr("on") : tr("off"),
+                       r.on ? C.green : C.gray, C.widget, 2);
     }
 
     if (led_blinking)
@@ -13604,6 +13655,16 @@ function handle_touch(tx, ty, tmove) {
             led_sms_sync(int(st.data?.sms_new ?? 0));
             draw_led_page();
             return;
+        }
+        if (led_rgb()) {
+            let b2 = led_row(2);
+            if (in_rect(tx, ty, b2.x, b2.y, b2.w, b2.h)) {
+                led_set("color", led_color_next(c.color));
+                if (led_blinking) led_write("blink");
+                else led_apply();
+                draw_led_page();
+                return;
+            }
         }
         return;
     }

@@ -681,6 +681,37 @@ int main(int argc, char **argv)
      * штатный триггер timer с интервалом, который драйвер принимает.
      * Прямой ioctl оставлен запасным путём для сборок со старым драйвером,
      * где светодиода в системе ещё нет. */
+    if (argc >= 3 && strcmp(argv[1], "led") == 0 &&
+        access("/sys/class/leds/red:status/brightness", W_OK) == 0) {
+        static const char *ch[3] = { "red", "green", "blue" };
+        const char *hex = argc > 3 ? argv[3] : "ffffff";
+        unsigned long rgb = strtoul(hex, NULL, 16);
+        int on = strcmp(argv[2], "on") == 0 || strcmp(argv[2], "color") == 0;
+        int blink = strcmp(argv[2], "blink") == 0;
+        int i;
+
+        for (i = 0; i < 3; i++) {
+            char path[96];
+            FILE *f;
+            int v = (on || blink) ? (int)((rgb >> (16 - 8 * i)) & 0xff) : 0;
+
+            snprintf(path, sizeof(path), "/sys/class/leds/%s:status/trigger", ch[i]);
+            if ((f = fopen(path, "w"))) { fputs("none", f); fclose(f); }
+            snprintf(path, sizeof(path), "/sys/class/leds/%s:status/brightness", ch[i]);
+            if ((f = fopen(path, "w"))) { fprintf(f, "%d", v); fclose(f); }
+            if (blink && v) {
+                snprintf(path, sizeof(path), "/sys/class/leds/%s:status/trigger", ch[i]);
+                if ((f = fopen(path, "w"))) { fputs("timer", f); fclose(f); }
+                snprintf(path, sizeof(path), "/sys/class/leds/%s:status/delay_on", ch[i]);
+                if ((f = fopen(path, "w"))) { fputs("250", f); fclose(f); }
+                snprintf(path, sizeof(path), "/sys/class/leds/%s:status/delay_off", ch[i]);
+                if ((f = fopen(path, "w"))) { fputs("250", f); fclose(f); }
+            }
+        }
+        close(fd);
+        return 0;
+    }
+
     if (argc >= 3 && strcmp(argv[1], "led") == 0) {
         static const char *dir = "/sys/class/leds/white:status";
         char path[128];

@@ -409,6 +409,14 @@ module_param(color12, int, 0644);
 MODULE_PARM_DESC(color12, "1 = 12-битный цвет (быстрее на ~25%), 0 = 16-битный");
 static int color12_applied = -1;
 
+static int panel;
+module_param(panel, int, 0644);
+MODULE_PARM_DESC(panel, "0 = ILI9341 (Almond 3S), 1 = ST7789V (Almond 3)");
+
+static int led_rgb;
+module_param(led_rgb, int, 0644);
+MODULE_PARM_DESC(led_rgb, "1 = RGB LED on PIC16F1503 (Almond 3), 0 = white LED (Almond 3S)");
+
 static inline void lcd_write_8d(u8 val)
 {
     if (fast_bus) {
@@ -552,6 +560,46 @@ static int pcmd_head, pcmd_tail;
  * модели различаются партиями, и вторая калибровка может оказаться честнее.
  * MADCTL в обеих шлём свой - поворот наш, а не заводской.
  */
+static u8 madctl_val(void)
+{
+    u8 v = lcd_rot ? 0x60 : 0xA0;
+
+    if (panel != 1)
+        v |= 0x08;
+    return v;
+}
+
+static void lcd_init_st7789(void)
+{
+    lcd_cmd(0xB2); lcd_dat(0x0C); lcd_dat(0x0C); lcd_dat(0x00); lcd_dat(0x33); lcd_dat(0x33);
+    lcd_cmd(0xB7); lcd_dat(0x64);
+    lcd_cmd(0xB8); lcd_dat(0x2A); lcd_dat(0x2B); lcd_dat(0x22); lcd_dat(0x75);
+    lcd_cmd(0xBB); lcd_dat(0x15);
+    lcd_cmd(0xC0); lcd_dat(0x2C);
+    lcd_cmd(0xD2); lcd_dat(0x4C);
+    lcd_cmd(0xC2); lcd_dat(0x01); lcd_dat(0xFF);
+    lcd_cmd(0xC3); lcd_dat(0x0F);
+    lcd_cmd(0xC4); lcd_dat(0x20);
+    lcd_cmd(0xC6); lcd_dat(0x0F);
+    lcd_cmd(0xD0); lcd_dat(0xA4); lcd_dat(0xA1);
+    lcd_cmd(0xB1); lcd_dat(0x00); lcd_dat(0x04); lcd_dat(0x14);
+    lcd_cmd(0xE0);
+    lcd_dat(0xF0); lcd_dat(0x02); lcd_dat(0x06); lcd_dat(0x0C);
+    lcd_dat(0x0B); lcd_dat(0x1A); lcd_dat(0x35); lcd_dat(0x55);
+    lcd_dat(0x47); lcd_dat(0x2D); lcd_dat(0x17); lcd_dat(0x14);
+    lcd_dat(0x19); lcd_dat(0x23);
+    lcd_cmd(0xE1);
+    lcd_dat(0x0F); lcd_dat(0x02); lcd_dat(0x06); lcd_dat(0x0C);
+    lcd_dat(0x0B); lcd_dat(0x1A); lcd_dat(0x35); lcd_dat(0x55);
+    lcd_dat(0x47); lcd_dat(0x2D); lcd_dat(0x17); lcd_dat(0x14);
+    lcd_dat(0x19); lcd_dat(0x23);
+    lcd_cmd(0xE9); lcd_dat(0x08); lcd_dat(0x08); lcd_dat(0x08);
+    lcd_cmd(0x36); lcd_dat(madctl_val());
+    lcd_cmd(0x3A); lcd_dat(0x55);
+    lcd_cmd(0x11); mdelay(120);
+    lcd_cmd(0x29);
+}
+
 static void lcd_init_ili9341(void)
 {
     if (panel_init_alt) {
@@ -565,7 +613,7 @@ static void lcd_init_ili9341(void)
         lcd_cmd(0xC1); lcd_dat(0x11);
         lcd_cmd(0xC5); lcd_dat(0x35); lcd_dat(0x3E);
         lcd_cmd(0xC7); lcd_dat(0xBE);
-        lcd_cmd(0x36); lcd_dat(lcd_rot ? 0x68 : 0xA8);
+        lcd_cmd(0x36); lcd_dat(madctl_val());
         lcd_cmd(0x3A); lcd_dat(0x55);
         lcd_cmd(0xB1); lcd_dat(0x00); lcd_dat(0x1B);
         lcd_cmd(0xB7); lcd_dat(0x07);
@@ -600,7 +648,7 @@ static void lcd_init_ili9341(void)
     lcd_cmd(0xC1); lcd_dat(0x11);
     lcd_cmd(0xC5); lcd_dat(0x3F); lcd_dat(0x3C);
     lcd_cmd(0xC7); lcd_dat(0x8E);
-    lcd_cmd(0x36); lcd_dat(lcd_rot ? 0x68 : 0xA8);
+    lcd_cmd(0x36); lcd_dat(madctl_val());
     lcd_cmd(0x3A); lcd_dat(0x55);
     lcd_cmd(0xB1); lcd_dat(0x00); lcd_dat(0x15);
     lcd_cmd(0xB6); lcd_dat(0x0A); lcd_dat(0xA2);
@@ -618,6 +666,14 @@ static void lcd_init_ili9341(void)
     lcd_dat(0x2F); lcd_dat(0x30); lcd_dat(0x0F);
     lcd_cmd(0x11); mdelay(120);
     lcd_cmd(0x29);
+}
+
+static void lcd_init_panel(void)
+{
+    if (panel == 1)
+        lcd_init_st7789();
+    else
+        lcd_init_ili9341();
 }
 
 /* === Framebuffer → Display === */
@@ -1556,7 +1612,7 @@ static int render_fn(void *data)
         if (lcd_rot_pending) {
             lcd_rot_pending = 0;
             lcd_cmd(0x36);
-            lcd_dat(lcd_rot ? 0x68 : 0xA8);
+            lcd_dat(madctl_val());
             prev_invalidate();
             fb_dirty = 1;
         }
@@ -1568,7 +1624,7 @@ static int render_fn(void *data)
             panel_reinit_pending = 0;
             bl_bus_busy = true;
             lcd_hw_reset();
-            lcd_init_ili9341();
+            lcd_init_panel();
             bl_bus_busy = false;
             bl_resync();
             prev_invalidate();
@@ -1760,6 +1816,8 @@ static int pic_battery_valid;
 static int pic_beep_request;  /* set from ioctl, executed in touch thread */
 static int pic_led_cmd;       /* однобайтовая команда диода в очереди */
 static u8  pic_raw_buf[160];
+static u8  pic_rgb[3];
+static int pic_rgb_dirty;
 static int pic_raw_len;       /* >0 - в очереди посылка в PIC */
 static int pic_beep_ms = 150;
 
@@ -2691,6 +2749,51 @@ static int sx8650_read_sm(int *rx, int *ry)
     }
 }
 
+static u8 pic_led_byte(u8 v)
+{
+    if (v >= 45 && v <= 51)
+        return 43;
+    return v;
+}
+
+static void pic_send_bytes(u8 *buf, int len)
+{
+    u32 s_ctl1;
+    int i, w;
+
+    if (touch_mode == 2) {
+        pic_i2c_write(buf, len);
+        return;
+    }
+    s_ctl1 = gr(SM0_CTL1);
+    gw(SM0_CTL1, 0x90644042); udelay(10);
+    gw(SM0_CFG, 0xFA);
+    gw(SM0_DATA, PIC_ADDR);
+    gw(SM0_START, len);
+    gw(SM0_DATAOUT, PIC_ADDR);
+    gw(SM0_STATUS, 0);
+    for (i = 0; i < len; i++) {
+        for (w = 0; w < 20000; w++) {
+            if (gr(0x918) & 0x02) break;
+            cpu_relax();
+        }
+        usleep_range(15000, 16000);
+        gw(SM0_DATAOUT, buf[i]);
+    }
+    gw(SM0_CTL1, s_ctl1); udelay(10);
+}
+
+static void pic_rgb_flush(void)
+{
+    u8 gb[3] = { 0x30, pic_led_byte(pic_rgb[1]), pic_led_byte(pic_rgb[2]) };
+    u8 r0[3] = { 0x31, pic_led_byte(pic_rgb[0]), 0 };
+
+    pic_rgb_dirty = 0;
+    pic_send_bytes(gb, 3);
+    msleep(5);
+    pic_send_bytes(r0, 3);
+}
+
 static int touch_fn(void *data)
 {
     int x, y, was_pressed = 0;
@@ -2824,6 +2927,9 @@ static int touch_fn(void *data)
                 gw(SM0_CTL1, s_ctl1); udelay(10);
             }
         }
+
+        if (pic_rgb_dirty)
+            pic_rgb_flush();
 
         /* Посылка произвольной длины: мелодия грузится одним пакетом
          * {0x2D, hi, lo, hi, lo, ...} - так это делает заводской драйвер,
@@ -3463,6 +3569,24 @@ static struct led_classdev almond_led = {
     .default_trigger  = "none",
 };
 
+static struct led_classdev almond_rgb[3];
+
+static void almond_rgb_set(struct led_classdev *cdev, enum led_brightness b)
+{
+    int i;
+
+    for (i = 0; i < 3; i++)
+        if (cdev == &almond_rgb[i])
+            pic_rgb[i] = b;
+    pic_rgb_dirty = 1;
+}
+
+static struct led_classdev almond_rgb[3] = {
+    { .name = "red:status",   .max_brightness = 255, .brightness_set = almond_rgb_set, .default_trigger = "none" },
+    { .name = "green:status", .max_brightness = 255, .brightness_set = almond_rgb_set, .default_trigger = "none" },
+    { .name = "blue:status",  .max_brightness = 255, .brightness_set = almond_rgb_set, .default_trigger = "none" },
+};
+
 static int __init lcd_drv_init(void)
 {
     int ret, i;
@@ -3493,8 +3617,13 @@ static int __init lcd_drv_init(void)
     bl_timer.function = bl_tick;
 
     /* Register device */
-    if (led_classdev_register(NULL, &almond_led))
+    if (led_rgb) {
+        for (i = 0; i < 3; i++)
+            if (led_classdev_register(NULL, &almond_rgb[i]))
+                pr_warn("almond3s-lcd: диод %d не зарегистрирован\n", i);
+    } else if (led_classdev_register(NULL, &almond_led)) {
         pr_warn("almond3s-lcd: диод не зарегистрирован\n");
+    }
 
     ret = misc_register(&lcd_dev);
     if (ret) { kfree(framebuffer); kfree(fb_pages); iounmap(gpio_base); return ret; }
@@ -3502,7 +3631,7 @@ static int __init lcd_drv_init(void)
     /* Init LCD hardware */
     lcd_gpio_init();
     lcd_hw_reset();
-    lcd_init_ili9341();
+    lcd_init_panel();
     bl_set_level(BL_MAX);   /* подсветку зажигаем через тот же путь, что и ШИМ */
 
     /* First scene frame + logo — render thread continues animation.
@@ -3707,7 +3836,14 @@ static void __exit lcd_drv_exit(void)
     if (render_thread) kthread_stop(render_thread);
     hrtimer_cancel(&bl_timer);
     misc_deregister(&lcd_dev);
-    led_classdev_unregister(&almond_led);
+    if (led_rgb) {
+        int i;
+
+        for (i = 0; i < 3; i++)
+            led_classdev_unregister(&almond_rgb[i]);
+    } else {
+        led_classdev_unregister(&almond_led);
+    }
     if (touch_i2c_adap) i2c_put_adapter(touch_i2c_adap);
     if (prev_snap) { vfree(prev_snap); prev_snap = NULL; }
     vfree(framebuffer);
