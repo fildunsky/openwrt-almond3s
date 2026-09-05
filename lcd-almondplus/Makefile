@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=lcd-almondplus
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -26,7 +26,7 @@ PKG_BUILD_DATE:=$(shell date -u +%Y-%m-%d)
 
 define Build/Compile
 	$(KERNEL_MAKE) M="$(PKG_BUILD_DIR)" \
-		EXTRA_CFLAGS="-DLCD_DRV_BUILD=\\\"$(PKG_BUILD_DATE)\\\"" \
+		LCD_DRV_BUILD="$(PKG_BUILD_DATE)" \
 		modules
 endef
 
