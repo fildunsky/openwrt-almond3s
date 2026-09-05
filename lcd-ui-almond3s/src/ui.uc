@@ -11213,8 +11213,8 @@ let DASH_G = 6, DASH_MX = 7, DASH_MY = 7;
 // Нижняя полоса под подпись страницы и точки-пагинатор (крупнее на Almond+ из-за
 // укрупнённого шрифта). Сетка виджетов заканчивается над ней, а не в самом низу.
 let DASH_BAND = IS_ALMONDPLUS ? 24 : 15;
-let DASH_CW = int((LCD_W - 2 * DASH_MX - 3 * DASH_G) / 4);
-let DASH_CH = int((LCD_H - DASH_MY - DASH_BAND - 3 * DASH_G) / 4);
+let DASH_CW = IS_ALMONDPLUS ? int((LCD_W - 2 * DASH_MX - 3 * DASH_G) / 4) : 72;
+let DASH_CH = IS_ALMONDPLUS ? int((LCD_H - DASH_MY - DASH_BAND - 3 * DASH_G) / 4) : 50;
 let DASH_PAGE_SECS = 16;
 
 let DASH_PAGES = [
