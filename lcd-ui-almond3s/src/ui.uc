@@ -6204,11 +6204,12 @@ function draw_relnotes_page() {
 function power_items() {
     if (IS_ALMONDPLUS)
         return [ { label: tr("Restart"), sub: tr("Reboot the router"), col: "#F0736B", act: "reboot" } ];
-    return [
-        { label: tr("Modem Reset"), sub: tr("LTE restart"), col: C.orange, act: "modem" },
-        { label: tr("Restart"), sub: tr("Reboot the router"), col: "#F0736B", act: "reboot" },
-        { label: tr("Shut down"), sub: tr("Unplug charger first"), col: C.red, act: "poweroff" },
-    ];
+    let it = [];
+    if (!IS_ALMOND3)
+        push(it, { label: tr("Modem Reset"), sub: tr("LTE restart"), col: C.orange, act: "modem" });
+    push(it, { label: tr("Restart"), sub: tr("Reboot the router"), col: "#F0736B", act: "reboot" });
+    push(it, { label: tr("Shut down"), sub: tr("Unplug charger first"), col: C.red, act: "poweroff" });
+    return it;
 }
 
 function power_btn(i) {
