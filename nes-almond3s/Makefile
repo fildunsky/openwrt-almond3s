@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=nes-almond3s
-PKG_RELEASE:=4
+PKG_RELEASE:=5
 PKG_LICENSE:=GPL-2.0-or-later
 PKG_LICENSE_FILES:=src/LICENSE.quicknes
 
@@ -47,11 +47,11 @@ endef
 # almond_cxx, а keygrab и вовсе чистый C. Иначе пакет требовал бы libstdcpp -
 # это лишние ~400 КБ в образе ради ничего.
 define Build/Compile
-	$(TARGET_CXX) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -Os -w \
+	$(TARGET_CXX) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -Os -w $(NES_LCD) \
 		-nostdlib++ -static-libgcc -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables \
 		-o $(PKG_BUILD_DIR)/keygrab $(PKG_BUILD_DIR)/keygrab.cpp
 	$(TARGET_CXX) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
-		-O3 $(NES_TUNE) -funroll-loops -D_GNU_SOURCE -DNO_UNALIGNED_ACCESS \
+		-O3 $(NES_TUNE) $(NES_LCD) -funroll-loops -D_GNU_SOURCE -DNO_UNALIGNED_ACCESS \
 		-fno-exceptions -fno-rtti -w \
 		-I$(PKG_BUILD_DIR) -I$(PKG_BUILD_DIR)/nes_emu \
 		-nostdlib++ -static-libgcc -lpthread \
@@ -61,7 +61,7 @@ define Build/Compile
 		$(PKG_BUILD_DIR)/almond_platform.cpp \
 		$(PKG_BUILD_DIR)/almond_cxx.cpp \
 		$(PKG_BUILD_DIR)/pad_file.cpp
-	$(TARGET_CXX) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -Os -w \
+	$(TARGET_CXX) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -Os -w $(NES_LCD) \
 		-nostdlib++ -static-libgcc -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables \
 		-o $(PKG_BUILD_DIR)/almond3s-pad $(PKG_BUILD_DIR)/almond_pad.cpp
 endef
