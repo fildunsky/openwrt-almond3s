@@ -6835,6 +6835,18 @@ function draw_kbd_page() {
         lcd_flush();
         return;
     }
+    if (st.kbmode == "zigpan") {
+        draw_header("Zigbee: PAN ID");
+        lcd_rect(GX, 30, GW, KB_FIELD_H, C.widget);
+        let v = st.zigpanbuf ?? "";
+        lcd_text(GX + 10, KB_FIELD_TY, v != "" ? v : "0001..FFFE",
+                 v != "" ? C.white : C.dim, C.widget, 2);
+        lcd_text_r(GX + GW - 10, KB_FIELD_TY, "hex", C.dim, C.widget, 1);
+        kb_draw(KB_Y0, st.citykb);
+        draw_back();
+        lcd_flush();
+        return;
+    }
     if (st.kbmode == "mqtt") {
         let fk = st.kbfield ?? "host";
         let ttl = fk;
@@ -12473,6 +12485,14 @@ function handle_touch(tx, ty, tmove) {
         // старым PAN.
         if (ucur) ucur.load("almond3s");
         let c = zig_cfg();
+        let r0 = zigset_row(0), m0 = zigset_pm(0, false);
+        if (in_rect(tx, ty, r0.x, r0.y, m0.x - r0.x, r0.h)) {
+            st.kbmode = "zigpan";
+            st.zigpanbuf = sprintf("%04X", c.pan);
+            st.citykb = { pg: "symA", caps: true };
+            go_page("kbd");
+            return;
+        }
         for (let i = 0; i < 3; i++) {
             let m = zigset_pm(i, false), pl = zigset_pm(i, true);
             let hit = in_rect(tx, ty, m.x, m.y, m.w, m.h) ? -1 :
@@ -13342,7 +13362,8 @@ function handle_touch(tx, ty, tmove) {
         // СНИМАЕТ со стека (было go_page — оно КЛАДЁТ kbd обратно, отсюда петля
         // kbd<->stascan, из которой не выйти).
         if (ty >= BACK_Y) {
-            if (st.kbmode == "city" || st.kbmode == "mqtt" || st.kbmode == "hssid")
+            if (st.kbmode == "city" || st.kbmode == "mqtt" || st.kbmode == "hssid" ||
+                st.kbmode == "zigpan")
                 st.kbmode = "sta";
             go_back();
             return;
@@ -13386,6 +13407,31 @@ function handle_touch(tx, ty, tmove) {
                 go_page("wifi");
                 return;
             }
+            draw_kbd_page();
+            return;
+        }
+        if (st.kbmode == "zigpan") {
+            kb_press_show(e, st.citykb, KB_Y0);
+            let a = kb_apply(e, st.citykb);
+            let buf = st.zigpanbuf ?? "";
+            if (a.t == "char") {
+                let ch = uc(a.ch);
+                if (length(buf) < 4 && index("0123456789ABCDEF", ch) >= 0)
+                    buf += ch;
+            } else if (a.t == "del") {
+                buf = substr(buf, 0, length(buf) - 1);
+            } else if (a.t == "enter") {
+                let n = hex(buf);
+                st.kbmode = "sta";
+                if (n != null && n >= 1 && n <= 65534) {
+                    st.zig ??= {};
+                    st.zig.edit = time();
+                    zig_set("pan", n);
+                }
+                go_page("zigset");
+                return;
+            }
+            st.zigpanbuf = buf;
             draw_kbd_page();
             return;
         }
