@@ -105,7 +105,7 @@ static int rcpu = 0;
 module_param(rcpu, int, 0644);
 MODULE_PARM_DESC(rcpu, "pin render thread to this CPU, -1 = unpinned");
 
-static int tcal[4] = { 290, 3685, 350, 3585 };
+static int tcal[4] = { 140, 3771, 235, 3853 };
 module_param_array(tcal, int, NULL, 0644);
 MODULE_PARM_DESC(tcal, "touch calibration raw x0,x1,y0,y1");
 static int tswap = 1;
