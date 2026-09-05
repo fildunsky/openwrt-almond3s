@@ -19,19 +19,20 @@
 #define TOUCH_PATH "/tmp/.lcd_touch"
 #define TOUCH_MOVE "/tmp/.lcd_touch.move"
 
-#define BAR_L_X1   GX_OFF
-#define BAR_R_X0   (GX_OFF + GAME_W)
-#define BTN_EXIT_Y1   28
-#define BTN_B_Y0      58
-#define BTN_B_Y1      144
-#define BTN_A_Y0      148
-#define BTN_A_Y1      236
-#define BTN_START_Y1  28
-#define BTN_SEL_Y1    56
-#define BTN_UP_Y0     58
-#define BTN_UP_Y1     144
-#define BTN_DN_Y0     148
-#define BTN_DN_Y1     236
+#define BAR_L_X1   game_x
+#define BAR_R_X0   (game_x + game_w)
+static int game_w = GAME_W, game_h = GAME_H, game_x = GX_OFF, game_y = GY_OFF;
+#define BTN_EXIT_Y1 (28 * LCD_H / 240)
+#define BTN_B_Y0 (58 * LCD_H / 240)
+#define BTN_B_Y1 (144 * LCD_H / 240)
+#define BTN_A_Y0 (148 * LCD_H / 240)
+#define BTN_A_Y1 (236 * LCD_H / 240)
+#define BTN_START_Y1 (28 * LCD_H / 240)
+#define BTN_SEL_Y1 (56 * LCD_H / 240)
+#define BTN_UP_Y0 (58 * LCD_H / 240)
+#define BTN_UP_Y1 (144 * LCD_H / 240)
+#define BTN_DN_Y0 (148 * LCD_H / 240)
+#define BTN_DN_Y1 (236 * LCD_H / 240)
 
 /* Два кадровых буфера: пока панель забирает один, эмуляция рисует во второй.
    Раньше write() в /dev/lcd блокировал цикл на 4-8 мс - передача 150 КБ по
@@ -529,6 +530,15 @@ static int read_word(const char *path, char *buf, int len)
     return 1;
 }
 
+static void scale_load(void)
+{
+    char c[16];
+    if (read_word("/etc/almond3s/nes_scale", c, sizeof c) && !strncmp(c, "1x", 2)) {
+        game_w = NES_W; game_h = NES_H;
+        game_x = (LCD_W - NES_W) / 2; game_y = (LCD_H - NES_H) / 2;
+    }
+}
+
 static void settings_reload(void)
 {
     static int tick;
@@ -545,6 +555,7 @@ static void settings_reload(void)
         sound_want = !strncmp(c, "on", 2);
     if (read_word("/etc/almond3s/nes_cadence", c, sizeof c))
         cadence_even = !strncmp(c, "even", 4);
+
     if (read_word("/etc/almond3s/nes_blend", c, sizeof c)) {
         if (!strncmp(c, "off", 3))     blend_mode = 0;
         else if (!strncmp(c, "avg", 3)) blend_mode = 1;
@@ -595,16 +606,21 @@ static void present(const nes_core_t *core)
        панели) масштабированием ближайшим соседом. Карты координат считаем один раз. */
     static int xmap[GAME_W], ymap[GAME_H], maps_ready = 0;
     if (!maps_ready) {
-        for (int dx = 0; dx < GAME_W; dx++) xmap[dx] = dx * NES_W / GAME_W;
-        for (int dy = 0; dy < GAME_H; dy++) ymap[dy] = dy * NES_H / GAME_H;
+        for (int dx = 0; dx < game_w; dx++) xmap[dx] = dx * NES_W / game_w;
+        for (int dy = 0; dy < game_h; dy++) ymap[dy] = dy * NES_H / game_h;
         maps_ready = 1;
     }
     core->picture(scratch, NES_W);
     if (blend_mode) blend_scratch();
-    for (int dy = 0; dy < GAME_H; dy++) {
+    if (game_w == NES_W && game_h == NES_H) {
+        for (int dy = 0; dy < NES_H; dy++)
+            memcpy(&fb[(dy + game_y) * LCD_W + game_x], &scratch[dy * NES_W], NES_W * 2);
+        return;
+    }
+    for (int dy = 0; dy < game_h; dy++) {
         const unsigned short *s = &scratch[ymap[dy] * NES_W];
-        unsigned short *d = &fb[(dy + GY_OFF) * LCD_W + GX_OFF];
-        for (int dx = 0; dx < GAME_W; dx++)
+        unsigned short *d = &fb[(dy + game_y) * LCD_W + game_x];
+        for (int dx = 0; dx < game_w; dx++)
             d[dx] = s[xmap[dx]];
     }
 #endif
@@ -630,6 +646,7 @@ int platform_main(int argc, char **argv, const nes_core_t *core)
     signal(SIGPIPE, SIG_IGN);   /* см. комментарий у звука */
     kbd_open();
     keymap_load();
+    scale_load();
     if (pthread_create(&wr_th, NULL, writer_thread, NULL) == 0) wr_run = 1;
     else fprintf(stderr, "%s: поток вывода не запустился, рисуем как раньше\n", core->name);
     {

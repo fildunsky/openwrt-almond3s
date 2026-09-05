@@ -7189,6 +7189,9 @@ let GSET = [
       names: [ "выкл", "вкл" ], def: "0",
       sysfs: "/sys/module/almond3s_lcd/parameters/interlace" },
 ];
+if (IS_ALMONDPLUS)
+    push(GSET, { file: "/etc/almond3s/nes_scale", label: "Масштаб", vals: [ "fit", "1x" ],
+                 names: [ "весь экран", "1:1" ], def: "fit" });
 
 function gset_read(i) {
     let raw = fs.readfile(GSET[i].file);
