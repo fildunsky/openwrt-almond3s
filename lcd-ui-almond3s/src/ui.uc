@@ -11753,7 +11753,8 @@ function draw_dash_saver(o) {
         dash_tile(page.tiles[i], d, o);
 
     let ox = st.ox ?? 0, oy = st.oy ?? 0;
-    let by = LCD_H - 18 + oy;
+    let by = (IS_ALMONDPLUS ? LCD_H - 18 : 230) + oy;
+    let dot_dy = IS_ALMONDPLUS ? 4 : 0;
     // Цвет тот же, что у активной точки страницы.
     dash_hold_btn(9 + ox, by, o.mono ?? "#FFFFFF");
     lcd_text(22 + ox, by, tr(page.title), o.mono ?? C.ontop, o.bg, 1);
@@ -11761,7 +11762,7 @@ function draw_dash_saver(o) {
         let dx = LCD_W - 10 - (length(dps) - i) * 12 + ox;
         // Активная точка своим цветом, а не цветом текста: в светлой теме текст
         // почти чёрный, и точка выглядела чернильной кляксой на синем фоне.
-        lcd_rect(dx, by + 4, 7, 7, i == pg ? (o.mono ?? "#FFFFFF")
+        lcd_rect(dx, by + dot_dy, 7, 7, i == pg ? (o.mono ?? "#FFFFFF")
                                             : (o.mono ? "#0A2A16" : C.dim));
     }
 }
