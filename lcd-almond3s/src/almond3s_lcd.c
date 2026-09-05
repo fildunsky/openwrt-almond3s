@@ -10,6 +10,7 @@
 
 #define pr_fmt(fmt) "almond3s-lcd: " fmt
 
+#include <linux/of.h>
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/miscdevice.h>
@@ -409,13 +410,23 @@ module_param(color12, int, 0644);
 MODULE_PARM_DESC(color12, "1 = 12-битный цвет (быстрее на ~25%), 0 = 16-битный");
 static int color12_applied = -1;
 
-static int panel;
+static int panel = -1;
 module_param(panel, int, 0644);
-MODULE_PARM_DESC(panel, "0 = ILI9341 (Almond 3S), 1 = ST7789V (Almond 3)");
+MODULE_PARM_DESC(panel, "0 = ILI9341 (Almond 3S), 1 = ST7789V (Almond 3), -1 = by board");
 
-static int led_rgb;
+static int led_rgb = -1;
 module_param(led_rgb, int, 0644);
-MODULE_PARM_DESC(led_rgb, "1 = RGB LED on PIC16F1503 (Almond 3), 0 = white LED (Almond 3S)");
+MODULE_PARM_DESC(led_rgb, "1 = RGB LED on PIC16F1503 (Almond 3), 0 = white LED (Almond 3S), -1 = by board");
+
+static void board_defaults(void)
+{
+    int a3 = of_machine_is_compatible("securifi,almond-3");
+
+    if (panel < 0)
+        panel = a3 ? 1 : 0;
+    if (led_rgb < 0)
+        led_rgb = a3 ? 1 : 0;
+}
 
 static inline void lcd_write_8d(u8 val)
 {
@@ -3591,6 +3602,7 @@ static int __init lcd_drv_init(void)
 {
     int ret, i;
 
+    board_defaults();
     gpio_base = ioremap(PALMBUS_BASE, 0x1000);
     if (!gpio_base) return -ENOMEM;
 
