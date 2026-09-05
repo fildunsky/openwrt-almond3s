@@ -72,6 +72,10 @@ static int fill = 1;
 module_param(fill, int, 0644);
 MODULE_PARM_DESC(fill, "1 = scale logical frame to fill panel, 0 = center it");
 static int fill_active;
+static int interlace;
+module_param(interlace, int, 0644);
+MODULE_PARM_DESC(interlace, "1 = refresh every other row per frame (faster, combing on motion)");
+static int il_field;
 static u16 sx_map[LCD_W];
 static u16 sy_map[LCD_H];
 
@@ -471,6 +475,18 @@ static void lcd_flush_fb(void)
 		if (!prev_valid || !prev_snap) {
 			lcd_send_rows(0, LCD_H - 1, win_c0, win_c1);
 			stat_rows = LCD_H;
+		} else if (interlace) {
+			for (r = il_field; r < LCD_H; r += 2) {
+				if (!memcmp(flush_snap + r * LCD_W, prev_snap + r * LCD_W,
+					    LCD_W * sizeof(u16)))
+					continue;
+				lcd_send_rows(r, r, win_c0, win_c1);
+				memcpy(prev_snap + r * LCD_W, flush_snap + r * LCD_W,
+				       LCD_W * sizeof(u16));
+				stat_rows++;
+			}
+			il_field ^= 1;
+			snap_partial = true;
 		} else {
 			r = 0;
 			while (r < LCD_H) {

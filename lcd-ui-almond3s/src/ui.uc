@@ -7165,6 +7165,8 @@ function games_cfg_btn() {
 // перезапуска игры. Здесь мы им просто даём лицо.
 let KEYFILE = "/etc/almond3s/nes_keys";
 
+let LCD_MOD = IS_ALMONDPLUS ? "almondplus_lcd" : "almond3s_lcd";
+
 let GSET = [
     { file: "/etc/almond3s/nes_fps",   label: "Кадры",  vals: [ "all", "45", "30" ],
       names: [ "60", "45", "30" ], def: "all" },
@@ -7182,16 +7184,18 @@ let GSET = [
     // GPIO, то есть выше частота обновления, ценой ступенек на градиентах.
     { file: "/etc/almond3s/lcd_color12", label: "Цвет", vals: [ "0", "1" ],
       names: [ "16 бит", "12 бит" ], def: "0",
-      sysfs: "/sys/module/almond3s_lcd/parameters/color12" },
+      sysfs: "/sys/module/" + LCD_MOD + "/parameters/color12" },
     // Обновление через строку: байтов по шине вдвое меньше, но на быстром
     // движении видна гребёнка.
     { file: "/etc/almond3s/lcd_interlace", label: "Через строку", vals: [ "0", "1" ],
       names: [ "выкл", "вкл" ], def: "0",
-      sysfs: "/sys/module/almond3s_lcd/parameters/interlace" },
+      sysfs: "/sys/module/" + LCD_MOD + "/parameters/interlace" },
 ];
-if (IS_ALMONDPLUS)
+if (IS_ALMONDPLUS) {
+    GSET = filter(GSET, (g) => g.file != "/etc/almond3s/lcd_color12");
     push(GSET, { file: "/etc/almond3s/nes_scale", label: "Масштаб", vals: [ "fit", "1x" ],
                  names: [ "весь экран", "1:1" ], def: "fit" });
+}
 
 function gset_read(i) {
     let raw = fs.readfile(GSET[i].file);
