@@ -418,6 +418,32 @@ static int led_rgb = -1;
 module_param(led_rgb, int, 0644);
 MODULE_PARM_DESC(led_rgb, "1 = RGB LED on PIC16F1503 (Almond 3), 0 = white LED (Almond 3S), -1 = by board");
 
+static int tcal[4];
+module_param_array(tcal, int, NULL, 0644);
+MODULE_PARM_DESC(tcal, "touch calibration: raw x at screen top,bottom, raw y at screen left,right (0,0,0,0 = by board)");
+static int touch_last_raw;
+module_param(touch_last_raw, int, 0644);
+static int lcd_rot;
+
+static void touch_map(int raw_x, int raw_y, int *rx, int *ry)
+{
+    int dx = tcal[1] - tcal[0], dy = tcal[3] - tcal[2];
+    int px, py;
+
+    touch_last_raw = (raw_x << 16) | (raw_y & 0xFFFF);
+    if (dx == 0) dx = 1;
+    if (dy == 0) dy = 1;
+    px = (raw_y - tcal[2]) * (LCD_W - 1) / dy;
+    py = (raw_x - tcal[0]) * (LCD_H - 1) / dx;
+    *rx = px < 0 ? 0 : (px > LCD_W - 1 ? LCD_W - 1 : px);
+    *ry = py < 0 ? 0 : (py > LCD_H - 1 ? LCD_H - 1 : py);
+    if (lcd_rot) { *rx = LCD_W - 1 - *rx; *ry = LCD_H - 1 - *ry; }
+}
+
+static int touch_ctrl0 = -1;
+module_param(touch_ctrl0, int, 0644);
+MODULE_PARM_DESC(touch_ctrl0, "SX8650 CTRL0 (RATE[7:4] | POWDLY[3:0]) for the I2C pen mode, -1 = by board");
+
 static void board_defaults(void)
 {
     int a3 = of_machine_is_compatible("securifi,almond-3");
@@ -426,6 +452,12 @@ static void board_defaults(void)
         panel = a3 ? 1 : 0;
     if (led_rgb < 0)
         led_rgb = a3 ? 1 : 0;
+    if (touch_ctrl0 < 0)
+        touch_ctrl0 = a3 ? 0x06 : 0x00;
+    if (tcal[0] == 0 && tcal[1] == 0 && tcal[2] == 0 && tcal[3] == 0) {
+        if (a3) { tcal[0] = 164; tcal[1] = 3811; tcal[2] = 3911; tcal[3] = 258; }
+        else    { tcal[0] = 216; tcal[1] = 3911; tcal[2] = 3952; tcal[3] = 120; }
+    }
 }
 
 static inline void lcd_write_8d(u8 val)
@@ -546,7 +578,6 @@ static void lcd_hw_reset(void)
     shadow_dir &= ~BIT_CSX; gw_dir(shadow_dir);
 }
 
-static int lcd_rot;         /* 1 = экран перевёрнут на 180 */
 static int lcd_rot_pending;
 static int panel_reinit_pending; /* полный reset+init панели из потока отрисовки */
 static int panel_init_alt;       /* 1 = таблица из заводского ядра, 0 = из загрузчика */
@@ -2438,11 +2469,22 @@ static void sx8650_config_i2c(void)
      * (там reset=0x3F, RATE в reg0x00). По mainline-адресам секвенсер
      * настраивался криво и чип конвертил только Y (X всегда FFFF). */
     b[0] = 0x1F; b[1] = 0xDE; sx_i2c_wr(b, 2); msleep(50);           /* SoftReset */
+    b[0] = 0x00; b[1] = touch_ctrl0 & 0xFF; sx_i2c_wr(b, 2);
     b[0] = 0x01; b[1] = SX_RATE_5000CPS | 0x07; sx_i2c_wr(b, 2);     /* CTRL0: 5000cps|POWDLY7 */
     b[0] = 0x02; b[1] = SX_CONDIRQ | SX_FILT_7SA; sx_i2c_wr(b, 2);   /* CTRL1: CONDIRQ|FILT7 */
     b[0] = 0x03; b[1] = 0x2D; sx_i2c_wr(b, 2);                       /* CTRL2: как в стоке */
     b[0] = 0x04; b[1] = SX_CONV_X | SX_CONV_Y; sx_i2c_wr(b, 2);      /* ChanMask X|Y */
     b[0] = SX_CMD_PENTRG; sx_i2c_wr(b, 1);                           /* старт непрерывного пен-режима */
+    {
+        u8 r, v[6];
+        for (r = 0; r < 6; r++) {
+            u8 c = SX_CMD_READREG | r;
+            v[r] = 0xEE;
+            if (sx_i2c_wr(&c, 1) == 0) sx_i2c_rd(&v[r], 1);
+        }
+        pr_info("sx8650 regs: 00=%02x 01=%02x 02=%02x 03=%02x 04=%02x 05=%02x\n",
+                v[0], v[1], v[2], v[3], v[4], v[5]);
+    }
 }
 
 /* Чип в PENTRG отдаёт по ОДНОМУ каналу на CONVIRQ (проверено: 4-байтное чтение
@@ -2451,6 +2493,11 @@ static void sx8650_config_i2c(void)
 static int lastx_raw = -1, lasty_raw = -1;
 static unsigned long lastx_j, lasty_j;
 static unsigned long touch_ok_j;
+static int touch_skip_cnt, touch_seen_cnt, touch_nopen_cnt, touch_trace;
+module_param(touch_trace, int, 0644);
+module_param(touch_skip_cnt, int, 0644);
+module_param(touch_seen_cnt, int, 0644);
+module_param(touch_nopen_cnt, int, 0644);
 
 static int sx8650_read_i2c(int *rx, int *ry)
 {
@@ -2468,12 +2515,13 @@ static int sx8650_read_i2c(int *rx, int *ry)
         if (!(stat & SX_STAT_CONVIRQ)) break;
         if (sx_i2c_rd(d, 2) < 0) { touch_bad_ch++; return 0; }
         v = ((u16)d[0] << 8) | d[1];
-        if (v == 0xFFFF || (v & 0x8000)) return 0;   /* пера нет */
+        if (v == 0xFFFF || (v & 0x8000)) { touch_nopen_cnt++; return 0; }   /* пера нет */
         ch = (v >> 12) & 7;
         if (ch == 0) { lastx_raw = v & 0x0FFF; lastx_j = jiffies; got = 1; }
         else if (ch == 1) { lasty_raw = v & 0x0FFF; lasty_j = jiffies; got = 1; }
     }
     if (!got) return 0;
+    touch_seen_cnt++;
 
     /* нужны оба канала и оба свежие */
     if (lastx_raw < 0 || lasty_raw < 0) return 0;
@@ -2485,20 +2533,19 @@ static int sx8650_read_i2c(int *rx, int *ry)
      * (через 30мс) отдаёт устоявшуюся точку - задержка незаметна. */
     if (jiffies - touch_ok_j > msecs_to_jiffies(150)) {
         touch_ok_j = jiffies;
+        touch_skip_cnt++;
+        if (touch_trace)
+            pr_info("touch trace: first-skip x=%d y=%d n=%d\n", lastx_raw, lasty_raw, n);
         return 0;
     }
     touch_ok_j = jiffies;
     raw_x = lastx_raw; raw_y = lasty_raw;
+    if (touch_trace)
+        pr_info("touch trace: ok x=%d y=%d n=%d\n", raw_x, raw_y, n);
 
-    {
-        int px = (4096 - raw_y) * TOUCH_SCALE_X / 4096 - TOUCH_OFF_X;
-        int py = raw_x * TOUCH_SCALE_Y / 4096 - TOUCH_OFF_Y;
-        *rx = px < 0 ? 0 : (px > LCD_W - 1 ? LCD_W - 1 : px);
-        *ry = py < 0 ? 0 : (py > LCD_H - 1 ? LCD_H - 1 : py);
-        if (lcd_rot) { *rx = LCD_W - 1 - *rx; *ry = LCD_H - 1 - *ry; }
-        touch_ok_cnt++;
-        return 1;
-    }
+    touch_map(raw_x, raw_y, rx, ry);
+    touch_ok_cnt++;
+    return 1;
 }
 
 /* ===== Режим 3: PENTRG-непрерывный через PALMBUS (стоко-подобный) =====
@@ -2587,15 +2634,9 @@ static int sx8650_read_pmtrg(int *rx, int *ry)
     if (jiffies - lastx_j > msecs_to_jiffies(120) ||
         jiffies - lasty_j > msecs_to_jiffies(120)) return 0;
     raw_x = lastx_raw; raw_y = lasty_raw;
-    {
-        int px = (4096 - raw_y) * TOUCH_SCALE_X / 4096 - TOUCH_OFF_X;
-        int py = raw_x * TOUCH_SCALE_Y / 4096 - TOUCH_OFF_Y;
-        *rx = px < 0 ? 0 : (px > LCD_W - 1 ? LCD_W - 1 : px);
-        *ry = py < 0 ? 0 : (py > LCD_H - 1 ? LCD_H - 1 : py);
-        if (lcd_rot) { *rx = LCD_W - 1 - *rx; *ry = LCD_H - 1 - *ry; }
-        touch_ok_cnt++;
-        return 1;
-    }
+    touch_map(raw_x, raw_y, rx, ry);
+    touch_ok_cnt++;
+    return 1;
 }
 
 /* ===== Режим 5: ПОБАЙТОВАЯ копия стокового чтения (дизасм almond_touch) =====
@@ -2658,15 +2699,9 @@ static int sx8650_read_stock(int *rx, int *ry)
     gw(SM0_CTL1, saved_ctl1); udelay(10);
     if (raw_y < 0) { touch_drop_cnt++; return 0; }
 
-    {
-        int px = (4096 - raw_y) * TOUCH_SCALE_X / 4096 - TOUCH_OFF_X;
-        int py = raw_x * TOUCH_SCALE_Y / 4096 - TOUCH_OFF_Y;
-        *rx = px < 0 ? 0 : (px > LCD_W - 1 ? LCD_W - 1 : px);
-        *ry = py < 0 ? 0 : (py > LCD_H - 1 ? LCD_H - 1 : py);
-        if (lcd_rot) { *rx = LCD_W - 1 - *rx; *ry = LCD_H - 1 - *ry; }
-        touch_ok_cnt++;
-        return 1;
-    }
+    touch_map(raw_x, raw_y, rx, ry);
+    touch_ok_cnt++;
+    return 1;
 }
 
 /* ===== Режим 4: автомат PENDET<->PENTRG (как заводской almond_touch) =====
@@ -2749,15 +2784,9 @@ static int sx8650_read_sm(int *rx, int *ry)
     if (jiffies - lastx_j > msecs_to_jiffies(120) ||
         jiffies - lasty_j > msecs_to_jiffies(120)) return 0;
     raw_x = lastx_raw; raw_y = lasty_raw;
-    {
-        int px = (4096 - raw_y) * TOUCH_SCALE_X / 4096 - TOUCH_OFF_X;
-        int py = raw_x * TOUCH_SCALE_Y / 4096 - TOUCH_OFF_Y;
-        *rx = px < 0 ? 0 : (px > LCD_W - 1 ? LCD_W - 1 : px);
-        *ry = py < 0 ? 0 : (py > LCD_H - 1 ? LCD_H - 1 : py);
-        if (lcd_rot) { *rx = LCD_W - 1 - *rx; *ry = LCD_H - 1 - *ry; }
-        touch_ok_cnt++;
-        return 1;
-    }
+    touch_map(raw_x, raw_y, rx, ry);
+    touch_ok_cnt++;
+    return 1;
 }
 
 static u8 pic_led_byte(u8 v)

@@ -884,6 +884,7 @@ let TR_RU = {
     "Download": "Загрузка",
     "Upload": "Отдача",
     "Done": "Готово",
+    "No server": "Сервер недоступен",
     "Mbps": "Мбит/с",
     "Choose server": "Выбор сервера",
     "Choose servers": "Выбор серверов",
@@ -3348,12 +3349,12 @@ function draw_fn_icon(x, y, col, flat) {
 // Тип активного аплинка по кэшу netpri (тот же, что «Сеть»): запись с наименьшей
 // метрикой -> её type ("wifi"/"wan"/"modem"/"other"). Кэш 4с - статус-строка
 // рисуется на каждой перерисовке. Путь литералом: NETPRI_CACHE объявлен ниже.
-let uplink_kind_v = "", uplink_kind_t = 0;
-function uplink_kind() {
+let uplink_best_v = null, uplink_kind_t = 0;
+function uplink_best() {
     let now = time();
     if (now - uplink_kind_t >= 4) {
         uplink_kind_t = now;
-        uplink_kind_v = "";
+        uplink_best_v = null;
         let raw = fs.readfile("/tmp/lcd_netpri.json");
         if (raw) {
             try {
@@ -3365,12 +3366,16 @@ function uplink_kind() {
                         if (best == null || int(+(e.metric ?? 999)) < int(+(best.metric ?? 999)))
                             best = e;
                     }
-                    if (best) uplink_kind_v = best.type ?? "";
+                    uplink_best_v = best;
                 }
             } catch (e) {}
         }
     }
-    return uplink_kind_v;
+    return uplink_best_v;
+}
+
+function uplink_kind() {
+    return uplink_best()?.type ?? "";
 }
 
 // Значок VPN в статус-строке: белая плашка со словом внутри. Состояние
@@ -9095,11 +9100,13 @@ function draw_speedtest_page() {
     else if (svc == "") svc = tr("Speedtest");
     let ap = IS_ALMONDPLUS;
     lcd_text(cx + 12, cy + (ap ? 10 : 8), tcut(svc, 22), C.gray, "none", 2);
+    let failed = !running && !int(+(sp.ok ?? 0)) && !sp.cancelled && sp.http != null;
     let ph = running ? (up ? tr("Upload") : tr("Download"))
-                     : (int(+(sp.ok ?? 0)) ? tr("Done") : (sp.cancelled ? tr("Stopped") : ""));
+                     : (int(+(sp.ok ?? 0)) ? tr("Done") : (sp.cancelled ? tr("Stopped")
+                     : (failed ? tr("No server") : "")));
     if (ph != "")
         lcd_text_r(cx + cw - 12, cy + (ap ? 18 : 10),
-                 ph, running ? (up ? "#0095FF" : C.green) : C.gray, "none", 1);
+                 ph, running ? (up ? "#0095FF" : C.green) : (failed ? C.red : C.gray), "none", 1);
 
     // Значения: живое число - в текущей фазе, второе - последнее известное.
     let dl, ul, dl_hot, ul_hot;
@@ -11459,6 +11466,19 @@ function dash_tile(t, d, o) {
     }
 
     if (t.k == "sig") {
+        let has_modem = (d?.lte?.mode ?? "") != "" || int(+(d?.lte?.rsrp ?? 0)) != 0
+                     || (d?.lte?.operator ?? "") != "" || int(+(d?.lte?.signal ?? 0)) > 0;
+        if (!has_modem && !modem_present()) {
+            let u = uplink_best();
+            let up = u != null && (u.health ?? "up") == "up";
+            let ucol = u == null ? C.dim : (up ? C.green : C.orange);
+            let ip = u?.ip ?? "";
+            let name = u == null ? tr("no network")
+                     : (u.type == "wifi" ? "Wi-Fi " + (u.label ?? u.iface)
+                                         : uc(u.label ?? u.iface ?? "WAN"));
+            dash_simple(b, o, ucol, tr("Internet"), ip != "" ? ip : "--", tcut(name, 22), ucol);
+            return;
+        }
         let pct = dash_sig_pct(d), col = dash_lvl_col(pct);
         let rsrp = int(+(d?.lte?.rsrp ?? 0));
         dash_gauge(b, o, col, tcut(d?.lte?.operator ?? tr("no network"), 14),

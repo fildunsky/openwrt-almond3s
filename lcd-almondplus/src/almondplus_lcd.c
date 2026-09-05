@@ -270,47 +270,168 @@ static int bl_level = BL_MAX;
 static int touch_irq = -1;
 static int mask = 0;
 
-static inline void bl_pin(bool on)
-{
-	bl_bit = on ? BIT_BL : 0;
-	if (!bl_bus_busy) {
-		if (mask && touch_irq >= 0)
-			disable_irq(touch_irq);
-		shadow = (shadow & ~BIT_BL) | bl_bit;
-		bus_out(shadow);
-		if (mask && touch_irq >= 0)
-			enable_irq(touch_irq);
-	}
-}
-
 #define BL_PWM_NS   4000000UL
 #define BL_PWM_MIN  120000UL
-static struct hrtimer bl_timer;
-static int bl_timer_on;
 static int bl_duty = BL_MAX;
 static bool bl_on_phase = true;
 
-static enum hrtimer_restart bl_timer_fn(struct hrtimer *t)
+static u64 bl_on_since, bl_off_since;
+static u32 bl_max_on_us, bl_max_off_us, bl_long_on, bl_long_off;
+static u64 bl_epoch;
+static bool bl_lit;
+static u32 bl_period = BL_PWM_NS;
+static int bl_burst_div = 4;
+module_param(bl_burst_div, int, 0644);
+MODULE_PARM_DESC(bl_burst_div, "PWM frequency multiplier while pixels are streamed (1 = same as idle)");
+
+static inline u32 bl_on_ns_now(void)
 {
 	int d = bl_duty;
-	u64 on_ns, off_ns, next;
 
 	if (d < 0) d = 0;
 	if (d > BL_MAX) d = BL_MAX;
-	on_ns = (u64)BL_PWM_NS * d / BL_MAX;
-	off_ns = BL_PWM_NS - on_ns;
+	return (u32)(bl_period / BL_MAX) * d;
+}
 
-	if (d >= BL_MAX) { bl_bit = BIT_BL; next = BL_PWM_NS; }
-	else if (d <= 0) { bl_bit = 0; next = BL_PWM_NS; }
-	else if (bl_on_phase) { bl_bit = BIT_BL; next = on_ns; bl_on_phase = false; }
-	else { bl_bit = 0; next = off_ns; bl_on_phase = true; }
+static void bl_set_period(u32 np)
+{
+	u64 now, ph;
 
-	if (!bl_bus_busy && gpio_base) {
+	if (np == bl_period)
+		return;
+	now = ktime_get_ns();
+	if (bl_epoch == 0 || now < bl_epoch)
+		bl_epoch = now;
+	ph = now - bl_epoch;
+	if (ph >= bl_period) {
+		u64 k = ph;
+
+		do_div(k, bl_period);
+		bl_epoch += k * bl_period;
+		ph = now - bl_epoch;
+	}
+	ph = ph * np;
+	do_div(ph, bl_period);
+	bl_epoch = now - ph;
+	bl_period = np;
+}
+
+static void bl_mark(bool on)
+{
+	u64 now = ktime_get_ns();
+	u32 on_ns = bl_on_ns_now();
+
+	if (on) {
+		if (bl_off_since) {
+			u64 d = now - bl_off_since;
+			u32 us;
+
+			do_div(d, 1000);
+			us = (u32)d;
+			if (us > bl_max_off_us) bl_max_off_us = us;
+			if (us > (bl_period - on_ns) / 1000 + 400) bl_long_off++;
+		}
+		bl_on_since = now;
+		bl_off_since = 0;
+	} else {
+		if (bl_on_since) {
+			u64 d = now - bl_on_since;
+			u32 us;
+
+			do_div(d, 1000);
+			us = (u32)d;
+			if (us > bl_max_on_us) bl_max_on_us = us;
+			if (us > on_ns / 1000 + 400) bl_long_on++;
+		}
+		bl_off_since = now;
+		bl_on_since = 0;
+	}
+	bl_on_phase = on;
+	bl_bit = on ? BIT_BL : 0;
+}
+
+static void bl_apply(bool on)
+{
+	bl_mark(on);
+	if (gpio_base) {
 		shadow = (shadow & ~BIT_BL) | bl_bit;
 		bus_out(shadow);
 	}
-	if (next < BL_PWM_MIN) next = BL_PWM_MIN;
-	hrtimer_forward_now(t, ns_to_ktime(next));
+}
+
+static u32 bl_step(u64 now, bool *on_out)
+{
+	u32 on_ns = bl_on_ns_now();
+	u64 ph;
+	bool on;
+
+	if (bl_epoch == 0 || now < bl_epoch)
+		bl_epoch = now;
+	ph = now - bl_epoch;
+	if (ph >= bl_period) {
+		u64 k = ph;
+
+		do_div(k, bl_period);
+		bl_epoch += k * bl_period;
+		ph = now - bl_epoch;
+		bl_lit = false;
+	}
+	if (ph >= on_ns && !bl_lit) {
+		bl_epoch = now;
+		ph = 0;
+	}
+	on = ph < on_ns;
+	if (on)
+		bl_lit = true;
+	*on_out = on;
+	return on ? (u32)(on_ns - ph) : (u32)(bl_period - ph);
+}
+
+static struct hrtimer bl_timer;
+static int bl_timer_on;
+
+static void bl_resync(void)
+{
+	u32 on_ns = bl_on_ns_now(), next;
+	bool on;
+
+	if (on_ns == 0 || on_ns >= bl_period) {
+		on = on_ns != 0;
+		if (on != bl_on_phase || (shadow & BIT_BL) != bl_bit)
+			bl_apply(on);
+		return;
+	}
+	next = bl_step(ktime_get_ns(), &on);
+	if (on != bl_on_phase)
+		bl_apply(on);
+	if (next < 20000)
+		next = 20000;
+	if (bl_timer_on)
+		hrtimer_start(&bl_timer, ns_to_ktime((u64)next), HRTIMER_MODE_REL_PINNED);
+}
+
+static enum hrtimer_restart bl_timer_fn(struct hrtimer *t)
+{
+	u32 on_ns = bl_on_ns_now(), next;
+	bool on;
+
+	if (bl_bus_busy) {
+		hrtimer_forward_now(t, ns_to_ktime(1000000L));
+		return HRTIMER_RESTART;
+	}
+	if (on_ns == 0 || on_ns >= bl_period) {
+		on = on_ns != 0;
+		if (on != bl_on_phase)
+			bl_apply(on);
+		hrtimer_forward_now(t, ns_to_ktime(BL_PWM_NS));
+		return HRTIMER_RESTART;
+	}
+	next = bl_step(ktime_get_ns(), &on);
+	if (on != bl_on_phase)
+		bl_apply(on);
+	if (next < 20000)
+		next = 20000;
+	hrtimer_forward_now(t, ns_to_ktime((u64)next));
 	return HRTIMER_RESTART;
 }
 
@@ -393,9 +514,22 @@ static void lcd_send_rows(int r0, int r1, int c0, int c1)
 	const u16 *src = flush_snap + r0 * LCD_W + c0;
 	const int plain = dig_plain;
 	static int slot_pos, since_yield;
+	int dim;
+	u32 next = 0;
 	u32 hi;
 	int i, col = 0;
 
+	{
+		u32 on0 = bl_on_ns_now();
+		int dv = bl_burst_div;
+
+		dim = on0 > 0 && on0 < bl_period;
+		if (dv < 1) dv = 1;
+		if (dv > 16) dv = 16;
+		if (dim)
+			bl_set_period(BL_PWM_NS / dv);
+	}
+	bl_bus_busy = true;
 	lcd_cmd(0x2B);
 	lcd_dat(r0 >> 8); lcd_dat(r0 & 0xFF);
 	lcd_dat(r1 >> 8); lcd_dat(r1 & 0xFF);
@@ -415,13 +549,33 @@ static void lcd_send_rows(int r0, int r1, int c0, int c1)
 		}
 		if ((++slot_pos & (BL_SLOT_PIXELS - 1)) != 0)
 			continue;
-		if (++since_yield >= 512) {
+		if (dim) {
+			bool on;
+
+			next = bl_step(ktime_get_ns(), &on);
+			if (on != bl_on_phase) {
+				bl_mark(on);
+				hi = (hi & ~BIT_BL) | bl_bit;
+			}
+		}
+		if (++since_yield >= 512 &&
+		    (!dim || (!bl_on_phase && next > 1500000u))) {
 			since_yield = 0;
+			shadow = hi | BIT_WR;
+			bl_bus_busy = false;
+			if (dim)
+				bl_resync();
 			cond_resched();
+			bl_bus_busy = true;
+			hi = (hi & ~BIT_BL) | bl_bit;
 		}
 	}
 	shadow = hi | BIT_WR;
 	bus_out(shadow);
+	bl_bus_busy = false;
+	if (dim)
+		bl_set_period(BL_PWM_NS);
+	bl_resync();
 }
 
 static int win_c0, win_c1;
@@ -467,6 +621,8 @@ static void lcd_flush_fb(void)
 	lcd_cmd(0x2A);
 	lcd_dat(win_c0 >> 8); lcd_dat(win_c0 & 0xFF);
 	lcd_dat(win_c1 >> 8); lcd_dat(win_c1 & 0xFF);
+	bl_bus_busy = false;
+	bl_resync();
 
 	{
 		ktime_t t0 = ktime_get();
@@ -1488,10 +1644,15 @@ static long lcd_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 	case 24:
 		return 0;
 	case 25: {
-		int d[4] = { 0, 0, 0, 0 };
+		int d[4] = { (int)bl_max_off_us, (int)bl_long_off,
+			     (int)bl_max_on_us, (int)bl_long_on };
 
 		if (copy_to_user((void __user *)arg, d, sizeof(d)))
 			return -EFAULT;
+		bl_max_off_us = 0;
+		bl_long_off = 0;
+		bl_max_on_us = 0;
+		bl_long_on = 0;
 		return 0;
 	}
 	case 26:
