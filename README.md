@@ -2,9 +2,11 @@
 
 *[Русская версия](README.ru.md)*
 
-LCD support for the **Securifi Almond 3S** on OpenWrt: a kernel driver for the
-2.8" ILI9341 panel with its SX8650 touchscreen, and a userspace dashboard that
-shows network, modem, Wi-Fi, traffic and weather right on the device.
+LCD support for the **Securifi Almond 3S** and **Almond 3** on OpenWrt: a kernel
+driver for the 2.8" panel (ILI9341 on the 3S, ST7789V on the Almond 3) with its
+SX8650 touchscreen, and a userspace dashboard that shows network, modem, Wi-Fi,
+traffic and weather right on the device. The board is detected from the DT
+compatible, the same packages serve both.
 
 The repository is an OpenWrt feed with three packages:
 
@@ -92,6 +94,10 @@ The repository is an OpenWrt feed with three packages:
 * Touch controller SX8650 on the palmbus I²C
 * PIC16LF1509 — battery gauge, buzzer, LED
 * Battery, charged by a BQ24133
+
+The Almond 3 differs: an ST7789V panel on the same bus, a PIC16F1503 without a
+battery or modem, and an RGB front LED (exposed as `red:status`, `green:status`,
+`blue:status`; the colour is picked on the LED page).
 
 ## Requirements
 
