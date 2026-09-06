@@ -14592,6 +14592,7 @@ function goto_req() {
     else if (r == "menu4") { st.page = "menu"; st.mpg = 4; }
     else if (r == "menu") { st.page = "menu"; st.mpg = 1; }
     else if (r == "net") { st.page = "dashboard"; netpri_refresh(); }
+    else if (r == "term") { term_start(); st.page = "term"; }
     else st.page = r;
     st.nav = [];              // прыжок извне - корень: «назад» отсюда ведёт в меню
     st.izoom = null;          // не тащим развёрнутую карточку/зум в новую страницу

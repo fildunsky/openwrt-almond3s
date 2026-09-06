@@ -41,8 +41,9 @@ static const char *FIFO = "/tmp/.almond3s_term_in";
 static const char *PIDF = "/tmp/.almond3s_term.pid";
 
 /* Кольцо истории: строки, ушедшие вверх за верх экрана (sb_pushline). ui.uc
- * листает их, когда клава скрыта. Каждая строка - ASCII, дополнена пробелами. */
-static char sb[SB_MAX][MAXCOLS];
+ * листает их, когда клава скрыта. Ячейка - кодпоинт Unicode (0 = пусто);
+ * в файл сетки уходит UTF-8, кириллицу рисует render.c своим 5x7. */
+static uint32_t sb[SB_MAX][MAXCOLS];
 static int  sb_head = 0, sb_n = 0;
 
 static int  cols = MAXCOLS, rows = 8; /* стартуем с клавой на экране (8 строк) */
@@ -60,15 +61,39 @@ static void out_cb(const char *s, size_t len, void *user)
     if (master >= 0) (void)!write(master, s, len);
 }
 
-/* ячейки libvterm -> строка ASCII (не-ASCII '?'), добита пробелами до MAXCOLS */
-static void cells_to_line(int ncols, const VTermScreenCell *cells, char *out)
+/* Что render.c умеет нарисовать своим 5x7 помимо ASCII: кириллица целиком,
+ * рамки псевдографики с блоками и горстка знаков из его font5x7_sym. Всё
+ * прочее (CJK, эмодзи) отдаём как '?', иначе рендерер молча оставил бы
+ * пустую клетку. */
+static int drawable(uint32_t c)
+{
+    static const uint16_t SYM[] = {
+        0x00B0, 0x00AB, 0x00BB, 0x2116, 0x20BD, 0x2190, 0x2191, 0x2192,
+        0x2193, 0x2196, 0x2197, 0x2198, 0x2199, 0x2022, 0x2713, 0x2026,
+        0x2013, 0x2014, 0x2011, 0x201C, 0x201D, 0x2018, 0x2019,
+    };
+    if (c >= 32 && c < 127) return 1;
+    if ((c >= 0x410 && c <= 0x44F) || c == 0x401 || c == 0x451) return 1;
+    if (c >= 0x2500 && c <= 0x259F) return 1;
+    for (unsigned i = 0; i < sizeof(SYM) / sizeof(SYM[0]); i++)
+        if (SYM[i] == c) return 1;
+    return 0;
+}
+
+/* Ячейка libvterm -> кодпоинт для сетки. Хвост широкого символа (width 0)
+ * и пустая ячейка - пробел, чтобы колонки не съезжали. */
+static uint32_t cell_cp(const VTermScreenCell *cell)
+{
+    uint32_t c = cell->chars[0];
+    if (cell->width <= 0 || c == 0) return ' ';
+    return drawable(c) ? c : '?';
+}
+
+/* ячейки libvterm -> строка кодпоинтов, добита пробелами до MAXCOLS */
+static void cells_to_line(int ncols, const VTermScreenCell *cells, uint32_t *out)
 {
     int w = ncols < MAXCOLS ? ncols : MAXCOLS;
-    for (int x = 0; x < w; x++) {
-        uint32_t c = cells[x].chars[0];
-        out[x] = (cells[x].width > 0 && c >= 32 && c < 127) ? (char)c
-               : (cells[x].width > 0 && c != 0 ? '?' : ' ');
-    }
+    for (int x = 0; x < w; x++) out[x] = cell_cp(&cells[x]);
     for (int x = w; x < MAXCOLS; x++) out[x] = ' ';
 }
 
@@ -95,17 +120,33 @@ static int sb_popline_cb(int ncols, VTermScreenCell *cells, void *user)
     for (int x = 0; x < ncols; x++) {
         cells[x] = (VTermScreenCell){ 0 };
         cells[x].width = 1;
-        cells[x].chars[0] = (x < MAXCOLS) ? (uint32_t)(unsigned char)sb[idx][x] : ' ';
+        cells[x].chars[0] = (x < MAXCOLS) ? sb[idx][x] : ' ';
     }
     return 1;
 }
 
-static void write_trimmed(int fd, const char *line)
+/* Строка сетки в UTF-8 без хвостовых пробелов. Кодпоинты сюда попадают
+ * только те, что прошли drawable() - все не выше U+FFFF, три байта хватает. */
+static void write_trimmed(int fd, const uint32_t *line)
 {
-    int end = MAXCOLS;
+    char buf[MAXCOLS * 3 + 1];
+    int end = MAXCOLS, o = 0;
     while (end > 0 && line[end - 1] == ' ') end--;
-    (void)!write(fd, line, end);
-    (void)!write(fd, "\n", 1);
+    for (int x = 0; x < end; x++) {
+        uint32_t c = line[x];
+        if (c < 0x80) {
+            buf[o++] = (char)c;
+        } else if (c < 0x800) {
+            buf[o++] = (char)(0xC0 | (c >> 6));
+            buf[o++] = (char)(0x80 | (c & 0x3F));
+        } else {
+            buf[o++] = (char)(0xE0 | (c >> 12));
+            buf[o++] = (char)(0x80 | ((c >> 6) & 0x3F));
+            buf[o++] = (char)(0x80 | (c & 0x3F));
+        }
+    }
+    buf[o++] = '\n';
+    (void)!write(fd, buf, o);
 }
 
 /* --- экспорт для ui.uc: заголовок "nlines cols cur_x cur_line", затем
@@ -134,17 +175,14 @@ static void export_grid(void)
     for (int i = sb_n - sb_inc; i < sb_n; i++)
         write_trimmed(fd, sb[(sb_head + i) % SB_MAX]);
 
-    char line[MAXCOLS];
+    uint32_t line[MAXCOLS];
     for (int y = 0; y < rows; y++) {
         for (int x = 0; x < MAXCOLS; x++) {
-            char ch = ' ';
+            uint32_t ch = ' ';
             if (x < cols) {
                 VTermScreenCell cell;
                 VTermPos p = { .row = y, .col = x };
-                if (vterm_screen_get_cell(vts, p, &cell) && cell.width > 0) {
-                    uint32_t c = cell.chars[0];
-                    ch = (c >= 32 && c < 127) ? (char)c : (c == 0 ? ' ' : '?');
-                }
+                if (vterm_screen_get_cell(vts, p, &cell)) ch = cell_cp(&cell);
             }
             line[x] = ch;
         }
