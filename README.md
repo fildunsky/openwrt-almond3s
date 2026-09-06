@@ -73,8 +73,12 @@ The repository is an OpenWrt feed with three packages:
 * **VPN** — SSClash: on/off, proxy groups, node latency, switching a node
 * **Games** — NES emulator (QuickNES): touch buttons, USB keyboard or a phone
   gamepad in the browser over Wi-Fi, opened by a QR code
-* **Terminal** — a real shell on the panel (`forkpty` + libvterm) with an
-  on-screen keyboard: `ls`, `cd`, line editing, `top` and `vi` all work
+* **Terminal** — a real login shell on the panel (`forkpty` + libvterm) with an
+  on-screen keyboard: the OpenWrt banner, `ls`, `cd`, line editing, `top` and
+  `vi` all work. Output is in colour (16 ANSI colours plus the 256-colour
+  cube), UTF-8 with Cyrillic and box-drawing characters, on a strict 6-pixel
+  grid of 52×22 cells. `5gtop` from luci-app-5gmodem detects the small screen
+  and lays itself out in 22 rows
 * **Alarm** — melody, time, one-shot or repeating; the schedule is written into
   cron, so it fires even with the screen asleep
 * **Battery** — charge, charging state, drain rate and remaining time
