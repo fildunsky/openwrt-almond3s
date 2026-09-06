@@ -616,6 +616,7 @@ static int fb_kern(const uint8_t *gp, const uint8_t *gc)
  * дальше геометрия идёт по увеличенному. На 3S (LCD_W<480) карта единичная. */
 /* Часы в шапке и стрелки навбара просят «без зума»: там крупный растр велик. */
 static int g_nozoom;
+static int g_mono;
 
 static int fzoom(int s)
 {
@@ -733,7 +734,7 @@ static void fb_text(int x, int y, const char *s, uint16_t fg, uint16_t bg, int s
             cp = *p;
             p++;
         }
-        if ((font_mode < 1 || fz_off) && n > 0 && cp != ' ' && cps[n - 1] != ' '
+        if (!g_mono && (font_mode < 1 || fz_off) && n > 0 && cp != ' ' && cps[n - 1] != ' '
             && cps[n - 1] != ':' && !(fb_tabular(cp) && fb_tabular(cps[n - 1]))) {
             /* После двоеточия кернинг НЕ применяем: глиф уже сдвинут влево и
              * имеет узкий адванс, а подтяжка соседа съедала последний зазор -
@@ -744,14 +745,16 @@ static void fb_text(int x, int y, const char *s, uint16_t fg, uint16_t bg, int s
         /* Узкую клетку двоеточия компенсируем сдвигом самого глифа: его
          * чернила лежат в колонках 2-3 пятиколоночной сетки, и без сдвига
          * оно прижалось бы к правому соседу. */
-        if ((font_mode >= 1 && !fz_off) && n > 0 && fz_kern_pair(cps[n - 1], cp)) {
+        if (!g_mono && (font_mode >= 1 && !fz_off) && n > 0 && fz_kern_pair(cps[n - 1], cp)) {
             int k = fz_kern(fz_find(fz_glyphs, fz_count, cps[n - 1]),
                             fz_find(fz_glyphs, fz_count, cp),
                             fz_kernable(cps[n - 1]) ? 2 : 1);
             x -= k * scale;
         }
-        cps[n] = cp; cx[n] = x - (cp == ':' ? scale : 0); cy[n] = y;
-        if ((font_mode >= 1 && !fz_off)) {
+        cps[n] = cp; cx[n] = x - (cp == ':' && !g_mono ? scale : 0); cy[n] = y;
+        if (g_mono) {
+            adv[n] = 6 * scale;
+        } else if ((font_mode >= 1 && !fz_off)) {
             const struct fz_glyph *g = fz_find(fz_glyphs, fz_count, cp);
             adv[n] = (g ? g->adv : 6) * scale;
         } else {
@@ -990,6 +993,10 @@ static void handle_cmd(const char *json)
         json_str(json, "anchor", anch, sizeof(anch));
         /* noz:1 - рисовать без укрупнения (часы шапки, стрелки навбара). */
         g_nozoom = json_int(json, "noz", 0);
+        /* mono:1 - терминальная сетка: без кернинга, шаг ровно шесть пикселей
+         * на знак, иначе колонки соседних строк расходятся (шкала после
+         * «SINR» отставала от шкалы после «RSRP» на пиксель-другой). */
+        g_mono = json_int(json, "mono", 0);
         /* Просьба о начертании имеет смысл только в парных режимах. */
         fz_force = (font_mode == 4 || font_mode == 11) ? json_int(json, "fnt", 0) : 0;
         /* Подгонка по ширине: строка просит размер, но если в отведённое место
@@ -1007,6 +1014,7 @@ static void handle_cmd(const char *json)
                 size, transp);
         fz_force = 0;
         g_nozoom = 0;
+        g_mono = 0;
     }
     else if (!strcmp(cmd, "fontmode")) {
         font_mode = json_int(json, "mode", 0);

@@ -44,6 +44,9 @@ static const char *PIDF = "/tmp/.almond3s_term.pid";
  * листает их, когда клава скрыта. Ячейка - кодпоинт Unicode (0 = пусто);
  * в файл сетки уходит UTF-8, кириллицу рисует render.c своим 5x7. */
 static uint32_t sb[SB_MAX][MAXCOLS];
+/* Цвет ячейки истории: 0xRRGGBB, COL_DEF - цвет терминала по умолчанию. */
+#define COL_DEF 0xFFFFFFFFu
+static uint32_t sbc[SB_MAX][MAXCOLS];
 static int  sb_head = 0, sb_n = 0;
 
 static int  cols = MAXCOLS, rows = 8; /* стартуем с клавой на экране (8 строк) */
@@ -85,24 +88,70 @@ static int drawable(uint32_t c)
 static uint32_t cell_cp(const VTermScreenCell *cell)
 {
     uint32_t c = cell->chars[0];
-    if (cell->width <= 0 || c == 0) return ' ';
+    if (cell->width <= 0 || c == 0 || c == 0xA0) return ' ';
     return drawable(c) ? c : '?';
 }
 
-/* ячейки libvterm -> строка кодпоинтов, добита пробелами до MAXCOLS */
-static void cells_to_line(int ncols, const VTermScreenCell *cells, uint32_t *out)
+/* Палитра 16 цветов под тёмный фон LCD (тона GitHub Dark): индексы SGR 30-37
+ * и яркие 90-97. Жирный текст с базовым цветом уходит в яркий вариант - так
+ * делают xterm и его наследники, и 5gtop на это рассчитывает. */
+static const uint32_t PAL16[16] = {
+    0x1b1f24, 0xf85149, 0x3fb950, 0xd29922, 0x58a6ff, 0xbc8cff, 0x39c5cf, 0xc9d1d9,
+    0x6e7681, 0xff7b72, 0x56d364, 0xe3b341, 0x79c0ff, 0xd2a8ff, 0x56d4dd, 0xf0f6fc,
+};
+
+static uint32_t idx_rgb(int i)
+{
+    if (i < 16) return PAL16[i];
+    if (i < 232) {
+        int v = i - 16, r = v / 36, g = (v / 6) % 6, b = v % 6;
+        r = r ? 55 + 40 * r : 0; g = g ? 55 + 40 * g : 0; b = b ? 55 + 40 * b : 0;
+        return (uint32_t)(r << 16 | g << 8 | b);
+    }
+    int gr = 8 + 10 * (i - 232);
+    return (uint32_t)(gr << 16 | gr << 8 | gr);
+}
+
+static uint32_t cell_rgb(const VTermScreenCell *cell)
+{
+    const VTermColor *c = &cell->fg;
+    if (VTERM_COLOR_IS_DEFAULT_FG(c)) return COL_DEF;
+    if (VTERM_COLOR_IS_INDEXED(c)) {
+        int i = c->indexed.idx;
+        if (cell->attrs.bold && i < 8) i += 8;
+        return idx_rgb(i);
+    }
+    if (VTERM_COLOR_IS_RGB(c))
+        return (uint32_t)(c->rgb.red << 16 | c->rgb.green << 8 | c->rgb.blue);
+    return COL_DEF;
+}
+
+/* ячейки libvterm -> строка кодпоинтов и цветов, добита пробелами до MAXCOLS */
+static void cells_to_line(int ncols, const VTermScreenCell *cells, uint32_t *out, uint32_t *col)
 {
     int w = ncols < MAXCOLS ? ncols : MAXCOLS;
-    for (int x = 0; x < w; x++) out[x] = cell_cp(&cells[x]);
-    for (int x = w; x < MAXCOLS; x++) out[x] = ' ';
+    for (int x = 0; x < w; x++) { out[x] = cell_cp(&cells[x]); col[x] = cell_rgb(&cells[x]); }
+    for (int x = w; x < MAXCOLS; x++) { out[x] = ' '; col[x] = COL_DEF; }
 }
 
 /* строка ушла вверх за верх экрана -> в кольцо истории */
+/* Видимость курсора (DECTCEM, ESC[?25l/h). Полноэкранные программы вроде
+ * 5gtop прячут курсор и потом расставляют значения по экрану; без этого
+ * флага подчёркивание курсора скакало по строкам за каждой записью. */
+static int cursor_visible = 1;
+
+static int settermprop_cb(VTermProp prop, VTermValue *val, void *user)
+{
+    (void)user;
+    if (prop == VTERM_PROP_CURSORVISIBLE) cursor_visible = val->boolean;
+    return 1;
+}
+
 static int sb_pushline_cb(int ncols, const VTermScreenCell *cells, void *user)
 {
     (void)user;
     int idx = (sb_head + sb_n) % SB_MAX;
-    cells_to_line(ncols, cells, sb[idx]);
+    cells_to_line(ncols, cells, sb[idx], sbc[idx]);
     if (sb_n < SB_MAX) sb_n++;
     else sb_head = (sb_head + 1) % SB_MAX;
     return 1;
@@ -117,23 +166,38 @@ static int sb_popline_cb(int ncols, VTermScreenCell *cells, void *user)
     if (sb_n == 0) return 0;
     int idx = (sb_head + sb_n - 1) % SB_MAX;
     sb_n--;
+    VTermColor dfg, dbg;
+    vterm_state_get_default_colors(vtstate, &dfg, &dbg);
     for (int x = 0; x < ncols; x++) {
         cells[x] = (VTermScreenCell){ 0 };
         cells[x].width = 1;
         cells[x].chars[0] = (x < MAXCOLS) ? sb[idx][x] : ' ';
+        cells[x].fg = dfg;
+        cells[x].bg = dbg;
+        uint32_t c = (x < MAXCOLS) ? sbc[idx][x] : COL_DEF;
+        if (c != COL_DEF) vterm_color_rgb(&cells[x].fg, c >> 16, (c >> 8) & 0xFF, c & 0xFF);
     }
     return 1;
 }
 
 /* Строка сетки в UTF-8 без хвостовых пробелов. Кодпоинты сюда попадают
- * только те, что прошли drawable() - все не выше U+FFFF, три байта хватает. */
-static void write_trimmed(int fd, const uint32_t *line)
+ * только те, что прошли drawable() - все не выше U+FFFF, три байта хватает.
+ * Смена цвета помечается ESC + колонка (2 hex) + цвет (6 hex) или ESC +
+ * колонка + '!' для цвета по умолчанию: ui.uc рисует каждый отрезок своим
+ * вызовом с точной колонки, кодпоинты ему считать не надо. */
+static void write_trimmed(int fd, const uint32_t *line, const uint32_t *col)
 {
-    char buf[MAXCOLS * 3 + 1];
+    char buf[MAXCOLS * 12 + 1];
     int end = MAXCOLS, o = 0;
+    uint32_t cur = COL_DEF;
     while (end > 0 && line[end - 1] == ' ') end--;
     for (int x = 0; x < end; x++) {
         uint32_t c = line[x];
+        if (col[x] != cur && c != ' ') {
+            cur = col[x];
+            if (cur == COL_DEF) o += sprintf(buf + o, "\x1b%02x!", x);
+            else o += sprintf(buf + o, "\x1b%02x%06x", x, (unsigned)cur);
+        }
         if (c < 0x80) {
             buf[o++] = (char)c;
         } else if (c < 0x800) {
@@ -169,24 +233,25 @@ static void export_grid(void)
     int cur_line = sb_inc + cpos.row;
 
     char hdr[48];
-    int n = snprintf(hdr, sizeof(hdr), "%d %d %d %d\n", nlines, cols, cpos.col, cur_line);
+    int n = snprintf(hdr, sizeof(hdr), "%d %d %d %d\n", nlines, cols,
+                     cursor_visible ? cpos.col : -1, cur_line);
     (void)!write(fd, hdr, n);
 
     for (int i = sb_n - sb_inc; i < sb_n; i++)
-        write_trimmed(fd, sb[(sb_head + i) % SB_MAX]);
+        write_trimmed(fd, sb[(sb_head + i) % SB_MAX], sbc[(sb_head + i) % SB_MAX]);
 
-    uint32_t line[MAXCOLS];
+    uint32_t line[MAXCOLS], lcol[MAXCOLS];
     for (int y = 0; y < rows; y++) {
         for (int x = 0; x < MAXCOLS; x++) {
-            uint32_t ch = ' ';
+            uint32_t ch = ' ', cc = COL_DEF;
             if (x < cols) {
                 VTermScreenCell cell;
                 VTermPos p = { .row = y, .col = x };
-                if (vterm_screen_get_cell(vts, p, &cell)) ch = cell_cp(&cell);
+                if (vterm_screen_get_cell(vts, p, &cell)) { ch = cell_cp(&cell); cc = cell_rgb(&cell); }
             }
-            line[x] = ch;
+            line[x] = ch; lcol[x] = cc;
         }
-        write_trimmed(fd, line);
+        write_trimmed(fd, line, lcol);
     }
     close(fd);
     rename(tmp, GRID);
@@ -228,6 +293,7 @@ int main(void)
     static VTermScreenCallbacks screen_cbs;   /* переживает вызов - libvterm хранит указатель */
     screen_cbs.sb_pushline = sb_pushline_cb;
     screen_cbs.sb_popline  = sb_popline_cb;
+    screen_cbs.settermprop = settermprop_cb;
     vterm_screen_set_callbacks(vts, &screen_cbs, NULL);
     vterm_screen_enable_altscreen(vts, 1);
     vterm_screen_reset(vts, 1);

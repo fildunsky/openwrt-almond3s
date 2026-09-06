@@ -6943,6 +6943,8 @@ let TERM_GRID = "/tmp/.almond3s_term_grid";
 let TERM_FIFO = "/tmp/.almond3s_term_in";
 let TERM_PID  = "/tmp/.almond3s_term.pid";
 let TERM_COLS = IS_ALMONDPLUS ? int((LCD_W - 8) / 6) : 52;
+let TERM_FG   = "#c9d1d9";
+let TERM_ESC  = chr(27);
 
 function term_rows() {
     if (!IS_ALMONDPLUS) return st.term.kbd ? 8 : 22;
@@ -7058,6 +7060,26 @@ function draw_term_bar() {
     draw_kbd_icon(LCD_W - 36, bar_y(20));
 }
 
+// Строка сетки с цветными отрезками: ESC + колонка (2 hex) + цвет (6 hex)
+// или '!' для цвета по умолчанию. Каждый отрезок рисуем своим вызовом с точной
+// колонки и моноширинно (mono:1) - без кернинга колонки всех строк совпадают.
+function term_draw_line(x0, y, line) {
+    let parts = split(line, TERM_ESC);
+    for (let i = 0; i < length(parts); i++) {
+        let s = parts[i];
+        let x = x0, col = TERM_FG;
+        if (i > 0) {
+            x = x0 + 6 * hex(substr(s, 0, 2));
+            if (substr(s, 2, 1) == "!") { s = substr(s, 3); }
+            else { col = "#" + substr(s, 2, 6); s = substr(s, 8); }
+        }
+        if (!length(s)) continue;
+        s = strip_ctrl(replace(replace(replace(s, '\\', '\\\\'), '"', '\\"'), "\n", "\\n"));
+        Q(sprintf('{"cmd":"text","x":%d,"y":%d,"text":"%s","color":"%s","bg":"none","size":1,"mono":1}',
+            x, y, s, col));
+    }
+}
+
 function draw_term_page() {
     if (st.halting) return;
     lcd_clear(C.bg);
@@ -7085,9 +7107,10 @@ function draw_term_page() {
         let start = maxstart - sc;       // sc=0 -> низ (следим за шеллом)
         // Прозрачный фон ("none"): под буквами остаётся подложка, а не чернота.
         for (let r = 0; r < visible && (start + r) < nlines; r++)
-            lcd_text(4, out_top + r * 8, lines[1 + start + r] ?? "", "#3fb950", "none", 1);
-        // курсор подчёркиванием, только если он в окне (при прокрутке вверх нет).
-        if (cur_line >= start && cur_line < start + visible)
+            term_draw_line(4, out_top + r * 8, lines[1 + start + r] ?? "");
+        // курсор подчёркиванием, только если он в окне (при прокрутке вверх нет)
+        // и не спрятан программой (cx0 < 0: ESC[?25l, так делает 5gtop).
+        if (cx0 >= 0 && cur_line >= start && cur_line < start + visible)
             lcd_rect(4 + cx0 * 6, out_top + (cur_line - start) * 8 + 7, 6, 2, C.cyan);
         // индикатор прокрутки: не у низа - показываем стрелку вверх.
         if (sc > 0) lcd_text(LCD_W - 10, out_top, "^", C.yellow, "none", 1);
