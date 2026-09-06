@@ -12,7 +12,7 @@ The repository is an OpenWrt feed with three packages:
 
 | Package | What it is |
 |---|---|
-| `kmod-lcd-almond3s` | kernel driver: RGB565 framebuffer at `/dev/lcd`, touch, battery gauge over the PIC16LF1509 |
+| `kmod-lcd-almond3s` | kernel driver: RGB565 framebuffer at `/dev/lcd`, touch, LED, buzzer and battery gauge over the PIC (PIC16LF1509 on the 3S, PIC16F1503 on the Almond 3) |
 | `lcd-ui-almond3s` | userspace: renderer, touch daemon, data collector and the ucode UI |
 | `nes-almond3s` | optional NES emulator (QuickNES) with a browser gamepad served over Wi-Fi |
 
@@ -95,9 +95,20 @@ The repository is an OpenWrt feed with three packages:
 * PIC16LF1509 — battery gauge, buzzer, LED
 * Battery, charged by a BQ24133
 
-The Almond 3 differs: an ST7789V panel on the same bus, a PIC16F1503 without a
-battery or modem, and an RGB front LED (exposed as `red:status`, `green:status`,
-`blue:status`; the colour is picked on the LED page).
+The Almond 3 differs:
+
+* Panel ST7789V on the same bus (module parameter `panel=1`, set automatically
+  from the DT compatible `securifi,almond-3`)
+* PIC16F1503 instead of the PIC16LF1509, on the same palmbus I²C address 0x2A
+  and speaking the same command protocol. It drives the buzzer and the front
+  LED and owns the power button, but there is no battery gauge: the Almond 3
+  has no battery and no modem
+* The front LED is RGB rather than white. The PIC takes two commands with a
+  brightness byte per channel (`0x30` for green and blue, `0x31` for red); the
+  driver exposes it as three LED-class devices `red:status`, `green:status`,
+  `blue:status` (0..255), so LuCI sees ordinary LEDs with triggers. Parameter
+  `led_rgb=1`, again set from the board. The LED page offers eight colour
+  presets, `almond3s-lcd led on RRGGBB` sets any colour
 
 ## Requirements
 
@@ -210,7 +221,8 @@ The page list is above; a few things worth knowing beyond it:
 
 * **LED** — the white LED above the screen: on/off, and blinking while unread
   SMS remain. It hangs off the PIC, not a GPIO (port E bit 4), so it is driven
-  by `almond3s-lcd led on|off|blink`
+  by `almond3s-lcd led on|off|blink`. On the Almond 3 the same page controls
+  the RGB LED: a colour picker with eight presets, `almond3s-lcd led on RRGGBB`
 * **Sound** — the piezo buzzer, also on the PIC (port C bit 0). The stock
   tones were recovered from the factory firmware: `almond3s-lcd bell` (the door
   chime, 1975/1675 Hz), `ambulance`, `police`, plus `tone <hz> <ms> ...` for
