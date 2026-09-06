@@ -305,8 +305,10 @@ int main(void)
         setenv("TERM", "xterm", 1);
         setenv("HOME", "/root", 1);
         chdir("/root");
-        execl("/bin/ash", "ash", (char *)NULL);
-        execl("/bin/sh", "sh", (char *)NULL);
+        /* Login-шелл (argv[0] с дефисом): читается /etc/profile - баннер
+         * OpenWrt, штатный промпт, PATH, как при входе по ssh. */
+        execl("/bin/ash", "-ash", (char *)NULL);
+        execl("/bin/sh", "-sh", (char *)NULL);
         _exit(127);
     }
 
