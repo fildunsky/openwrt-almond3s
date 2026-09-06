@@ -40,8 +40,8 @@ The repository is an OpenWrt feed with three packages:
 <td align="center"><img src="docs/screens/games.png" width="260"><br><sub>Games list</sub></td>
 </tr>
 <tr>
-<td align="center"><img src="docs/screens/game-mario.png" width="260"><br><sub>NES emulator</sub></td>
-<td align="center"><img src="docs/screens/game-mario-select.png" width="260"><br><sub>On-screen gamepad</sub></td>
+<td align="center"><img src="docs/screens/game.png" width="260"><br><sub>NES emulator</sub></td>
+<td align="center"><img src="docs/screens/game-pad.png" width="260"><br><sub>On-screen gamepad</sub></td>
 <td align="center"><img src="docs/screens/terminal.png" width="260"><br><sub>Shell with on-screen keyboard</sub></td>
 </tr>
 <tr>

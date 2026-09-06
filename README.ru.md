@@ -39,8 +39,8 @@
 <td align="center"><img src="docs/screens/games.png" width="260"><br><sub>Список игр</sub></td>
 </tr>
 <tr>
-<td align="center"><img src="docs/screens/game-mario.png" width="260"><br><sub>Эмулятор NES</sub></td>
-<td align="center"><img src="docs/screens/game-mario-select.png" width="260"><br><sub>Экранный джойстик</sub></td>
+<td align="center"><img src="docs/screens/game.png" width="260"><br><sub>Эмулятор NES</sub></td>
+<td align="center"><img src="docs/screens/game-pad.png" width="260"><br><sub>Экранный джойстик</sub></td>
 <td align="center"><img src="docs/screens/terminal.png" width="260"><br><sub>Шелл с экранной клавиатурой</sub></td>
 </tr>
 <tr>
