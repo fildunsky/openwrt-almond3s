@@ -3401,6 +3401,19 @@ function clash_running() {
 
 
 
+// Положение конвертика «новые SMS» в статус-строке: сразу за ярлыком
+// технологии или значком аплинка (Wi-Fi 23 px, кабель 17 px). К часам ближе
+// 8 px не идём. Одна функция на отрисовку и на зону тапа: раньше тап знал
+// только про ярлык RAT, и при аплинке по Wi-Fi конвертик рисовался на 35 px
+// правее зоны нажатия.
+function env_icon_x(kind, rat, no_sig, time_on, t_x) {
+    let lead = kind == "wifi" ? 23 : (kind == "wan" ? 17
+             : (rat == "" || rat == "-" ? 0 : twpx(rat, 2)));
+    let ex = (no_sig ? 4 : 50) + (lead > 0 ? lead + 8 : 0);
+    if (time_on && ex + ENV_W + 8 > t_x) ex = t_x - ENV_W - 8;
+    return ex;
+}
+
 function draw_status_row(y, o) {
     let d = st.data;
     let sig = sig_state();
@@ -3444,15 +3457,11 @@ function draw_status_row(y, o) {
     // Часы в шапке рисуем без зума (иначе крупноваты) - ширина по «сырому» кеглю.
     let t_x = int((LCD_W - tlen(tstr) * 12) / 2);
 
-    // Конвертик встаёт сразу за ярлыком/значком аплинка: место зависит от его
-    // ширины (значки Wi-Fi/RJ45 фиксированы). К часам ближе 8px не идём.
-    if (!o?.no_env && int(d?.sms_new ?? 0) > 0) {
-        let lead = kind == "wifi" ? 23 : (kind == "wan" ? 17
-                 : (rat == "" || rat == "-" ? 0 : twpx(rat, 2)));
-        let ex = (o?.no_sig ? 4 : rat_x) + (lead > 0 ? lead + 8 : 0);
-        if (o?.time && ex + ENV_W + 8 > t_x) ex = t_x - ENV_W - 8;
-        draw_env_icon(ex, y, 1, mono ? "#0A2A16" : null, mono);
-    }
+    // Конвертик встаёт сразу за ярлыком/значком аплинка; место считает
+    // env_icon_x - той же функцией пользуется обработчик тапа по шапке.
+    if (!o?.no_env && int(d?.sms_new ?? 0) > 0)
+        draw_env_icon(env_icon_x(kind, rat, o?.no_sig, o?.time, t_x), y, 1,
+                      mono ? "#0A2A16" : null, mono);
 
     if (o?.time)
         lcd_text_thin(t_x, y + 1, tstr, o?.time_color ?? C.white, bg, 2, "l", 1);
@@ -12522,7 +12531,10 @@ function handle_touch(tx, ty, tmove) {
         if (zig_ui_mode() == "peers") {
             let rows = zig_rows();
             let ay = GY + ZIG_HDR_H + GG;
-            if (length(rows) > 0) {
+            // Те же условия, что у отрисовки строк: пока идёт команда, чип
+            // занят или маячок выключен, на экране их нет - и тап по пустому
+            // месту не должен открывать пира по старому файлу.
+            if (length(rows) > 0 && !zig_busy() && !zig_held() && zig_cfg().beacon) {
                 let more = length(rows) > ZIG_ROWS;
                 let show = more ? ZIG_ROWS - 1 : length(rows);
                 let off = (st.zig.poff ?? 0) % length(rows);
@@ -12799,8 +12811,7 @@ function handle_touch(tx, ty, tmove) {
             st.page != "sms" && st.page != "sms1") {
             let rat = tcut(rat_label(st.data?.lte?.mode ?? ""), 4);
             let t_x = int((LCD_W - tlen(clock_str()) * 12) / 2);
-            let ex = 50 + (rat == "" || rat == "-" ? 0 : twpx(rat, 2) + 8);
-            if (ex + ENV_W + 8 > t_x) ex = t_x - ENV_W - 8;
+            let ex = env_icon_x(uplink_kind(), rat, false, true, t_x);
             if (in_rect(tx, ty, ex - 4, 0, ENV_W + 8, HDR_H)) {
                 st.sms_pg = 0;
                 st.sms_i = -1;
@@ -13151,7 +13162,9 @@ function handle_touch(tx, ty, tmove) {
                 let n = length(vpn_items(groups[st.vpn_exp]));
                 pages = int((n + VPN_MPP - 1) / VPN_MPP); if (pages < 1) pages = 1;
                 cur = st.vpn_mpg ?? 0;
-            } else if (length(groups) > 0) {
+            } else if (length(groups) > 0 && v.running > 0) {
+                // Пока служба не запущена, вместо карточек рисуется лог без
+                // стрелок листалки - и тап по краям полосы должен быть «назад».
                 pages = int((length(groups) + VPN_GPP - 1) / VPN_GPP); if (pages < 1) pages = 1;
                 cur = st.vpn_gpg ?? 0;
             }
@@ -13672,10 +13685,12 @@ function handle_touch(tx, ty, tmove) {
         }
         if (saver_style() == "clock") {
             let keys = [ "s", "m", "l" ];
-            let yb = 30 + length(rows) * 30;
+            // Зона нажатия - ровно нарисованная кнопка. Раньше y подменялся
+            // старой формулой 30 + ряды*30 из времён фиксированных рядов, а
+            // рисуются кнопки по растянутой сетке rows_rect - зона висела
+            // выше кнопок, и S/M/L срабатывали только по верхнему краю.
             for (let i = 0; i < 3; i++) {
                 let b = savercfg_size_btn(i);
-                if (!IS_ALMONDPLUS) b.y = yb;
                 if (in_rect(tx, ty, b.x, b.y, b.w, b.h)) {
                     svflag_set("clock_size", keys[i]);
                     draw_savercfg_page();
