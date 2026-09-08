@@ -627,6 +627,7 @@ static int set_cfg(int id, int val)
     return -1;
 }
 
+
 static void die(const char *msg)
 {
     remove("/tmp/.zig_flashing");
@@ -660,6 +661,9 @@ static int scan(int active, int duration, unsigned int mask)
             for (int k = 0; k < pn && k < 24; k++) fprintf(stderr, " %02X", pl[k]);
             fprintf(stderr, "\n");
         }
+        /* Маячков в эфире может быть больше, чем влезает в scan_json: без
+         * границы sizeof - jn заворачивался и snprintf писал за массив. */
+        if (jn >= (int)sizeof scan_json - 160) break;
         if (!active && pn >= 5 && pl[2] == 0x48) {
             jn += snprintf(scan_json + jn, sizeof scan_json - jn, "%s{\"ch\":%d,\"rssi\":%d}", first ? "" : ",", pl[3], (signed char)pl[4]);
             first = 0;
@@ -746,8 +750,11 @@ static int join_net(int pan, int channel, int power, const unsigned char *key)
        доверенного центра. Старое поведение (сетевой ключ прописан заранее)
        осталось запасным - ZIG_LEGACY_KEY=1. */
     int legacy = getenv("ZIG_LEGACY_KEY") && atoi(getenv("ZIG_LEGACY_KEY"));
-    int secmask = legacy ? 0x0300 : 0x0104;   /* 0x0100 предустановленный ключ,
-                                                 0x0004 - он глобальный TC-шный */
+    /* 0x0100 предустановленный ключ, 0x0004 - он глобальный TC-шный,
+       0x0800 - ключ сети принимаем только зашифрованным. Последнее и делает
+       вступление стандартным: координатор теперь отдаёт ключ именно так, а
+       открытый текст мы отвергаем, как и любое устройство Zigbee 3.0. */
+    int secmask = legacy ? 0x0300 : 0x0904;
     if (getenv("ZIG_SECMASK")) secmask = (int)strtol(getenv("ZIG_SECMASK"), NULL, 0);
     const unsigned char *lk = legacy ? key : zb_alliance09;
     /* Никакого выравнивания после маски быть не должно: EmberInitialSecurityState
@@ -782,7 +789,7 @@ static int join_net(int pan, int channel, int power, const unsigned char *key)
     par[n++] = 0x00;
     par[n++] = 0x00; par[n++] = 0x00;
     par[n++] = 0x00;
-    unsigned int chmask = 1u << channel;
+    unsigned int chmask = (channel >= 0 && channel < 32) ? (1u << channel) : 0;
     par[n++] = (unsigned char)(chmask & 0xFF);
     par[n++] = (unsigned char)((chmask >> 8) & 0xFF);
     par[n++] = (unsigned char)((chmask >> 16) & 0xFF);
@@ -799,6 +806,9 @@ static int join_net(int pan, int channel, int power, const unsigned char *key)
            up == 0x90 ? 1 : 0, st, jst, up, pan, channel);
     return up == 0x90 ? 0 : -1;
 }
+
+static int transient_key(void);
+static void stack_policies(void);
 
 static int form(int pan, int channel, int power, const unsigned char *key)
 {
@@ -819,9 +829,21 @@ static int form(int pan, int channel, int power, const unsigned char *key)
         if (!rf || fread(nk, 1, 16, rf) != 16) memcpy(nk, key, 16);
         if (rf) fclose(rf);
     }
-    const unsigned char *lk = legacy ? key : zb_alliance09;
-    int secmask = legacy ? 0x0200 : 0x0304;   /* + предустановленный глобальный
-                                                 link-ключ доверенного центра */
+    /* Предустановленный link-ключ у сети - случайный, а общеизвестный
+       ZigBeeAlliance09 кладётся временным ключом на время окна приёма: так
+       устроен centralized-режим Zigbee 3.0 и так делает homed. Раньше
+       общеизвестный ключ стоял предустановленным, и вместе с решением
+       «отдать ключ сети открытым текстом» это отваживало устройства 3.0. */
+    unsigned char rk[16];
+    {
+        FILE *kf = fopen("/dev/urandom", "r");
+        if (!kf || fread(rk, 1, 16, kf) != 16) memcpy(rk, zb_alliance09, 16);
+        if (kf) fclose(kf);
+    }
+    const unsigned char *lk = legacy ? key : rk;
+    /* 0x0084 хешированный link-ключ доверенного центра, 0x0100 ключ задан,
+       0x0200 сетевой ключ задан, 0x0800 ключ сети отдавать только шифрованным. */
+    int secmask = legacy ? 0x0200 : 0x0B84;
     if (getenv("ZIG_SECMASK")) secmask = (int)strtol(getenv("ZIG_SECMASK"), NULL, 0);
     /* Никакого выравнивания после маски быть не должно: EmberInitialSecurityState
        это bitmask(2) + preconfiguredKey(16) + networkKey(16) + seq(1) + eui(8).
@@ -852,7 +874,7 @@ static int form(int pan, int channel, int power, const unsigned char *key)
     par[n++] = 0x00;
     par[n++] = 0x00; par[n++] = 0x00;
     par[n++] = 0x00;
-    unsigned int chmask = 1u << channel;
+    unsigned int chmask = (channel >= 0 && channel < 32) ? (1u << channel) : 0;
     par[n++] = (unsigned char)(chmask & 0xFF);
     par[n++] = (unsigned char)((chmask >> 8) & 0xFF);
     par[n++] = (unsigned char)((chmask >> 16) & 0xFF);
@@ -867,13 +889,15 @@ static int form(int pan, int channel, int power, const unsigned char *key)
     }
     int pj = -1, pol = -1;
     if (fst == 0) {
-        int dec = getenv("ZIG_TCPOLICY") ? (int)strtol(getenv("ZIG_TCPOLICY"), NULL, 0) : 0x07;
+        int dec = getenv("ZIG_TCPOLICY") ? (int)strtol(getenv("ZIG_TCPOLICY"), NULL, 0) : 0x03;
+        stack_policies();
         unsigned char dp[2] = { 0x00, (unsigned char)dec };
         ezsp_cmd(0x55, dp, 2);
         for (int i = 0; i < 6; i++) {
             int pn = ezsp_read(pl, sizeof pl, 700);
             if (pn >= 4 && pl[2] == 0x55) { pol = pl[3]; break; }
         }
+        transient_key();
         unsigned char d1[1] = { 0xFF };
         ezsp_cmd(0x22, d1, 1);
         for (int i = 0; i < 6; i++) {
@@ -897,15 +921,99 @@ static int node_type(void)
     return -1;
 }
 
+
+/* Настройки чипа под приём чужих устройств. Взяты из homed - рабочего хоста
+   EZSP: без них стек живёт на заводских значениях, а они рассчитаны не на
+   спящие конечные устройства (те не успевают забрать ответ на ассоциацию,
+   пока он лежит в очереди косвенной передачи). Ставить можно только до
+   поднятия сети. */
+static void stack_tuning(void)
+{
+    set_cfg(0x38, 0x005A);   /* сколько секунд ждать повторный вход по общему ключу */
+    set_cfg(0x19, 0x0002);   /* кэш адресов доверенного центра */
+    set_cfg(0x1D, 0x0032);   /* задержка сборки фрагментов */
+    set_cfg(0x22, 0x0002);   /* порог сообщений о конфликте PAN */
+    set_cfg(0x12, 0x1E00);   /* сколько держать пакет для спящего (мс) */
+    set_cfg(0x13, 0x000E);   /* тайм-аут опроса конечного устройства */
+    set_cfg(0x1C, 0x0001);   /* окно фрагментации */
+    set_cfg(0x34, 0x0010);   /* очередь повторов */
+}
+
+/* Значение чипа: идентификатор, длина, содержимое. */
+static int set_val(int id, int len, unsigned int v)
+{
+    unsigned char pl[64], d[6];
+    int n = 0;
+    d[n++] = (unsigned char)id;
+    d[n++] = (unsigned char)len;
+    for (int i = 0; i < len && i < 4; i++) d[n++] = (unsigned char)((v >> (8 * i)) & 0xFF);
+    ezsp_cmd(0xAB, d, n);
+    for (int i = 0; i < 6; i++) {
+        int pn = ezsp_read(pl, sizeof pl, 600);
+        if (pn >= 4 && pl[2] == 0xAB) return pl[3];
+    }
+    return -1;
+}
+
+static void stack_values(void)
+{
+    set_val(0x3F, 1, 0x03);     /* поддержка удержания связи со спящими */
+    set_val(0x05, 2, 0x0052);   /* максимальный входящий пакет */
+    set_val(0x06, 2, 0x0052);   /* максимальный исходящий */
+    set_val(0x43, 2, 0x2710);   /* сколько живёт временный ключ (мс) */
+}
+
+/* Политики доверенного центра. Решение по вступлению - 0x03: пускать и
+   разрешать незащищённый повторный вход, но ключ сети отдавать только
+   зашифрованным. Раньше стояло 0x07, где к этому добавлялась отдача ключа
+   открытым текстом - устройства Zigbee 3.0 такой ключ не принимают. */
+static void stack_policies(void)
+{
+    unsigned char pl[64], dp[2];
+    static const unsigned char POL[3][2] = {
+        { 0x01, 0x12 },   /* изменение таблицы привязок */
+        { 0x05, 0x51 },   /* запрос ключа доверенного центра */
+        { 0x06, 0x60 },   /* запрос ключа приложения */
+    };
+    for (int i = 0; i < 3; i++) {
+        dp[0] = POL[i][0]; dp[1] = POL[i][1];
+        ezsp_cmd(0x55, dp, 2);
+        for (int k = 0; k < 6; k++) {
+            int pn = ezsp_read(pl, sizeof pl, 600);
+            if (pn >= 4 && pl[2] == 0x55) break;
+        }
+    }
+}
+
 static int tc_policy(void)
 {
     unsigned char pl[64];
-    int dec = getenv("ZIG_TCPOLICY") ? (int)strtol(getenv("ZIG_TCPOLICY"), NULL, 0) : 0x07;
+    int dec = getenv("ZIG_TCPOLICY") ? (int)strtol(getenv("ZIG_TCPOLICY"), NULL, 0) : 0x03;
     unsigned char dp[2] = { 0x00, (unsigned char)dec };
+    stack_policies();
     ezsp_cmd(0x55, dp, 2);
     for (int i = 0; i < 6; i++) {
         int pn = ezsp_read(pl, sizeof pl, 700);
         if (pn >= 4 && pl[2] == 0x55) return pl[3];
+    }
+    return -1;
+}
+
+
+/* Временный link-ключ на время окна приёма. Устройства Zigbee 3.0 вступают с
+   общеизвестным ключом ZigBeeAlliance09, и доверенный центр обязан положить
+   его в таблицу временных ключей ДО того, как откроет приём: без этого стек
+   не знает, чем разговаривать с незнакомцем, и вступление не идёт. Ключ
+   кладём на «кого угодно» - EUI из одних FF; так делают bellows и ZHA. */
+static int transient_key(void)
+{
+    unsigned char par[24], pl[64];
+    memset(par, 0xFF, 8);
+    memcpy(par + 8, zb_alliance09, 16);
+    ezsp_cmd(0xAF, par, 24);
+    for (int i = 0; i < 6; i++) {
+        int pn = ezsp_read(pl, sizeof pl, 700);
+        if (pn >= 4 && pl[2] == 0xAF) return pl[3];
     }
     return -1;
 }
@@ -1098,10 +1206,12 @@ static int peer_slot(const char *nm)
 #define CL_BASIC      0x0000
 #define CL_POWER      0x0001
 #define CL_TEMP       0x0402
+#define CL_HUM        0x0405
 #define CL_ALMOND      0xFC00
 /* Атрибут-команда в нашем кластере. Телеметрия занимает атрибуты 0..3 (части
  * одного пакета), команде отдан отдельный номер, чтобы приёмник не путал их. */
 #define ZATTR_CMD      8
+#define ZATTR_DEV      9
 
 static int aps_build(unsigned char *o, int cluster, int seq)
 {
@@ -1170,6 +1280,12 @@ static int mesh_send(int cluster, const unsigned char *zcl, int zn, int seq)
     for (int i = 0; i < 6; i++) {
         int pn = ezsp_read(pl, sizeof pl, 700);
         if (pn >= 4 && pl[2] == 0x36) return pl[3];
+        /* Ответа на передачу может не быть, и тогда наверху видно только
+           «статус -1». Показываем, что чип присылал вместо него: пусто -
+           значит команду он вовсе не принял. */
+        if (getenv("ZIG_DEBUG"))
+            fprintf(stderr, "ждём ответ на рассылку: кадр %s%02X\n",
+                    pn >= 3 ? "0x" : "нет ", pn >= 3 ? pl[2] : 0);
     }
     return -1;
 }
@@ -1223,8 +1339,308 @@ static int mesh_endpoint(void)
  * не видят, весь обмен идёт через него. */
 static int g_coord;
 
+/* ===== Чужие устройства Zigbee =========================================
+ * Соседи-Almond носят свой кластер 0xFC00, а покупной датчик говорит на
+ * стандартном языке: представляется по ZDO и шлёт отчёты ZCL. Держим их
+ * отдельным списком - у них нет ни имени, ни наших метрик, зато есть адрес,
+ * показания и батарея.
+ */
+#define ZDEV_MAX 16
+
+struct zdev {
+    unsigned int nwk;
+    unsigned char eui[8];
+    int has_eui;
+    int temp, hum, batt, volt;      /* сотые °C, сотые %, полпроцента, 100 мВ */
+    int has_temp, has_hum, has_batt, has_volt;
+    int rssi, lqi;
+    long seen;
+    int relayed;                    /* показания пришли по мешу, а не от нас */
+    char model[24];
+};
+
+static struct zdev zdv[ZDEV_MAX];
+static int nzdv;
+static int zdv_changed;             /* состав списка поменялся - пора сохранить */
+
+static struct zdev *zdev_slot(unsigned int nwk)
+{
+    for (int i = 0; i < nzdv; i++)
+        if (zdv[i].nwk == nwk) return &zdv[i];
+    if (nzdv >= ZDEV_MAX) return NULL;
+    struct zdev *d = &zdv[nzdv++];
+    memset(d, 0, sizeof *d);
+    d->nwk = nwk;
+    zdv_changed = 1;
+    return d;
+}
+
+/* Значение атрибута ZCL по типу. Возвращает длину значения или -1. */
+static int zcl_val(const unsigned char *v, int left, int type, long *out)
+{
+    int n;
+    switch (type) {
+    case 0x10: case 0x18: case 0x20: case 0x28: case 0x30: n = 1; break;
+    case 0x21: case 0x29: case 0x31: n = 2; break;
+    case 0x22: case 0x2A: n = 3; break;
+    case 0x23: case 0x2B: case 0x39: n = 4; break;
+    case 0x42: case 0x41:                   /* строка: длина первым байтом */
+        if (left < 1 || v[0] > left - 1) return -1;
+        *out = v[0];
+        return v[0] + 1;
+    default: return -1;
+    }
+    if (left < n) return -1;
+    long x = 0;
+    for (int i = n - 1; i >= 0; i--) x = (x << 8) | v[i];
+    if ((type == 0x28 || type == 0x29 || type == 0x2A || type == 0x2B)
+        && (v[n - 1] & 0x80))
+        x -= 1L << (8 * n);                 /* знаковые */
+    *out = x;
+    return n;
+}
+
+/* Отчёт ZCL от чужого устройства: кадр целиком, вместе с заголовком. */
+static void zcl_parse(struct zdev *d, int cluster, const unsigned char *z, int zn)
+{
+    if (zn < 3) return;
+    int fc = z[0], p = 1;
+    if (fc & 0x04) p += 2;                  /* код изготовителя */
+    p += 1;                                 /* номер по порядку */
+    if (p >= zn) return;
+    int cmd = z[p++];
+    /* 0x0A отчёт об атрибутах, 0x01 ответ на чтение (там ещё байт статуса) */
+    if (cmd != 0x0A && cmd != 0x01) return;
+    while (p + 3 <= zn) {
+        int attr = z[p] | (z[p + 1] << 8);
+        p += 2;
+        if (cmd == 0x01) {
+            if (z[p++] != 0) continue;      /* статус: 0 - значение дальше */
+            if (p >= zn) break;
+        }
+        int type = z[p++];
+        long v = 0;
+        int used = zcl_val(z + p, zn - p, type, &v);
+        if (used < 0) break;
+        if (type == 0x42 || type == 0x41) {
+            if (cluster == CL_BASIC && attr == 0x0005) {   /* модель */
+                int len = (int)v;
+                if (len > (int)sizeof d->model - 1) len = (int)sizeof d->model - 1;
+                for (int i = 0; i < len; i++) {
+                    unsigned char c = z[p + 1 + i];
+                    if (c == '"' || c == '\\') c = '.';
+                    d->model[i] = (c >= 32 && c < 127) ? (char)c : '.';
+                }
+                d->model[len] = 0;
+                zdv_changed = 1;
+            }
+        } else if (cluster == CL_TEMP && attr == 0x0000) {
+            d->temp = (int)v; d->has_temp = 1;
+        } else if (cluster == CL_HUM && attr == 0x0000) {
+            d->hum = (int)v; d->has_hum = 1;
+        } else if (cluster == CL_POWER && attr == 0x0021) {
+            d->batt = (int)v; d->has_batt = 1;
+        } else if (cluster == CL_POWER && attr == 0x0020) {
+            d->volt = (int)v; d->has_volt = 1;
+        }
+        p += used;
+    }
+}
+
+/* Разбор колбэков вступления. Без него чужое устройство не видно ни на одном
+ * шаге: наш приёмник разбирает только свой кластер, а «пришёл новый узел»
+ * стек отдаёт отдельными кадрами, которые молча выбрасывались. Пишем в stderr
+ * под ZIG_DEBUG - это диагностика, в JSON ей не место. */
+static const char *dev_update_name(int st)
+{
+    switch (st) {
+    case 0: return "защищённый повторный вход";
+    case 1: return "открытое вступление";
+    case 2: return "ушёл из сети";
+    case 3: return "открытый повторный вход";
+    case 4: return "защищённое вступление";
+    case 5: return "отказ доверенного центра";
+    default: return "?";
+    }
+}
+
+static const char *join_decision_name(int d)
+{
+    switch (d) {
+    case 0: return "ключ уже есть у устройства";
+    case 1: return "ключ отдан открытым текстом";
+    case 2: return "отказано";
+    case 3: return "ничего не делаем";
+    default: return "?";
+    }
+}
+
+static void eui_str(const unsigned char *e, char *out)
+{
+    /* EUI приезжает младшим байтом вперёд - разворачиваем, чтобы совпадало с
+       тем, что написано на самом устройстве. */
+    for (int i = 0; i < 8; i++)
+        snprintf(out + i * 2, 3, "%02X", e[7 - i]);
+}
+
+static void join_debug(const unsigned char *pl, int pn)
+{
+    if (!getenv("ZIG_DEBUG") || pn < 3) return;
+    int id = pl[2];
+    char eui[20] = "";
+    if (id == 0x24 && pn >= 17) {
+        eui_str(pl + 5, eui);
+        fprintf(stderr, "вступление: узел %04X eui %s состояние %d (%s) решение %d (%s) родитель %04X\n",
+                pl[3] | (pl[4] << 8), eui, pl[13], dev_update_name(pl[13]),
+                pl[14], join_decision_name(pl[14]), pl[15] | (pl[16] << 8));
+    } else if (id == 0x23 && pn >= 16) {
+        eui_str(pl + 7, eui);
+        fprintf(stderr, "ребёнок: слот %d %s узел %04X eui %s тип %d\n",
+                pl[3], pl[4] ? "пришёл" : "ушёл", pl[5] | (pl[6] << 8), eui, pl[15]);
+    } else if (id == 0x19 && pn >= 4) {
+        fprintf(stderr, "стек: статус 0x%02X\n", pl[3]);
+    } else if (id != 0x45) {
+        fprintf(stderr, "кадр 0x%02X:", id);
+        for (int k = 3; k < pn && k < 24; k++) fprintf(stderr, " %02X", pl[k]);
+        fprintf(stderr, "\n");
+    }
+}
+
+
+
+
+/* ===== Раздача показаний по мешу =======================================
+ * Датчик привязан к тому, кто его принял: отчёты уходят координатору, и
+ * соседние Almond про него не знают. Координатор пересылает список своих
+ * устройств тем же кластером, что и телеметрию, - тогда датчик виден на
+ * экране каждого аппарата сети.
+ */
+static int zdev_pack(const struct zdev *d, unsigned char *v, int max, long now)
+{
+    int n = 0;
+    if (max < 24) return 0;
+    v[n++] = 1;                                     /* версия записи */
+    v[n++] = (unsigned char)(d->nwk & 0xFF);
+    v[n++] = (unsigned char)((d->nwk >> 8) & 0xFF);
+    memcpy(v + n, d->eui, 8); n += 8;
+    v[n++] = (unsigned char)((d->has_temp ? 1 : 0) | (d->has_hum ? 2 : 0)
+                             | (d->has_batt ? 4 : 0) | (d->has_volt ? 8 : 0));
+    v[n++] = (unsigned char)(d->temp & 0xFF);
+    v[n++] = (unsigned char)((d->temp >> 8) & 0xFF);
+    v[n++] = (unsigned char)(d->hum & 0xFF);
+    v[n++] = (unsigned char)((d->hum >> 8) & 0xFF);
+    v[n++] = (unsigned char)d->batt;
+    v[n++] = (unsigned char)d->volt;
+    long age = d->seen ? now - d->seen : 65535;
+    if (age < 0) age = 0;
+    if (age > 65535) age = 65535;
+    v[n++] = (unsigned char)(age & 0xFF);
+    v[n++] = (unsigned char)((age >> 8) & 0xFF);
+    v[n++] = (unsigned char)(signed char)d->rssi;
+    v[n++] = (unsigned char)d->lqi;
+    int ml = (int)strlen(d->model);
+    if (ml > max - n - 1) ml = max - n - 1;
+    if (ml < 0) ml = 0;
+    v[n++] = (unsigned char)ml;
+    memcpy(v + n, d->model, (size_t)ml); n += ml;
+    return n;
+}
+
+static void zdev_unpack(const unsigned char *v, int n, long now)
+{
+    if (n < 21 || v[0] != 1) return;
+    struct zdev *d = zdev_slot((unsigned int)(v[1] | (v[2] << 8)));
+    if (!d) return;
+    memcpy(d->eui, v + 3, 8);
+    d->has_eui = 1;
+    int fl = v[11];
+    d->has_temp = fl & 1; d->has_hum = (fl >> 1) & 1;
+    d->has_batt = (fl >> 2) & 1; d->has_volt = (fl >> 3) & 1;
+    d->temp = (short)(v[12] | (v[13] << 8));
+    d->hum = (unsigned short)(v[14] | (v[15] << 8));
+    d->batt = v[16];
+    d->volt = v[17];
+    long age = v[18] | (v[19] << 8);
+    d->seen = now - age;
+    d->rssi = (signed char)v[20];
+    d->lqi = n > 21 ? v[21] : 0;
+    d->relayed = 1;                                 /* не наш ребёнок - не опрашиваем */
+    if (n > 22) {
+        int ml = v[22];
+        if (ml > (int)sizeof d->model - 1) ml = (int)sizeof d->model - 1;
+        if (ml > n - 23) ml = n - 23;
+        for (int i = 0; i < ml; i++) {
+            unsigned char c = v[23 + i];
+            if (c == '"' || c == '\\') c = '.';
+            d->model[i] = (c >= 32 && c < 127) ? (char)c : '.';
+        }
+        if (ml > 0) d->model[ml] = 0;
+    }
+}
+
+/* Спросить у устройства значения самому. Спящий датчик отчитывается редко -
+   раз в час или по изменению, - поэтому после перезапуска демона его показания
+   пропадали бы до следующего отчёта. Запрос уходит одноадресно и лежит в
+   очереди чипа, пока датчик не проснётся и не опросит родителя. */
+static int zcl_read_attrs(unsigned int dest, int cluster, const int *attrs, int na, int seq)
+{
+    unsigned char z[32];
+    int n = 0;
+    z[n++] = 0x00;                  /* обычная команда, ответ ждём */
+    z[n++] = (unsigned char)seq;
+    z[n++] = 0x00;                  /* чтение атрибутов */
+    for (int i = 0; i < na && n + 2 <= (int)sizeof z; i++) {
+        z[n++] = (unsigned char)(attrs[i] & 0xFF);
+        z[n++] = (unsigned char)((attrs[i] >> 8) & 0xFF);
+    }
+    return mesh_unicast(dest, cluster, z, n, seq);
+}
+
+/* Обойти все известные устройства и попросить показания. */
+static void zdev_poll(int *seq)
+{
+    static const int A_ONE[1] = { 0x0000 };
+    static const int A_PWR[2] = { 0x0020, 0x0021 };
+    static const int A_BAS[2] = { 0x0004, 0x0005 };
+    for (int i = 0; i < nzdv; i++) {
+        unsigned int id = zdv[i].nwk;
+        if (zdv[i].relayed) continue;   /* чужой ребёнок - спрашивает его хозяин */
+        zcl_read_attrs(id, CL_TEMP, A_ONE, 1, (*seq)++);
+        zcl_read_attrs(id, CL_HUM, A_ONE, 1, (*seq)++);
+        zcl_read_attrs(id, CL_POWER, A_PWR, 2, (*seq)++);
+        if (!zdv[i].model[0])
+            zcl_read_attrs(id, CL_BASIC, A_BAS, 2, (*seq)++);
+    }
+}
+
+/* Список устройств переживает перезапуск демона: чип держит таблицу детей в
+   своих токенах, поэтому при старте берём адреса и EUI оттуда, а показания
+   дособерутся с первым же отчётом. */
+static void zdev_seed(void)
+{
+    unsigned char pl[64], d[1];
+    for (int idx = 0; idx < 8; idx++) {
+        d[0] = (unsigned char)idx;
+        ezsp_cmd(0x4A, d, 1);
+        for (int i = 0; i < 6; i++) {
+            int pn = ezsp_read(pl, sizeof pl, 500);
+            if (pn < 4 || pl[2] != 0x4A) continue;
+            if (pl[3] == 0 && pn >= 15) {
+                struct zdev *z = zdev_slot((unsigned int)(pl[13] | (pl[14] << 8)));
+                if (z) {
+                    memcpy(z->eui, pl + 4, 8);
+                    z->has_eui = 1;
+                    if (!z->seen) z->seen = (long)time(NULL);
+                }
+            }
+            break;
+        }
+    }
+}
+
 static void mesh_rx(const unsigned char *pl, int pn, const char *me)
 {
+    join_debug(pl, pn);
     if (pn >= 20 && pl[2] == 0x45) {
         int cl = pl[6] | (pl[7] << 8);
         int lqi = pl[15], rssi = (signed char)pl[16];
@@ -1233,10 +1649,42 @@ static void mesh_rx(const unsigned char *pl, int pn, const char *me)
         const unsigned char *b = pl + 22;
         if (getenv("ZIG_DEBUG"))
     fprintf(stderr, "принято: кластер %04X от %04X, длина %d\n", cl, src, ln);
+        /* Чужое устройство: представление по ZDO и отчёты ZCL. Свой кластер
+           разбирается ниже отдельно - у соседей-Almond свой формат. */
+        if (cl != CL_ALMOND && src != 0x0000 && ln > 0 && 22 + ln <= pn) {
+            int prof = pl[4] | (pl[5] << 8);
+            if (prof == 0x0000 && cl == 0x0013 && ln >= 11) {
+                /* Представление: номер по порядку, адрес в сети, EUI, умения */
+                struct zdev *d = zdev_slot((unsigned int)(b[1] | (b[2] << 8)));
+                if (d) {
+                    memcpy(d->eui, b + 3, 8);
+                    d->has_eui = 1;
+                    d->rssi = rssi; d->lqi = lqi;
+                    d->seen = (long)time(NULL);
+                    zdv_changed = 1;
+                }
+            } else if (prof == 0x0104) {
+                struct zdev *d = zdev_slot(src);
+                if (d) {
+                    zcl_parse(d, cl, b, ln);
+                    d->rssi = rssi; d->lqi = lqi;
+                    d->seen = (long)time(NULL);
+                }
+            }
+            return;
+        }
         if (cl == CL_ALMOND && ln >= 8 && 22 + ln <= pn && b[2] == 0x0A) {
     const unsigned char *a = b + 3;
     int alen = ln - 3;
     int attr = a[0] | (a[1] << 8);
+    if (attr == ZATTR_DEV && alen >= 4 && a[2] == 0x41) {
+        /* Список устройств от координатора: у себя мы такие записи не
+           перезаписываем своими же - свои свежее. */
+        int blen = a[3];
+        if (blen >= 21 && blen <= alen - 4 && !g_coord)
+            zdev_unpack(a + 4, blen, (long)time(NULL));
+        return;
+    }
     if (attr == ZATTR_CMD && alen >= 4 && a[2] == 0x41) {
         int blen = a[3];
         const unsigned char *v = a + 4;
@@ -1259,6 +1707,10 @@ static void mesh_rx(const unsigned char *pl, int pn, const char *me)
                             if (strcmp(pr[j].name, dn) || !pr[j].src) continue;
                             unsigned char z2[96];
                             int zn2 = zcl_report(z2, rseq);
+                            /* blen приходит из эфира (до 163): без проверки
+                             * копия уезжала за z2 - переполнение стека от
+                             * любого узла сети. */
+                            if (zn2 + 4 + blen > (int)sizeof z2) break;
                             zcl_attr_bytes(z2, &zn2, ZATTR_CMD, v, blen);
                             mesh_unicast(pr[j].src, CL_ALMOND, z2, zn2, rseq++);
                             if (getenv("ZIG_DEBUG"))
@@ -1347,6 +1799,7 @@ int main(int argc, char **argv)
 
     int prof = set_cfg(0x0C, 2);
     set_cfg(0x0D, 5);
+    stack_tuning();
     const char *txm = getenv("ZIG_TXMODE");
     int txmode = txm ? atoi(txm) : 1;
     int txst = set_cfg(0x17, txmode);
@@ -1361,6 +1814,8 @@ int main(int argc, char **argv)
             if (pn >= 4 && cpl[2] == 0xAB) { cca_st = cpl[3]; break; }
         }
     }
+
+    stack_values();
 
     const char *gp = getenv("ZIG_GPIO");
     if (gp) {
@@ -1425,11 +1880,13 @@ int main(int argc, char **argv)
                ver, reason, proto, stype, init, prof, txmode, txst, cca, cca_st,
                (sver >> 12) & 15, (sver >> 8) & 15, (sver >> 4) & 15, sver & 15);
     } else if (!strcmp(cmd, "escan")) {
-        unsigned int mk = argc > 3 ? (1u << atoi(argv[3])) : 0x07FFF800u;
+        int chv = argc > 3 ? atoi(argv[3]) : -1;
+        unsigned int mk = (chv >= 0 && chv < 32) ? (1u << chv) : 0x07FFF800u;
         scan(0, argc > 2 ? atoi(argv[2]) : 3, mk);
         fputs(scan_json, stdout);
     } else if (!strcmp(cmd, "ascan")) {
-        unsigned int mk = argc > 3 ? (1u << atoi(argv[3])) : 0x07FFF800u;
+        int chv = argc > 3 ? atoi(argv[3]) : -1;
+        unsigned int mk = (chv >= 0 && chv < 32) ? (1u << chv) : 0x07FFF800u;
         int tries = getenv("ZIG_TRIES") ? atoi(getenv("ZIG_TRIES")) : 6;
         int best = -1;
         char keep[4096] = "";
@@ -1487,9 +1944,10 @@ int main(int argc, char **argv)
     } else if (!strcmp(cmd, "permit")) {
         int secs = argc > 2 ? atoi(argv[2]) : 254;
         int pol = tc_policy();
+        int tk = transient_key();
         int st = permit_join(secs);
-        printf("{\"ok\":%d,\"policy\":%d,\"permit\":%d,\"seconds\":%d}\n",
-               st == 0 ? 1 : 0, pol, st, secs);
+        printf("{\"ok\":%d,\"policy\":%d,\"key\":%d,\"permit\":%d,\"seconds\":%d}\n",
+               st == 0 ? 1 : 0, pol, tk, st, secs);
     } else if (!strcmp(cmd, "children")) {
         unsigned char pl[64], d[1];
         printf("{\"ok\":1,\"children\":[");
@@ -1500,10 +1958,17 @@ int main(int argc, char **argv)
             for (int i = 0; i < 6; i++) {
                 int pn = ezsp_read(pl, sizeof pl, 500);
                 if (pn >= 4 && pl[2] == 0x4A) {
-                    if (pl[3] == 0 && pn >= 14) {
-                        printf("%s{\"idx\":%d,\"id\":%d,\"eui\":\"%02X%02X%02X%02X%02X%02X%02X%02X\"}",
-                               first ? "" : ",", idx, pl[4] | (pl[5] << 8),
-                               pl[13], pl[12], pl[11], pl[10], pl[9], pl[8], pl[7], pl[6]);
+                    /* У EZSP v8 ответ getChildData это статус и структура
+                       EmberChildData: EUI(8), тип(1), адрес в сети(2). Раньше
+                       смещения были от старой версии - номер узла выходил
+                       мусорный, а адрес сдвинутый на два байта. */
+                    if (pl[3] == 0 && pn >= 15) {
+                        printf("%s{\"idx\":%d,\"id\":%d,\"type\":%d,"
+                               "\"eui\":\"%02X%02X%02X%02X%02X%02X%02X%02X\"}",
+                               first ? "" : ",", idx,
+                               pl[13] | (pl[14] << 8), pl[12],
+                               pl[11], pl[10], pl[9], pl[8],
+                               pl[7], pl[6], pl[5], pl[4]);
                         first = 0;
                     }
                     break;
@@ -1522,6 +1987,7 @@ int main(int argc, char **argv)
 
         int ep = mesh_endpoint();
         init = network_init();
+        zdev_seed();
         /* Ключ телеметрии - сетевой ключ из чипа: он один на всю сеть и
            приезжает вступающему автоматически. Файл нужен только маячку. */
         zkey_load();
@@ -1591,7 +2057,7 @@ int main(int argc, char **argv)
                 }
             }
         }
-        long last_save = 0, last_relay = 0;
+        long last_save = 0, last_relay = 0, last_poll = 0;
         int seq = 0;
         int coord = node_type() == 1;
         g_coord = coord;
@@ -1684,6 +2150,14 @@ int main(int argc, char **argv)
                открывает приём и тут же идёт сканировать с соседнего аппарата -
                ждать полминуты, пока мы заметим, он не станет. Само окно потом
                продлеваем раз в полминуты. */
+            /* Раз в пять минут спрашиваем показания сами: спящий датчик
+               отчитывается по своему расписанию, и после перезапуска демона
+               строка на экране иначе стояла бы пустой до следующего отчёта. */
+            if (nzdv > 0 && (last_poll == 0 || now - last_poll >= 300)) {
+                last_poll = now;
+                zdev_poll(&seq);
+            }
+
             if (coord && now - last_permit >= 2) {
                 long until = 0;
                 FILE *pf2 = fopen("/tmp/.zig_permit_until", "r");
@@ -1694,7 +2168,13 @@ int main(int argc, char **argv)
                 }
                 long left = until - now;
                 if (left > 0 && (!permit_on || now - last_permit >= 30)) {
-                    permit_join(left > 60 ? 60 : (int)left);
+                    /* Ключ живёт минуты и слетает при сбросе чипа - кладём
+                       заново вместе с каждым продлением окна. */
+                    int tst = transient_key();
+                    int pst = permit_join(left > 60 ? 60 : (int)left);
+                    if (getenv("ZIG_DEBUG"))
+                        fprintf(stderr, "окно приёма: осталось %ld, ключ %d, статус %d\n",
+                                left, tst, pst);
                     permit_on = 1;
                     last_permit = now;
                 } else if (left <= 0 && permit_on) {
@@ -1715,6 +2195,21 @@ int main(int argc, char **argv)
             }
             if (now - last_tx >= period) {
                 last_tx = now;
+                /* Свои устройства раздаём соседям: у них своих нет, а датчик
+                   на экране должен быть у всех. */
+                if (coord) {
+                    for (int i = 0; i < nzdv; i++) {
+                        if (zdv[i].relayed) continue;
+                        unsigned char v[64];
+                        int vn = zdev_pack(&zdv[i], v, sizeof v, now);
+                        if (vn <= 0) continue;
+                        unsigned char z[96];
+                        int zn = zcl_report(z, seq);
+                        if (zn + 4 + vn > (int)sizeof z) continue;
+                        zcl_attr_bytes(z, &zn, ZATTR_DEV, v, vn);
+                        mesh_send(CL_ALMOND, z, zn, seq++);
+                    }
+                }
                 unsigned char tele[96];
                 int tn = tele_pack(tele, sizeof tele);
                 char buf[1024] = "";
@@ -1828,6 +2323,23 @@ int main(int argc, char **argv)
                                    "\"age\":%ld,\"m\":{%s}}",
                                 j ? "," : "", pr[j].name, pr[j].rssi, pr[j].lqi, pr[j].src,
                                 now - pr[j].seen, all);
+                    }
+                    fprintf(f, "],\"devices\":[");
+                    for (int j = 0; j < nzdv; j++) {
+                        struct zdev *d = &zdv[j];
+                        char eui[20] = "";
+                        if (d->has_eui)
+                            for (int k = 0; k < 8; k++)
+                                snprintf(eui + k * 2, 3, "%02X", d->eui[7 - k]);
+                        fprintf(f, "%s{\"id\":%u,\"eui\":\"%s\",\"model\":\"%s\","
+                                   "\"rssi\":%d,\"lqi\":%d,\"age\":%ld",
+                                j ? "," : "", d->nwk, eui, d->model,
+                                d->rssi, d->lqi, now - d->seen);
+                        if (d->has_temp) fprintf(f, ",\"temp\":%d", d->temp);
+                        if (d->has_hum) fprintf(f, ",\"hum\":%d", d->hum);
+                        if (d->has_batt) fprintf(f, ",\"batt\":%d", d->batt);
+                        if (d->has_volt) fprintf(f, ",\"volt\":%d", d->volt);
+                        fprintf(f, "}");
                     }
                     fprintf(f, "]}\n");
                     fclose(f);
@@ -2273,7 +2785,8 @@ int main(int argc, char **argv)
                                  | ((unsigned int)pl[19] << 16) | ((unsigned int)pl[20] << 24);
                 int plen = len - 15 - 2 - (sec == ZSEC_CCM ? ZSEC_MIC : 0);
                 unsigned char body[160];
-                if (plen < 2 || plen > (int)sizeof body || 21 + plen > pn) continue;
+                if (plen < 2 || plen > (int)sizeof body ||
+                    21 + plen + (sec == ZSEC_CCM ? ZSEC_MIC : 0) > pn) continue;
                 memcpy(body, pl + 21, plen);
                 if (sec == ZSEC_CCM) {
                     if (!zkey_ok) continue;

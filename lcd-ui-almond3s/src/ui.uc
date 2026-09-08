@@ -683,6 +683,13 @@ let TR_RU = {
     "Widgets": "Виджеты",
     "Air": "Эфир",
     "Peers": "Соседи",
+    "charge": "заряд",
+    "no readings yet": "показаний пока нет",
+    "device gone": "устройство пропало",
+    "long silent": "давно молчит",
+    "Temperature": "Температура",
+    "Humidity": "Влажность",
+    "Address": "Адрес",
     "Signal": "Сигнал",
     "Key": "Ключ",
     "plain": "без шифра",
@@ -7918,6 +7925,18 @@ function zig_rows() {
                      rssi: int(+(pp.rssi ?? 0)), lqi: int(+(pp.lqi ?? 0)),
                      age: int(+(pp.age ?? 999)), pi: i });
     }
+    // Чужие устройства идут после соседей: у них нет наших метрик, зато есть
+    // показания. Имя - модель, если устройство её назвало, иначе адрес в сети.
+    let devs = type(d?.devices) == "array" ? d.devices : [];
+    for (let i = 0; i < length(devs); i++) {
+        let dv = devs[i];
+        let nm = (dv.model != null && dv.model != "") ? dv.model
+               : sprintf("%04X", int(+(dv.id ?? 0)));
+        push(rows, { name: nm, self: false, coord: false, dev: true, di: i,
+                     rssi: int(+(dv.rssi ?? 0)), lqi: int(+(dv.lqi ?? 0)),
+                     age: int(+(dv.age ?? 999)),
+                     temp: dv.temp, hum: dv.hum, batt: dv.batt, pi: -2 });
+    }
     return rows;
 }
 
@@ -8066,7 +8085,9 @@ function draw_zigbee_page() {
             let ap = IS_ALMONDPLUS;
             for (let k = 0; k < show; k++) {
                 let n = rows[(off + k) % length(rows)], y = ay + 6 + k * ZIG_ROW_STEP;
-                let fresh = n.self || n.age < 30;
+                // Датчик на батарейке отчитывается редко - для него порог
+                // свежести свой, иначе строка почти всегда серая.
+                let fresh = n.self || n.age < (n.dev ? 7200 : 30);
                 // Цвет говорит сам: синий - координатор (и когда это мы тоже),
                 // зелёный - этот аппарат, белый - живой сосед, тусклый - давно
                 // не слышно. Подпись «это устройство» лишняя.
@@ -8076,6 +8097,23 @@ function draw_zigbee_page() {
                 lcd_text(GX + 26, y, tcut(n.name, ap ? 20 : 12), col, C.widget, 1);
                 if (n.self) continue;
                 let zc = fresh ? zig_rssi_col(n.rssi) : C.dim;
+                if (n.dev) {
+                    // У датчика вместо метрик - его показания. Полоса сигнала
+                    // тут лишняя: места хватает ровно на цифры, а они и есть
+                    // то, ради чего устройство заводили.
+                    let vs = "";
+                    if (n.temp != null)
+                        vs += sprintf("%.1f°", int(+n.temp) / 100.0);
+                    if (n.hum != null)
+                        vs += sprintf("%s%d%%", vs != "" ? "  " : "", int(int(+n.hum) / 100));
+                    if (n.batt != null)
+                        vs += sprintf("%s%s %d%%", vs != "" ? "  " : "",
+                                      tr("charge"), int(int(+n.batt) / 2));
+                    lcd_text(GX + (ap ? 170 : 110), y, vs != "" ? vs : tr("no readings yet"),
+                             fresh ? C.white : C.dim, C.widget, 1);
+                    lcd_text(GX + (ap ? 390 : 250), y, sprintf("%d dBm", n.rssi), zc, C.widget, 1);
+                    continue;
+                }
                 seg_bar(GX + (ap ? 170 : 110), y, ap ? 120 : 60, 7, zig_rssi_bar(n.rssi),
                         zc, C.btn, "zl" + n.name);
                 lcd_text(GX + (ap ? 310 : 180), y, sprintf("%d dBm", n.rssi), zc, C.widget, 1);
@@ -8232,6 +8270,75 @@ function zp_box(c, r, cw) {
 function zp_act(i) {
     let w = int((GW - 2 * GG) / 3);
     return { x: GX + i * (w + GG), y: BACK_Y + 2, w: w, h: BACK_H - 4 };
+}
+
+
+// Карточка чужого датчика: то же расположение, что у соседа-Almond, но здесь
+// нет наших метрик - только то, что устройство отдаёт по стандарту.
+function zdev_name(dv) {
+    let mo = (dv?.model != null && dv.model != "") ? dv.model : null;
+    let id = sprintf("%04X", int(+(dv?.id ?? 0)));
+    return mo != null ? sprintf("%s (%s)", mo, id) : id;
+}
+
+function draw_zigdev_page() {
+    lcd_clear(C.bg);
+    let d = zig_json(ZIG_PEERS);
+    let devs = type(d?.devices) == "array" ? d.devices : [];
+    let dv = devs[st.zig?.dev ?? 0];
+    if (dv == null) {
+        draw_header(tr("Zigbee"));
+        lcd_text(GX + 12, GY + 20, tr("device gone"), C.ontop_dim, C.bg, 2);
+        draw_back();
+        lcd_flush();
+        return;
+    }
+    draw_header(tcut(zdev_name(dv), 18));
+
+    let o = { card: C.widget, dim: C.dim, fg: C.white, bg: C.bg };
+    let age = int(+(dv.age ?? 999));
+    let fresh = age < 600;
+
+    let b = zp_box(0, 0, 2);
+    if (dv.temp != null)
+        dash_gauge(b, o, A_ORANGE, tr("Temp"),
+                   sprintf("%.1f°C", int(+dv.temp) / 100.0),
+                   clampi(int((int(+dv.temp) / 100 + 10) * 100 / 50), 0, 100), A_ORANGE);
+    else { dash_card(b, o, C.dim); dash_lab(b, o, tr("Temp")); dash_val(b, o, "--", C.dim); }
+
+    b = zp_box(2, 0, 2);
+    if (dv.hum != null)
+        dash_gauge(b, o, A_CYAN, tr("Humidity"),
+                   sprintf("%d%%", int(int(+dv.hum) / 100)),
+                   clampi(int(int(+dv.hum) / 100), 0, 100), A_CYAN);
+    else { dash_card(b, o, C.dim); dash_lab(b, o, tr("Humidity")); dash_val(b, o, "--", C.dim); }
+
+    b = zp_box(0, 1, 2);
+    if (dv.batt != null) {
+        let pc = clampi(int(int(+dv.batt) / 2), 0, 100);
+        dash_gauge(b, o, dash_lvl_col(pc), tr("Battery"), sprintf("%d%%", pc), pc,
+                   dash_lvl_col(pc));
+        if (dv.volt != null)
+            dash_right(b, o, b.y + 6, sprintf("%.1f V", int(+dv.volt) / 10.0), C.gray);
+    } else { dash_card(b, o, C.dim); dash_lab(b, o, tr("Battery")); dash_val(b, o, "--", C.dim); }
+
+    b = zp_box(2, 1, 2);
+    let rs = int(+(dv.rssi ?? 0));
+    let rc = fresh ? zig_rssi_col(rs) : C.dim;
+    dash_gauge(b, o, rc, tr("Signal"), sprintf("%d dBm", rs),
+               zig_rssi_bar(rs), rc);
+
+    b = zp_box(0, 2, 4);
+    dash_card(b, o, C.border);
+    dash_lab(b, o, tr("Address"));
+    let eui = (dv.eui != null && dv.eui != "") ? dv.eui : "--";
+    dash_val(b, o, eui, C.gray);
+    dash_right(b, o, b.y + 6,
+               fresh ? sprintf("%d %s", age, tr("sec")) : tr("long silent"),
+               fresh ? C.gray : C.orange);
+
+    draw_back();
+    lcd_flush();
 }
 
 function draw_zigpeer_page() {
@@ -10776,11 +10883,13 @@ let ZP_CACHE = null, ZP_TS = 0;
 
 let DC_METS = [
     { k: "sig",  l: "Signal",  a: "#10B981" }, { k: "batt", l: "Battery", a: "#10B981" },
-    { k: "temp", l: "Temp",    a: "#E8853A" }, { k: "cpu",  l: "CPU",     a: "#58A6FF" },
+    { k: "temp", l: "Temperature", a: "#E8853A" }, { k: "hum", l: "Humidity", a: "#58A6FF" },
+    { k: "cpu",  l: "CPU",     a: "#58A6FF" },
     { k: "mem",  l: "Memory",  a: "#58A6FF" }, { k: "ping", l: "Ping",    a: "#10B981" },
     { k: "up",   l: "Uptime",  a: "#58A6FF" }, { k: "vpn",  l: "VPN",     a: "#A78BFA" },
     { k: "link", l: "link",    a: "#10B981" }, { k: "tx",   l: "TX",      a: "#14B8A6" },
 ];
+
 
 function dc_met_accent(k) {
     for (let x in DC_METS) if (x.k == k) return x.a;
@@ -10873,6 +10982,40 @@ function zp_data() {
     return ZP_CACHE;
 }
 
+// Слот виджета помнит владельца по имени. У соседа-Almond это его имя, у
+// чужого датчика - EUI: адрес в сети ему выдаёт координатор, и после
+// повторного вступления он другой, а слот должен пережить это молча.
+function zdev_by_key(key) {
+    if (key == null || key == "") return null;
+    let zd = zp_data();
+    let devs = type(zd?.devices) == "array" ? zd.devices : [];
+    for (let dv in devs) {
+        if ((dv.eui ?? "") == key) return dv;
+        if (sprintf("%04X", int(+(dv.id ?? 0))) == key) return dv;
+    }
+    return null;
+}
+
+// Подпись владельца слота: у датчика вместо EUI - модель или короткий адрес.
+function dc_disp(key) {
+    let dv = zdev_by_key(key);
+    return dv != null ? zdev_name(dv) : key;
+}
+
+// Показания датчика в том виде, в каком их ждёт плитка виджета.
+function zdev_as_peer(dv) {
+    if (dv == null) return null;
+    let m = {};
+    if (dv.temp != null) { m.temp = int(int(+dv.temp) / 100); m.temp100 = int(+dv.temp); }
+    if (dv.hum != null) m.hum = int(int(+dv.hum) / 100);
+    if (dv.batt != null) m.batt = int(int(+dv.batt) / 2);
+    // slow: датчик на батарейке отчитывается раз в несколько минут, а то и раз
+    // в час. Общий порог в три минуты гасил бы плитку почти всё время.
+    return { age: int(+(dv.age ?? 999)), rssi: int(+(dv.rssi ?? 0)),
+             slow: true, m: m };
+}
+
+
 // Карточка зигби-виджета: та же плашка и свечение, что у родных плиток, но
 // полоска-акцент ПУНКТИРНАЯ - фирменный маркер «приехало по радио», в одном
 // языке с пунктиром ожидания STA. Ни пикселя текста не тратит, читается на
@@ -10908,13 +11051,19 @@ function zp_tail(p) {
 function dash_zmetric(b, o, t, n) {
     let name = tcut(t.p, 11);
     let m = n?.m ?? {};
-    let fresh = n != null && int(+(n.age ?? 999)) < 180;
+    let fresh = n != null && int(+(n.age ?? 999)) < (n.slow ? 7200 : 180);
     let met = t.m, lbl = dc_met_label(met);
     let wide = (t.cw ?? 1) >= 2, tall = (t.ch ?? 1) >= 2;
 
     let val = "--", col = C.dim, pct = -1, extra = null, extra2 = null;
     if (fresh) {
-        if (met == "sig") {
+        if (met == "sig" && n.slow) {
+            // У датчика нет «качества связи» в процентах - только уровень.
+            let rs = int(+(n.rssi ?? 0));
+            col = zig_rssi_col(rs);
+            val = sprintf("%d dBm", rs);
+            pct = zig_rssi_bar(rs);
+        } else if (met == "sig") {
             let sp = m.sig != null ? int(+m.sig) : -1;
             col = dash_lvl_col(sp);
             if (sp >= 0) { val = sprintf("%d%%", sp); pct = sp; }
@@ -10926,11 +11075,23 @@ function dash_zmetric(b, o, t, n) {
             if (pc >= 0) {
                 val = sprintf("%d%%%s", pc, int(+(m.chg ?? 0)) == 1 ? "+" : "");
                 pct = pc;
-                extra = int(+(m.chg ?? 0)) == 1 ? tr("charging") : tr("on battery");
+                // У датчика питание всегда своё - подпись «от батареи» была бы
+                // пустой строкой смысла.
+                extra = n.slow ? null
+                      : (int(+(m.chg ?? 0)) == 1 ? tr("charging") : tr("on battery"));
             }
+        } else if (met == "hum") {
+            let hv = m.hum != null ? int(+m.hum) : -1;
+            if (hv >= 0) { val = sprintf("%d%%", hv); pct = hv; col = A_CYAN; }
         } else if (met == "temp") {
             let tv = m.temp != null ? int(+m.temp) : 0;
-            if (tv != 0) { val = sprintf("%d°C", tv); col = tv >= 70 ? C.red : A_ORANGE; }
+            if (tv != 0) {
+                // У датчика есть сотые доли - показываем десятую: разница
+                // между 22.3 и 22.9 для комнаты как раз и есть вся разница.
+                val = m.temp100 != null ? sprintf("%.1f°C", int(+m.temp100) / 100.0)
+                                        : sprintf("%d°C", tv);
+                col = tv >= 70 ? C.red : A_ORANGE;
+            }
         } else if (met == "cpu" || met == "mem") {
             let v = m[met] != null ? int(+m[met]) : -1;
             if (v >= 0) { val = sprintf("%d%%", v); pct = v; col = v >= 85 ? C.orange : C.cyan; }
@@ -11068,6 +11229,13 @@ function dc_opts() {
         let peers = type(zd?.peers) == "array" ? zd.peers : [];
         for (let p in peers)
             if ((p.name ?? "") != "") push(o, { l: tcut(p.name, 20), v: p.name });
+        // Чужие датчики - такие же владельцы слотов, как соседи.
+        let devs = type(zd?.devices) == "array" ? zd.devices : [];
+        for (let dv in devs) {
+            let key = (dv.eui != null && dv.eui != "") ? dv.eui
+                    : sprintf("%04X", int(+(dv.id ?? 0)));
+            push(o, { l: tcut(zdev_name(dv), 20), v: key });
+        }
     } else if (st.dcp?.stage == "size") {
         let c = (st.dcp.cell % 16) % 4, r = int((st.dcp.cell % 16) / 4);
         for (let s in DC_SIZES)
@@ -11110,7 +11278,7 @@ function draw_dcust_page() {
                 let s = d[cell];
                 draw_btn(dc_slot_rect(i, s.cw ?? 1, s.ch ?? 1), null,
                          dc_met_label(s.m), null, null, null, null,
-                         null, null, dc_met_accent(s.m), tcut(s.p, 11));
+                         null, null, dc_met_accent(s.m), tcut(dc_disp(s.p), 11));
             } else if (own < 0) {
                 dc_dashed_cell(dc_cell_rect(i));
             }
@@ -11139,7 +11307,8 @@ function draw_dcust_page() {
         if (s != null) {
             let ry = IS_ALMONDPLUS ? GVB - DC_DEL_H : GVB - 32;
             let c = gcard(GX, ry, GW, DC_DEL_H, dc_met_accent(s.m));
-            lcd_text(c.ix, IS_ALMONDPLUS ? mid_y(c, 1) : ry + 11, tcut(dc_met_label(s.m) + "  " + s.p, 32),
+            lcd_text(c.ix, IS_ALMONDPLUS ? mid_y(c, 1) : ry + 11,
+                     tcut(dc_met_label(s.m) + "  " + dc_disp(s.p), 32),
                      C.white, C.widget, 1);
             lcd_rect(GX + GW - NP_MINUS_W, ry + 4, 1, DC_DEL_H - 8, C.border);
             lcd_text(GX + GW - NP_MINUS_W + 10, IS_ALMONDPLUS ? ry + int((DC_DEL_H - fpx(3)) / 2) : ry + 4,
@@ -11228,6 +11397,7 @@ function draw_current() {
     case "zignets":   draw_zignets_page(); break;
     case "mqtt":      draw_mqtt_page(); break;
     case "zigpeer":   draw_zigpeer_page(); break;
+    case "zigdev":    draw_zigdev_page(); break;
     case "games":     draw_games_page(); break;
     case "gset":      draw_gset_page(); break;
     case "gqr":       draw_gqr_page(); break;
@@ -11468,6 +11638,14 @@ function dash_tile(t, d, o) {
         let zd = zp_data(), n = null;
         let peers = type(zd?.peers) == "array" ? zd.peers : [];
         for (let q in peers) if ((q.name ?? "") == t.p) { n = q; break; }
+        if (n == null) {
+            let dv = zdev_by_key(t.p);
+            if (dv != null) {
+                dash_zmetric(b, o, { k: t.k, c: t.c, r: t.r, cw: t.cw, ch: t.ch,
+                                     m: t.m, p: zdev_name(dv) }, zdev_as_peer(dv));
+                return;
+            }
+        }
         dash_zmetric(b, o, t, n);
         return;
     }
@@ -12542,6 +12720,11 @@ function handle_touch(tx, ty, tmove) {
                     let y = ay + 6 + k * ZIG_ROW_STEP;
                     if (ty < y - 5 || ty >= y + ZIG_ROW_STEP - 5) continue;
                     let n = rows[(off + k) % length(rows)];
+                    if (n.dev) {
+                        st.zig.dev = n.di;
+                        go_page("zigdev");
+                        return;
+                    }
                     if (n.pi < 0) return;
                     st.zig.peer = n.pi;
                     go_page("zigpeer");
