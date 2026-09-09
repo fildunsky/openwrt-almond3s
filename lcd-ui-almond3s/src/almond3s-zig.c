@@ -1485,8 +1485,27 @@ static void eui_str(const unsigned char *e, char *out)
 
 static void join_debug(const unsigned char *pl, int pn)
 {
-    if (!getenv("ZIG_DEBUG") || pn < 3) return;
+    if (pn < 3) return;
     int id = pl[2];
+    /* Заводим устройство сразу по колбэку чипа, не дожидаясь, пока оно
+       представится по ZDO или пришлёт первый отчёт: список на экране должен
+       показать новичка в ту же секунду, когда он вступил. */
+    if (id == 0x24 && pn >= 17 && pl[13] != 2) {
+        struct zdev *d = zdev_slot((unsigned int)(pl[3] | (pl[4] << 8)));
+        if (d) {
+            memcpy(d->eui, pl + 5, 8);
+            d->has_eui = 1;
+            if (!d->seen) d->seen = (long)time(NULL);
+        }
+    } else if (id == 0x23 && pn >= 16 && pl[4]) {
+        struct zdev *d = zdev_slot((unsigned int)(pl[5] | (pl[6] << 8)));
+        if (d) {
+            memcpy(d->eui, pl + 7, 8);
+            d->has_eui = 1;
+            if (!d->seen) d->seen = (long)time(NULL);
+        }
+    }
+    if (!getenv("ZIG_DEBUG")) return;
     char eui[20] = "";
     if (id == 0x24 && pn >= 17) {
         eui_str(pl + 5, eui);
@@ -1575,6 +1594,78 @@ static void zdev_unpack(const unsigned char *v, int n, long now)
             d->model[i] = (c >= 32 && c < 127) ? (char)c : '.';
         }
         if (ml > 0) d->model[ml] = 0;
+    }
+}
+
+
+/* Число из объекта JSON: ищем ключ до конца этого объекта, чтобы не утащить
+   значение соседнего. */
+static long jobj_num(const char *o, const char *end, const char *key, long dflt)
+{
+    char pat[24];
+    snprintf(pat, sizeof pat, "\"%s\":", key);
+    const char *q = strstr(o, pat);
+    if (!q || q >= end) return dflt;
+    return strtol(q + strlen(pat), NULL, 10);
+}
+
+static void jobj_str(const char *o, const char *end, const char *key,
+                     char *out, int max)
+{
+    char pat[24];
+    snprintf(pat, sizeof pat, "\"%s\":\"", key);
+    out[0] = 0;
+    const char *q = strstr(o, pat);
+    if (!q || q >= end) return;
+    q += strlen(pat);
+    int i = 0;
+    while (*q && *q != '"' && i < max - 1) out[i++] = *q++;
+    out[i] = 0;
+}
+
+/* Список устройств переживает перезапуск демона вместе с показаниями. Чип
+   помнит только адреса своих детей, а температуру с влажностью спящий датчик
+   пришлёт когда сам проснётся - без этого экран после перезапуска стоял бы
+   пустым по десять минут. */
+static void zdev_restore(const char *path, int net_pan)
+{
+    char rb[4096];
+    FILE *rf = fopen(path, "r");
+    if (!rf) return;
+    size_t got = fread(rb, 1, sizeof rb - 1, rf);
+    rb[got] = 0;
+    fclose(rf);
+    const char *pp = strstr(rb, "\"pan\":");
+    if (!pp || atoi(pp + 6) != net_pan) return;      /* сеть другая - не наши */
+    const char *q = strstr(rb, "\"devices\":[");
+    if (!q) return;
+    long now = (long)time(NULL);
+    while ((q = strstr(q, "{\"id\":")) != NULL) {
+        const char *end = strchr(q, '}');
+        if (!end) break;
+        unsigned int id = (unsigned int)jobj_num(q, end, "id", 0);
+        if (!id) { q = end; continue; }
+        struct zdev *d = zdev_slot(id);
+        if (!d) break;
+        char eui[20];
+        jobj_str(q, end, "eui", eui, sizeof eui);
+        if (strlen(eui) == 16) {
+            for (int i = 0; i < 8; i++) {
+                char b2[3] = { eui[(7 - i) * 2], eui[(7 - i) * 2 + 1], 0 };
+                d->eui[i] = (unsigned char)strtol(b2, NULL, 16);
+            }
+            d->has_eui = 1;
+        }
+        jobj_str(q, end, "model", d->model, sizeof d->model);
+        long v;
+        if ((v = jobj_num(q, end, "temp", -100000)) != -100000) { d->temp = (int)v; d->has_temp = 1; }
+        if ((v = jobj_num(q, end, "hum", -100000)) != -100000) { d->hum = (int)v; d->has_hum = 1; }
+        if ((v = jobj_num(q, end, "batt", -1)) >= 0) { d->batt = (int)v; d->has_batt = 1; }
+        if ((v = jobj_num(q, end, "volt", -1)) >= 0) { d->volt = (int)v; d->has_volt = 1; }
+        d->rssi = (int)jobj_num(q, end, "rssi", 0);
+        d->lqi = (int)jobj_num(q, end, "lqi", 0);
+        d->seen = now - jobj_num(q, end, "age", 0);
+        q = end;
     }
 }
 
@@ -1996,6 +2087,8 @@ int main(int argc, char **argv)
         int permit_on = 0;
         int net_pan = 0, net_ch = 0;
         net_params(&net_pan, &net_ch);
+        /* Показания из прошлой жизни демона - пока датчик не отчитается сам. */
+        zdev_restore(out, net_pan);
         if (init == 0) {
             for (int i = 0; i < 6; i++) ezsp_read(pl, sizeof pl, 500);
             if (node_type() == 1) {
@@ -2058,6 +2151,7 @@ int main(int argc, char **argv)
             }
         }
         long last_save = 0, last_relay = 0, last_poll = 0;
+        int last_ndev = 0;
         int seq = 0;
         int coord = node_type() == 1;
         g_coord = coord;
@@ -2153,6 +2247,9 @@ int main(int argc, char **argv)
             /* Раз в пять минут спрашиваем показания сами: спящий датчик
                отчитывается по своему расписанию, и после перезапуска демона
                строка на экране иначе стояла бы пустой до следующего отчёта. */
+            /* Появился новый - спрашиваем его сразу, иначе строка на экране
+               стояла бы пустой до его собственного отчёта. */
+            if (nzdv != last_ndev) { last_ndev = nzdv; last_poll = 0; }
             if (nzdv > 0 && (last_poll == 0 || now - last_poll >= 300)) {
                 last_poll = now;
                 zdev_poll(&seq);
@@ -2296,7 +2393,10 @@ int main(int argc, char **argv)
             }
 
             now = (long)time(NULL);
-            if (now - last_save >= 2) {
+            /* Состав списка поменялся - пишем файл сразу, не дожидаясь
+               общих двух секунд: человек в этот момент смотрит на экран. */
+            if (now - last_save >= 2 || zdv_changed) {
+                zdv_changed = 0;
                 last_save = now;
                 char tmp[128];
                 snprintf(tmp, sizeof tmp, "%s.tmp", out);

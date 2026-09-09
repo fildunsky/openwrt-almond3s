@@ -686,6 +686,8 @@ let TR_RU = {
     "charge": "заряд",
     "no readings yet": "показаний пока нет",
     "device gone": "устройство пропало",
+    "device added": "устройство добавлено",
+    "joining needs network telemetry": "нужна телеметрия по сети",
     "long silent": "давно молчит",
     "Temperature": "Температура",
     "Humidity": "Влажность",
@@ -7911,6 +7913,29 @@ function zig_rssi_col(v) {
     return r >= -70 ? C.green : (r >= -85 ? C.orange : C.red);
 }
 
+// Имя чужого датчика: модель, если он её назвал, иначе адрес в сети.
+function zdev_name(dv) {
+    let mo = (dv?.model != null && dv.model != "") ? dv.model : null;
+    let id = sprintf("%04X", int(+(dv?.id ?? 0)));
+    return mo != null ? sprintf("%s (%s)", mo, id) : id;
+}
+
+// Вступление устройства ничем себя не выдавало: список живёт на вкладке
+// «Соседи», а человек в этот момент смотрит на отсчёт окна приёма. Заметив
+// новое устройство, показываем его и переводим страницу на список.
+function zig_dev_watch(pj) {
+    st.zig ??= {};
+    let devs = type(pj?.devices) == "array" ? pj.devices : [];
+    let n = length(devs);
+    if (st.zig.ndev != null && n > st.zig.ndev) {
+        st.zig.mode = "peers";
+        st.toast = { msg: sprintf("%s: %s", tr("device added"),
+                                  zdev_name(devs[n - 1])),
+                     color: C.green, bg: "#0A2A18", until: time() + 6 };
+    }
+    st.zig.ndev = n;
+}
+
 function zig_rows() {
     let d = zig_json(ZIG_PEERS);
     let peers = type(d?.peers) == "array" ? d.peers : [];
@@ -7992,6 +8017,7 @@ function draw_zigbee_page() {
 
     let info = zig_json(ZIG_INFO);
     let pj = zig_json(ZIG_PEERS);
+    zig_dev_watch(pj);
     // Пока работает маячок, опросить чип нельзя - порт занят. Тогда берём
     // строку, которую маячок сам записал при старте.
     let head = info?.ok ? sprintf("EM357  EZSP v%d  %s", info.ezsp, info.stack ?? "")
@@ -8272,14 +8298,6 @@ function zp_act(i) {
     return { x: GX + i * (w + GG), y: BACK_Y + 2, w: w, h: BACK_H - 4 };
 }
 
-
-// Карточка чужого датчика: то же расположение, что у соседа-Almond, но здесь
-// нет наших метрик - только то, что устройство отдаёт по стандарту.
-function zdev_name(dv) {
-    let mo = (dv?.model != null && dv.model != "") ? dv.model : null;
-    let id = sprintf("%04X", int(+(dv?.id ?? 0)));
-    return mo != null ? sprintf("%s (%s)", mo, id) : id;
-}
 
 function draw_zigdev_page() {
     lcd_clear(C.bg);
@@ -8802,6 +8820,7 @@ function draw_zigset_page() {
     }
     lcd_text(GX + 12, zigset_hint_y(), hint, C.ontop_dim, C.bg, 1);
     let pj = zig_json(ZIG_PEERS);
+    zig_dev_watch(pj);
     let vs = null, vnum = 0;
     let cm = pj?.chip ? match(pj.chip, /EZSP v([0-9]+) ([0-9.]+)/) : null;
     if (cm) { vnum = int(+cm[1]); vs = sprintf("EZSP v%s  %s", cm[1], cm[2]); }
@@ -12906,6 +12925,17 @@ function handle_touch(tx, ty, tmove) {
                 let lvp = zig_live_pan() ?? 0, lvc = zig_live_ch() ?? 0;
                 let diff = lvp > 0 && (lvp != c.pan || (lvc > 0 && lvc != c.ch));
                 if (!diff && co3) {
+                    // Окно приёма держит демон телеметрии: он продлевает его и
+                    // кладёт временный ключ. В режиме «маячок» стек опущен, с
+                    // выключенной телеметрией демона нет вовсе - применять
+                    // окно некому, и кнопка молча обманывала бы.
+                    if (!zig_cfg().beacon || zig_mode() != "mesh") {
+                        zig_btn_fx(b, tr("Permit short"), C.orange);
+                        toast(tr("joining needs network telemetry"),
+                              C.orange, "#2A1A06", 4);
+                        draw_zigset_page();
+                        return;
+                    }
                     // Кнопка-переключатель: открыт - закрываем, закрыт -
                     // открываем на четыре минуты. Окно держит демон, он же
                     // продлевает и закрывает его по этому файлу.
