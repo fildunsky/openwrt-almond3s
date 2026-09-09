@@ -11262,7 +11262,24 @@ function dc_opts() {
                 push(o, { l: sprintf("%d x %d", s[0], s[1]),
                           v: sprintf("%dx%d", s[0], s[1]) });
     } else {
-        for (let x in DC_METS) push(o, { l: dc_met_label(x.k), v: x.k });
+        // У чужого датчика метрики только те, что он сам присылает: остальное
+        // в этом списке - то, что Almond передаёт Almond'у, и для датчика
+        // навсегда осталось бы прочерком. Пока он не отчитался, показываем
+        // весь набор, который вообще для него возможен.
+        let dv = zdev_by_key(st.dcp?.peer);
+        let fresh = dv != null && (dv.temp != null || dv.hum != null || dv.batt != null);
+        for (let x in DC_METS) {
+            if (dv != null) {
+                let ok = x.k == "sig";
+                if (!ok && x.k == "temp") ok = fresh ? dv.temp != null : true;
+                if (!ok && x.k == "hum") ok = fresh ? dv.hum != null : true;
+                if (!ok && x.k == "batt") ok = fresh ? dv.batt != null : true;
+                if (!ok) continue;
+            } else if (x.k == "hum") {
+                continue;      // влажность есть только у датчиков
+            }
+            push(o, { l: dc_met_label(x.k), v: x.k });
+        }
     }
     return o;
 }
