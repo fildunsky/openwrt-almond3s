@@ -568,10 +568,23 @@ static void lcd_gpio_init(void)
 
 static void lcd_hw_reset(void)
 {
-    udelay(100000);
-    shadow_dir |= BIT_RST; gw_dir(shadow_dir); udelay(10000);
-    shadow_dir &= ~BIT_RST; gw_dir(shadow_dir); udelay(10000);
-    shadow_dir |= BIT_RST; gw_dir(shadow_dir); udelay(120000);
+    /*
+     * RST должен физически проседать в 0, а не уходить в Hi-Z. Прежний способ
+     * дёргал RST только через РЕГИСТР НАПРАВЛЕНИЯ (выход = высоко из DATA,
+     * вход = Hi-Z), а низкой фазы не было вовсе - «ноль» держался только на
+     * внешней подтяжке к земле. На части партий панели линия RST подтянута
+     * ВВЕРХ, тогда Hi-Z = высоко и сброс не происходил: контроллер оставался
+     * в POR/рассинхроне, а после резкого перезапуска (шина брошена посреди
+     * транзакции) init без настоящего сброса не вытаскивал панель из белого.
+     *
+     * Теперь уровень RST гоним атомарными DSET/DCLR (только бит 15), а пин всё
+     * время держим выходом - тот же приём, что у подсветки. Сброс честный
+     * независимо от подтяжки платы.
+     */
+    shadow_dir |= BIT_RST; gw_dir(shadow_dir);       /* RST — выход */
+    gw(GPIO_DSET_OFF, BIT_RST); udelay(100000);      /* высоко */
+    gw(GPIO_DCLR_OFF, BIT_RST); udelay(20000);       /* НИЗКО — настоящий сброс */
+    gw(GPIO_DSET_OFF, BIT_RST); udelay(120000);      /* высоко, ждём старт контроллера */
     shadow_dir |= BIT_CSX; gw_dir(shadow_dir);
     shadow_dir |= BIT_DCX; gw_dir(shadow_dir);
     udelay(5000);
