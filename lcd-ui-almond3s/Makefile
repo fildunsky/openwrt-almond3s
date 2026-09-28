@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=lcd-ui-almond3s
-PKG_RELEASE:=789
+PKG_RELEASE:=790
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -18,7 +18,7 @@ define Package/lcd-ui-almond3s
   TITLE:=LCD dashboard for Securifi Almond 3S
   DEPENDS:=@(TARGET_ramips_mt7621||TARGET_cortina) \
 	+TARGET_ramips_mt7621:kmod-lcd-almond3s +TARGET_cortina:kmod-lcd-almondplus \
-	+libmbedtls +ucode +ucode-mod-fs \
+	+libmbedtls +ucode +ucode-mod-fs +ucode-mod-math \
 	+ucode-mod-socket +ucode-mod-ubus +ucode-mod-uci +ucode-mod-uloop +qrencode
 endef
 

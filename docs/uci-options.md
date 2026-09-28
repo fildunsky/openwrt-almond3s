@@ -1,7 +1,7 @@
 # Настройки Almond через UCI: справочник `uci set almond3s.*`
 
 Всё, что интерфейс умеет запоминать, лежит в секциях `almond3s.*` файла
-`/etc/config/lcd`. Экран, скрипты и init читают их оттуда же, поэтому любую
+`/etc/config/almond3s`. Экран, скрипты и init читают их оттуда же, поэтому любую
 настройку можно сменить из командной строки — без захода в меню устройства.
 
 ## Как применять
@@ -23,7 +23,8 @@ uci -q show almond3s.display          # одну секцию
 uci -q get almond3s.display.lang
 ```
 
-Сбросить секцию к значениям из пакета:
+Отменить ещё не закоммиченные правки секции (сохранённое на флеше
+`uci revert` не трогает):
 
 ```sh
 uci revert almond3s.display
@@ -123,8 +124,8 @@ uci set almond3s.display.night_wifi='1'                  # гасить Wi-Fi н
 | `sv_date` | `0`, `1` | `1` | Показывать дату в заставке |
 | `sv_signal` | `0`, `1` | `1` | Показывать уровень сигнала |
 | `sv_batt` | `0`, `1` | `1` | Показывать батарею (если есть) |
-| `sv_env` | `0`, `1` | `1` | Показывать температуру/влажность |
-| `sv_wander` | `0`, `1` | `0` | Показывать время в других часовых поясах |
+| `sv_env` | `0`, `1` | `1` | Показывать конверт непрочитанных SMS |
+| `sv_wander` | `0`, `1` | `0` | Часы медленно смещаются по экрану (от выгорания) |
 
 Флаговые `sv_*` работают только в заставках, которые их выводят: `sv_date`
 пропускается в стиле `line`, `sv_wander` появляется только в `clock`,
@@ -185,7 +186,7 @@ uci -q delete almond3s.display.dcust
 
 | Параметр | Значения | По умолчанию | Смысл |
 |---|---|---|---|
-| `provider` | `openmeteo`, `wttr`, `metno`, `gismeteo` | `openmeteo` | Источник погоды |
+| `provider` | `openmeteo`, `wttr`, `metno` | `openmeteo` | Источник погоды |
 | `city` | строка | `Moscow` | Название города для геокодирования |
 | `lat` | `-90`…`90` | — | Закреплённая широта |
 | `lon` | `-180`…`180` | — | Закреплённая долгота |
@@ -221,7 +222,8 @@ uci commit almond3s
 
 `openmeteo` на части сетей недоступен (таймаут на `api.open-meteo.com`), при
 этом `geocoding-api.open-meteo.com` отвечает. Если погода не приходит —
-переключитесь на `metno` или `gismeteo`.
+переключитесь на `metno`: он берёт координаты у того же геокодера, а прогноз
+у Норвежского метеоинститута.
 
 ## Секция `alarm`
 
@@ -323,7 +325,7 @@ nc -zv 192.168.1.10 1883
 ### Требование к `host`
 
 `host` обязателен: без него `start_service` выходит сразу, и демон не
-поднимается, даже если `enabled=1`. Если секции `mqtt` в `/etc/config/lcd` нет,
+поднимается, даже если `enabled=1`. Если секции `mqtt` в `/etc/config/almond3s` нет,
 `uci set almond3s.mqtt.enabled=1` вернёт `Invalid argument` — создайте секцию
 целиком через `uci set almond3s.mqtt=mqtt`.
 
@@ -450,14 +452,14 @@ uci -q delete almond3s.weather.name
 uci commit almond3s
 /etc/almond3s/scripts/weather_fetch.sh
 
-# весь пакет к значениям из прошивки
-uci revert almond3s
-uci commit almond3s
+# весь пакет к значениям из прошивки (если пакет вшит в образ, а не
+# доставлен через apk - иначе в /rom этого файла нет)
+cp /rom/etc/config/almond3s /etc/config/almond3s
 /etc/init.d/almond3s-lcd restart
 ```
 
 ## Служебное
 
 `echo <страница> > /tmp/.lcd_goto` — открыть страницу без касания: `menu`,
-`lte`, `dcust`, `zigbee`, `weather`, `debug` и другие. `cat /tmp/.lcd_goto`
-показывает текущую.
+`lte`, `dcust`, `zigbee`, `weather`, `debug` и другие. Интерфейс читает файл
+и сразу удаляет его.

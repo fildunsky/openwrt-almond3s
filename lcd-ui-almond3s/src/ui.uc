@@ -4344,9 +4344,8 @@ let WICONS = {
 //  Вычисление времени рассвета/заката для корректного отображения иконок погоды
 //
 //  Провайдеры sunrise/sunset отдают по-разному (open-meteo - ISO местного
-//  времени, gismeteo - unixtime, wttr - «05:59 PM» и только в j1, а metno
-//  вообще не отдаёт), поэтому считаем сами из координат города, которые
-//  weather_fetch.sh кладёт в uci.
+//  времени, wttr - «05:59 PM» и только в j1, а metno вообще не отдаёт),
+//  поэтому считаем сами из координат города, которые кладёт в uci пикер.
 // ---------------------------------------------------------------
 
 let WPI = 4 * atan2(1, 1);
@@ -4371,7 +4370,9 @@ function w_solar(yday) {
 // (полярный день) или не садится.
 function sun_event(lat, lon, yday, tz, rise) {
     let s = w_solar(yday);
-    let c = (wsind(rise ? -0.833 : 0.833) - sin(s.decl) * sin(lat * WPI / 180))
+    // -0.833° и для восхода, и для заката: рефракция плюс радиус диска - край
+    // солнца касается горизонта, когда центр ещё под ним.
+    let c = (wsind(-0.833) - sin(s.decl) * sin(lat * WPI / 180))
           / (cos(s.decl) * cos(lat * WPI / 180));
     if (c > 1 || c < -1) return null;
     // ±4*H - часовой угол в минутах, 60*tz - 4*lon - поправка на недолготу
@@ -4380,20 +4381,28 @@ function sun_event(lat, lon, yday, tz, rise) {
     return ((m % 1440) + 1440) % 1440;
 }
 
-// Смещение локального времени относительно UTC в ЧАСАХ. В localtime() поля
+// Смещение локального времени относительно UTC в часах, дробное: у зон вроде
+// Индии и Ирана полчаса. Сравниваем минуты суток, переход через полночь
+// сводим к диапазону -12..+14.
 function utc_offset_h() {
     let l = localtime(), g = gmtime();
     if (!l || !g) return 0;
-    let h = (l.hour - g.hour + 24) % 24;
-    if (l.min < g.min) h = (h + 23) % 24;
-    return h;
+    let d = (l.hour * 60 + l.min) - (g.hour * 60 + g.min);
+    if (d > 840) d -= 1440;
+    if (d < -720) d += 1440;
+    return d / 60;
 }
 
-// Координаты города из uci (их кладёт weather_fetch.sh). Если кооординат нет, оставляем солнце.
+// Координаты города: закреплённые пикером в uci, иначе кэш геокода, который
+// weather_fetch.sh пишет для пресетов ("city<TAB>lat<TAB>lon<TAB>name") - у
+// пресетов uci-координаты стёрты. Нет ни того, ни другого - оставляем солнце.
 function sun_coords() {
-    if (!ucur) return null;
-    let lat = ucur.get("almond3s", "weather", "lat");
-    let lon = ucur.get("almond3s", "weather", "lon");
+    let lat = ucur ? ucur.get("almond3s", "weather", "lat") : null;
+    let lon = ucur ? ucur.get("almond3s", "weather", "lon") : null;
+    if (lat == null || lon == null) {
+        let g = split(trim(fs.readfile("/tmp/lcd_weather.geo") ?? ""), "\t");
+        lat = g[1]; lon = g[2];
+    }
     if (lat == null || lon == null) return null;
     let ls = "" + lat, lo = "" + lon;
     if (!match(ls, /^-?\d+(\.\d+)?$/) || !match(lo, /^-?\d+(\.\d+)?$/)) return null;
@@ -4407,7 +4416,7 @@ function is_night() {
     let t = localtime();
     if (!t) return false;
     let tz = utc_offset_h();
-    let key = sprintf("%d:%d", t.yday, tz);
+    let key = sprintf("%d:%d", t.yday, tz * 60);
     let set_min = W_SUN["s" + key];
     if (set_min == null) {
         // -1 вместо null: полярный день считаем один раз, а не на каждом кадре
@@ -10475,14 +10484,14 @@ function wcity_current() {
     return (ucur ? ucur.get("almond3s", "weather", "city") : null) ?? "Moscow";
 }
 
-// Провайдер погоды: openmeteo (по умолчанию) | wttr | metno | gismeteo. weather_fetch.sh читает тот
+// Провайдер погоды: openmeteo (по умолчанию) | wttr | metno. weather_fetch.sh читает тот
 // же ключ. Переключатель - строкой на экране выбора города.
 function weather_provider() {
     return (ucur ? ucur.get("almond3s", "weather", "provider") : null) ?? "openmeteo";
 }
 function weather_provider_name() {
     let p = weather_provider();
-    return p == "wttr" ? "wttr.in" : (p == "metno" ? "met.no" : (p == "gismeteo" ? "Gismeteo" : "Open-Meteo"));
+    return p == "wttr" ? "wttr.in" : (p == "metno" ? "met.no" : "Open-Meteo");
 }
 
 // Экран выбора города: 6 пресетов (3 ряда), ниже «Свой город» и «Источник».
@@ -14890,7 +14899,7 @@ function handle_touch(tx, ty, tmove) {
         let p = wcity_prov_btn();
         if (in_rect(tx, ty, p.x, p.y, p.w, p.h)) {
             if (!ucur) { toast(tr("uci unavailable"), C.red, "#200000", 2); return; }
-            let providers = ["openmeteo", "wttr", "metno", "gismeteo"];
+            let providers = ["openmeteo", "wttr", "metno"];
             let cur = weather_provider();
             let idx = -1;
             for (let i = 0; i < length(providers); i++) if (providers[i] == cur) { idx = i; break; }
