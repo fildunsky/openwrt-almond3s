@@ -14,6 +14,9 @@
 'use strict';
 
 import { AF_UNIX, SOCK_STREAM, create as create_socket, poll as sock_poll } from 'socket';
+// Для расчёта заката (is_night): в math есть sin/cos/atan2/sqrt, а acos и
+// floor - нет, поэтому acos выводим через atan2, а округление делает int().
+import { sin, cos, atan2, sqrt } from 'math';
 let fs = require("fs");
 
 // No PID lock needed — procd manages single instance (no auto-restart loop below)
@@ -68,6 +71,9 @@ let C = {
     cloud_mid:  "#79838F", // cloud, mid tone (мягкий переход лит->тень)
     cloud_shd:  "#5A6270", // cloud, shadowed underside
     bolt:       "#FFF176", // lightning bolt
+    moon_disc:  "#E8EAF0", // crescent body, near-white
+    moon_edge:  "#A9B0BF", // antialiased crescent rim
+    moon_star:  "#C9D1D9", // stars around the crescent
 };
 
 // Светлая тема - подмена НЕЙТРАЛЬНЫХ цветов: фон, плашки, текст, рамки. Акценты
@@ -4100,6 +4106,43 @@ let WICONS = {
         ],
         colors: { A: C.cloud_shd, B: C.cloud_lit, M: C.cloud_mid, C: C.sun_core, D: C.sun_ray },
     },
+    // «Переменная облачность» НОЧЬЮ: то же облако, но за ним серп вместо
+    // солнца. Облачные пиксели (A/B/M) скопированы из partly один в один -
+    // луна рисуется ТОЛЬКО там, где у daylight-версии был солнечный диск, и
+    // поверх не залезает, поэтому серп торчит из-за облака как солнце днём.
+    // C - тело серпа, D - сглаженная кромка, S - звёзды.
+    partly_night: {
+        grid: [
+            "........................",
+            "....DCC........S...S....",
+            "...DCCD...............S.",
+            "..DCCC..................",
+            "..DCCC..............S...",
+            "..DCCCD.................",
+            "..DCCCC..........S......",
+            "..DCCCCCD.MMMB..........",
+            "...CCCCCCMBBBBBBB....S..",
+            "....CCCCMBBBBBBBBBB.....",
+            ".....DCMBBBBBBBBBBBB....",
+            "......MBBBBBBBBBBBBBB...",
+            "......MBBBBBBBBBBBBBB...",
+            "......MMMMMMMMMMMMMM....",
+            ".......MMMMMMMMMMMM.....",
+            "........AAAAAAAAA.......",
+            "..........AAA...........",
+            "........................",
+            "........................",
+            "........................",
+            "........................",
+            "........................",
+            "........................",
+            "........................",
+        ],
+        colors: {
+            A: C.cloud_shd, B: C.cloud_lit, M: C.cloud_mid,
+            C: C.moon_disc, D: C.moon_edge, S: C.moon_star,
+        },
+    },
     cloud: {
         grid: [
             "........................",
@@ -4245,7 +4288,126 @@ let WICONS = {
         ],
         colors: { A: C.cloud_shd, B: C.cloud_lit, M: C.cloud_mid, C: C.bolt },
     },
+    // Серп для ясной погоды НОЧЬЮ: см. is_night() - WICONS.sun подменяется
+    // этим ключом, когда местное время позже заката. A - тело, B -antialias
+    // кромка, C - звёзды.
+    moon: {
+        grid: [
+            "........................",
+            ".......BAAC.............",
+            ".....BAAAB..........C...",
+            "....AAAAA...............",
+            "...AAAAAB...............",
+            "..AAAAAA................",
+            ".BAAAAAA................",
+            ".AAAAAAA................",
+            "BAAAAAAA................",
+            "AAAAAAAA................",
+            "AAAAAAAAB...............",
+            "AAAAAAAAA...............",
+            "BAAAAAAAAB..............",
+            ".AAAAAAAAA..............",
+            ".AAAAAAAAAA.............",
+            ".BAAAAAAAAAAB...........",
+            "..AAAAAAAAAAAABB........",
+            "...AAAAAAAAAAAAAAAA.....",
+            "....AAAAAAAAAAAAAA......",
+            ".....BAAAAAAAAAAB.......",
+            ".......BAAAAAAB.........",
+            "....C...................",
+            "...........C............",
+            "........................",
+        ],
+        colors: { A: C.moon_disc, B: C.moon_edge, C: C.moon_star },
+    },
 };
+
+// ---------------------------------------------------------------
+//  Вычисление времени рассвета/заката для корректного отображения иконок погоды
+//
+//  Провайдеры sunrise/sunset отдают по-разному (open-meteo - ISO местного
+//  времени, gismeteo - unixtime, wttr - «05:59 PM» и только в j1, а metno
+//  вообще не отдаёт), поэтому считаем сами из координат города, которые
+//  weather_fetch.sh кладёт в uci.
+// ---------------------------------------------------------------
+
+let WPI = 4 * atan2(1, 1);
+let W_SUN = {};     // кэш: "<yday>:<tz>" -> минуты от полуночи до заката
+
+function wsind(d) { return sin(d * WPI / 180); }
+function wacosd(x) { return atan2(sqrt(1 - x * x), x) * 180 / WPI; }
+
+// Уравнение времени на день года.
+function w_solar(yday) {
+    let g = 2 * WPI / 365 * (yday - 1);
+    return {
+        eot: 229.18 * (0.000075 + 0.001868 * cos(g) - 0.032077 * sin(g)
+                       - 0.014615 * cos(2 * g) - 0.040849 * sin(2 * g)),
+        decl: 0.006918 - 0.399912 * cos(g) + 0.070257 * sin(g)
+              - 0.006758 * cos(2 * g) + 0.000907 * sin(2 * g)
+              - 0.002697 * cos(3 * g) + 0.001480 * sin(3 * g),
+    };
+}
+
+// Минуты от местной полуночи до восхода/заката; null - солнце не восходит
+// (полярный день) или не садится.
+function sun_event(lat, lon, yday, tz, rise) {
+    let s = w_solar(yday);
+    let c = (wsind(rise ? -0.833 : 0.833) - sin(s.decl) * sin(lat * WPI / 180))
+          / (cos(s.decl) * cos(lat * WPI / 180));
+    if (c > 1 || c < -1) return null;
+    // ±4*H - часовой угол в минутах, 60*tz - 4*lon - поправка на недолготу
+    // относительно меридиана часового пояса, минус уравнение времени.
+    let m = 720 + (rise ? -4 * wacosd(c) : 4 * wacosd(c)) + 60 * tz - 4 * lon - s.eot;
+    return ((m % 1440) + 1440) % 1440;
+}
+
+// Смещение локального времени относительно UTC в ЧАСАХ. В localtime() поля
+function utc_offset_h() {
+    let l = localtime(), g = gmtime();
+    if (!l || !g) return 0;
+    let h = (l.hour - g.hour + 24) % 24;
+    if (l.min < g.min) h = (h + 23) % 24;
+    return h;
+}
+
+// Координаты города из uci (их кладёт weather_fetch.sh). Если кооординат нет, оставляем солнце.
+function sun_coords() {
+    if (!ucur) return null;
+    let lat = ucur.get("almond3s", "weather", "lat");
+    let lon = ucur.get("almond3s", "weather", "lon");
+    if (lat == null || lon == null) return null;
+    let ls = "" + lat, lo = "" + lon;
+    if (!match(ls, /^-?\d+(\.\d+)?$/) || !match(lo, /^-?\d+(\.\d+)?$/)) return null;
+    return { lat: ls * 1, lon: lo * 1 };
+}
+
+// true, когда местное время позже сегодняшнего заката.
+function is_night() {
+    let co = sun_coords();
+    if (!co) return false;
+    let t = localtime();
+    if (!t) return false;
+    let tz = utc_offset_h();
+    let key = sprintf("%d:%d", t.yday, tz);
+    let set_min = W_SUN["s" + key];
+    if (set_min == null) {
+        // -1 вместо null: полярный день считаем один раз, а не на каждом кадре
+        set_min = sun_event(co.lat, co.lon, t.yday, tz, false);
+        W_SUN["s" + key] = set_min == null ? -1 : set_min;
+        set_min = W_SUN["s" + key];
+    }
+    if (set_min < 0) return false;
+    let rise_min = W_SUN["r" + key];
+    if (rise_min == null) {
+        rise_min = sun_event(co.lat, co.lon, t.yday, tz, true);
+        W_SUN["r" + key] = rise_min == null ? -1 : rise_min;
+        rise_min = W_SUN["r" + key];
+    }
+    let now = t.hour * 60 + t.min;
+    if (rise_min >= 0 && now >= rise_min && now < set_min) return false;
+    return true;
+}
 
 // Picks an icon key by matching keywords in the condition text
 // (e.g. "Patchy rain possible", "Thundery outbreaks possible").
@@ -4261,8 +4423,10 @@ function weather_icon_key(desc) {
     if (match(s, /rain|drizzle|shower/i) || match(s, /ождь|орос|ивен/)) return "rain";
     if (match(s, /fog|mist/i) || match(s, /уман|ымка/))             return "fog";
     if (match(s, /cloud|overcast/i) || match(s, /блачн|асмурн/))
-        return (match(s, /partly/i) || match(s, /еременн/)) ? "partly" : "cloud";
-    if (match(s, /sun|clear/i) || match(s, /олнеч|сно/))            return "sun";
+        return (match(s, /partly/i) || match(s, /еременн/))
+            ? (is_night() ? "partly_night" : "partly") : "cloud";
+    if (match(s, /sun|clear/i) || match(s, /олнеч|сно/))
+        return is_night() ? "moon" : "sun";
     return "cloud";
 }
 
@@ -4334,7 +4498,9 @@ function wcond_tr(desc) {
 function weather_icon_color(key) {
     switch (key) {
     case "sun":    return C.sun_core;
+    case "moon":   return C.moon_disc;
     case "partly": return C.sun_core;
+    case "partly_night": return C.moon_disc;
     case "rain":   return C.cyan;
     case "snow":   return C.white;
     case "storm":  return C.bolt;
@@ -10174,13 +10340,14 @@ function wcity_current() {
     return (ucur ? ucur.get("almond3s", "weather", "city") : null) ?? "Moscow";
 }
 
-// Провайдер погоды: openmeteo (по умолчанию) | wttr. weather_fetch.sh читает тот
+// Провайдер погоды: openmeteo (по умолчанию) | wttr | metno | gismeteo. weather_fetch.sh читает тот
 // же ключ. Переключатель - строкой на экране выбора города.
 function weather_provider() {
     return (ucur ? ucur.get("almond3s", "weather", "provider") : null) ?? "openmeteo";
 }
 function weather_provider_name() {
-    return weather_provider() == "wttr" ? "wttr.in" : "Open-Meteo";
+    let p = weather_provider();
+    return p == "wttr" ? "wttr.in" : (p == "metno" ? "met.no" : (p == "gismeteo" ? "Gismeteo" : "Open-Meteo"));
 }
 
 // Экран выбора города: 6 пресетов (3 ряда), ниже «Свой город» и «Источник».
@@ -14478,8 +14645,12 @@ function handle_touch(tx, ty, tmove) {
         let p = wcity_prov_btn();
         if (in_rect(tx, ty, p.x, p.y, p.w, p.h)) {
             if (!ucur) { toast(tr("uci unavailable"), C.red, "#200000", 2); return; }
-            ucur.set("almond3s", "weather", "provider",
-                     weather_provider() == "wttr" ? "openmeteo" : "wttr");
+            let providers = ["openmeteo", "wttr", "metno", "gismeteo"];
+            let cur = weather_provider();
+            let idx = -1;
+            for (let i = 0; i < length(providers); i++) if (providers[i] == cur) { idx = i; break; }
+            let next = providers[(idx + 1) % length(providers)];
+            ucur.set("almond3s", "weather", "provider", next);
             ucur.commit("almond3s");
             system("/etc/almond3s/scripts/weather_fetch.sh >/dev/null 2>&1 &");
             draw_wcity_page();
