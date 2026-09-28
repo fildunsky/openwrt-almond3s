@@ -57,27 +57,32 @@ nf_direct_dead() {
 }
 
 # nf_fetch <url> [таймаут]
+# Заголовок User-Agent - из NF_UA, если задан (met.no без него отвечает 403).
 nf_fetch() {
 	NF_URL="$1"
 	NF_T="${2:-8}"
 	NF_PX=$(nf_proxy)
 
 	if command -v curl >/dev/null 2>&1; then
+		# set -- вместо переменной с аргументами: в UA есть пробел, и при
+		# разбиении на слова curl принял бы его вторую половину за лишний URL.
+		if [ -n "$NF_UA" ]; then set -- -H "User-Agent: $NF_UA"; else set --; fi
 		if ! nf_direct_dead; then
-			curl --http1.1 -k -s -f --max-time "$NF_T" "$NF_URL" && return 0
+			curl --http1.1 -k -s -f --max-time "$NF_T" "$@" "$NF_URL" && return 0
 			[ -n "$NF_PX" ] && : > "$NF_DEAD"
 		fi
-		[ -n "$NF_PX" ] && curl --http1.1 -k -s -f --max-time $((NF_T * 2)) -x "$NF_PX" "$NF_URL" && \
+		[ -n "$NF_PX" ] && curl --http1.1 -k -s -f --max-time $((NF_T * 2)) "$@" -x "$NF_PX" "$NF_URL" && \
 			{ rm -f "$NF_DEAD"; return 0; }
 		return 1
 	fi
 
+	if [ -n "$NF_UA" ]; then set -- "--header=User-Agent: $NF_UA"; else set --; fi
 	if ! nf_direct_dead; then
-		wget --no-check-certificate -q -T "$NF_T" -O - "$NF_URL" && return 0
+		wget --no-check-certificate -q -T "$NF_T" "$@" -O - "$NF_URL" && return 0
 		[ -n "$NF_PX" ] && : > "$NF_DEAD"
 	fi
 	[ -n "$NF_PX" ] && http_proxy="$NF_PX" https_proxy="$NF_PX" \
-		wget --no-check-certificate -q -T $((NF_T * 2)) -O - "$NF_URL" && \
+		wget --no-check-certificate -q -T $((NF_T * 2)) "$@" -O - "$NF_URL" && \
 		{ rm -f "$NF_DEAD"; return 0; }
 	return 1
 }

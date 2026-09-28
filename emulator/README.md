@@ -11,8 +11,8 @@ Zigbee, модем) подменено файлами и заглушками, �
 ./run.sh          # затем открыть http://127.0.0.1:8380
 ```
 
-Требуется: `bwrap` (bubblewrap), `python3`, `gcc`, собранные `prefix/`
-(хостовый ucode) и `bin/render-emu` — см. «Сборка» ниже.
+Требуется: `bwrap` (bubblewrap), `python3`, `gcc`, `cmake`, собранные `prefix/`
+(хостовый ucode), `bin/render-emu` и `bin/term-emu` — см. «Сборка» ниже.
 
 На странице:
 - клик по экрану = тап;
@@ -41,6 +41,8 @@ Zigbee/модем/батарея (только данные с живого ус
 ## Сборка (один раз)
 
 ```sh
+sudo apt install bubblewrap          # Debian/Ubuntu/Kubuntu
+
 # хостовый ucode со штатными модулями fs/socket (uci/ubus здесь не нужны):
 git clone --depth 1 https://github.com/json-c/json-c.git
 cmake -S json-c -B json-c/build -DCMAKE_INSTALL_PREFIX=$PWD/prefix -DBUILD_SHARED_LIBS=ON
@@ -55,6 +57,29 @@ cmake --build ucode/build -j && cmake --install ucode/build
 
 # рендер для ПК:
 gcc -O2 -o bin/render-emu ../lcd-ui-almond3s/src/render.c
+
+# демон терминала для ПК (libvterm в репозитории нет - кладём рядом):
+git clone --depth 1 https://github.com/neovim/libvterm
+gcc -std=c99 -Ilibvterm/include -o bin/term-emu \
+    ../lcd-ui-almond3s/src/almond3s-term.c libvterm/src/*.c -lutil
 ```
 
-`prefix/` и `bin/render-emu` в git не кладутся (бинарники хост-специфичны).
+`bin/term-emu` обязателен: `bwrap` падает на `--ro-bind` несуществующего
+источника, и весь `ui.uc` не стартует — страница при этом открывается (её
+отдаёт `server.py`), а канвас остаётся пустым. Без `bin/term-emu` `run.sh`
+подставит заглушку и напечатает предупреждение: всё работает, кроме
+страницы «терминал».
+
+`prefix/`, `bin/render-emu` и `bin/term-emu` в git не кладутся (бинарники
+хост-специфичны).
+
+## Если экран эмулятора пустой
+Скорее всего проблема в коде `ui.uc`
+
+Смотрите логи и framebuffer:
+
+```sh
+cat /tmp/almond3s-emu/ui.log  
+ls -l /tmp/almond3s-emu/lcd.fb  # 0 байт = render-emu умер или ещё не писал кадр
+```
+

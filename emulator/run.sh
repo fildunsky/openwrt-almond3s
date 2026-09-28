@@ -15,6 +15,14 @@ command -v bwrap >/dev/null || { echo "нужен bubblewrap (bwrap)"; exit 1; }
 [ -x "$EMU/prefix/bin/ucode" ] || { echo "нет prefix/bin/ucode - собери ucode (см. README)"; exit 1; }
 [ -x "$EMU/bin/render-emu" ] || { echo "нет bin/render-emu - gcc -O2 -o bin/render-emu ../lcd-ui-almond3s/src/render.c"; exit 1; }
 
+# Проверяем наличие bin/term-emu (он же almond3s-term) - тоже хостовый бинарник, в git его нет
+if [ ! -x "$EMU/bin/term-emu" ]; then
+    printf '#!/bin/sh\n# заглушка almond3s-term: терминальная страница будет пустой.\n# Настоящий - см. README, раздел «Сборка».\nexec sleep 3600\n' \
+        > "$EMU/bin/term-emu"
+    chmod +x "$EMU/bin/term-emu"
+    echo "ВНИМАНИЕ: нет bin/term-emu - подставлена заглушка, страница «терминал» не работает"
+fi
+
 mkdir -p "$ST/ubus" "$ST/leds/white:status" "$ST/hostusr" "$ST/hostetc"
 cp -f "$EMU/forward/ash" "$ST/forward-ash" 2>/dev/null && chmod +x "$ST/forward-ash"
 [ -f "$ST/leds/white:status/brightness" ] || {
@@ -63,8 +71,12 @@ bwrap --dev-bind / / \
         $HB/cp -s $HB/* /usr/bin/ 2>/dev/null
         $HB/ln -sf /usr/bin/uci.emu /usr/bin/uci
         $HB/ln -sf /usr/bin/jsonfilter.emu /usr/bin/jsonfilter
-        # awk на хосте ходит через /etc/alternatives - подвязываем gawk напрямую
-        $HB/ln -sf $HB/gawk /usr/bin/awk
+        # awk на хосте - симлинк через /etc/alternatives, а сам бинарник разный:
+        # на Fedora/openSUSE это gawk, на Debian/Ubuntu - mawk.
+        # жёсткий gawk на Ubuntu /usr/bin/awk становился битым симлинком.
+        for AWK in gawk mawk original-awk; do
+            [ -x "$HB/$AWK" ] && { $HB/ln -sf "$HB/$AWK" /usr/bin/awk; break; }
+        done
         $HB/ln -sf /tmp/almond3s-emu/forward-ash /usr/bin/ash
         $HB/mkdir -p /usr/libexec/almond3s 2>/dev/null
         $HB/cp /tmp/almond3s-emu/term-emu /usr/libexec/almond3s/almond3s-term 2>/dev/null
