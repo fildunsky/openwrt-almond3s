@@ -14,7 +14,7 @@
 
 #define TELE_PEERS  "/tmp/lcd_zig_peers.json"
 #define TELE_SELF   "/tmp/almond_tele.json"
-#define TELE_MODEM  "/tmp/5gmodem_tele.json"
+#define TELE_MODEM  g5_path("/tmp/5gmodem/tele.json", "/tmp/5gmodem_tele.json")
 #define TELE_STALE  90
 #define SCRIPTS     "/etc/almond3s/scripts"
 #define NIGHT_STATE "/etc/almond3s/night_wifi_off"
@@ -290,6 +290,11 @@ static int mqtt_connect(const char *host, int port, const char *id,
         return -1;
     }
     return 0;
+}
+
+static const char *g5_path(const char *nw, const char *old)
+{
+    return access(nw, F_OK) == 0 ? nw : old;
 }
 
 static int slurp(const char *path, char *buf, int max, int stale)

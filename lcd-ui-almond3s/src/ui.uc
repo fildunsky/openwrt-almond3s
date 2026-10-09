@@ -115,6 +115,11 @@ let MET = {
 };
 let LVC = { ok: C.green, warn: C.orange, crit: C.red };
 
+function g5_path(name) {
+    let p = "/tmp/5gmodem/" + name;
+    return fs.access(p) ? p : "/tmp/5gmodem_" + name;
+}
+
 // length() в ucode возвращает длину в БАЙТАХ. Кириллица в UTF-8 занимает два
 // байта, поэтому расчёт ширины текста давал двойную величину и центрирование
 // уезжало влево. Считаем знаки: продолжения UTF-8 (10xxxxxx) не в счёт.
@@ -1983,7 +1988,7 @@ function refresh_data() {
     // сами, по тем же файлам: ровно это делает `smsbridge.sh newcount
     // for=<путь>`, но нам, локальной программе, дешевле прочитать их напрямую,
     // чем форкать скрипт на каждом тике.
-    let sms_raw = fs.readfile("/tmp/5gmodem_sms_new.json");
+    let sms_raw = fs.readfile(g5_path("sms_new.json"));
     if (sms_raw) {
         try {
             let sj = json(sms_raw);
@@ -5353,7 +5358,7 @@ function alarm_sub() {
 // Подпись плитки «Спидтест» - реальные цифры прошлого замера из кэша (down/up).
 // Самодостаточна (без поздних хелперов): нет hoisting, а menu_items выше по файлу.
 function speedtest_sub() {
-    let raw = fs.readfile("/tmp/5gmodem_speedtest.json");
+    let raw = fs.readfile(g5_path("speedtest.json"));
     if (raw) {
         try {
             let j = json(raw);
@@ -7774,7 +7779,6 @@ function zig_name() {
 
 let ZIG_TELE = "/tmp/lcd_zig_tele.json";
 let TELE_SELF = "/tmp/almond_tele.json";
-let TELE_MODEM = "/tmp/5gmodem_tele.json";
 let TELE_STALE = 90;
 
 // Телеметрия для маячка: плоский набор чисел, который он упакует в эфир.
@@ -9212,11 +9216,10 @@ function vpn_items(g) {
 
 // ============================ СПИДТЕСТ ============================
 // Порт теста скорости из 5gmodem: тот же бэкенд speedtest.sh (start/status/stop),
-// живой JSON в /tmp/5gmodem_speedtest.json. Карточка заливается зелёным слева
+// живой JSON в /tmp/5gmodem/speedtest.json (до 3.2.7 - /tmp/5gmodem_speedtest.json). Карточка заливается зелёным слева
 // (загрузка) и синим справа (отдача) по доле elapsed/secs; сверху сервис, в
 // центре ↓/↑ скорости, снизу IP с пиксель-флагом (draw_cflag).
 let SPEEDBIN = "/usr/share/5gmodem/speedtest.sh";
-let SPEED_CACHE = "/tmp/5gmodem_speedtest.json";
 
 // Пресеты серверов - как в настройках 5gmodem (5gsettings.js).
 let SPD_DL = [
@@ -9328,7 +9331,7 @@ function spd_graph(x, y, w, h, data, color) {
 }
 
 function speedtest_read() {
-    let raw = fs.readfile(SPEED_CACHE);
+    let raw = fs.readfile(g5_path("speedtest.json"));
     if (!raw) { st.spd = st.spd ?? {}; return; }
     try { st.spd = json(raw) ?? {}; } catch (e) {}
 }

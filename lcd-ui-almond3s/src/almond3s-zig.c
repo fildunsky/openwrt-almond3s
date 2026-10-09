@@ -334,7 +334,12 @@ static const struct { unsigned char id; const char *key; int width; } TELE[] = {
 
 static int my_node;
 
-#define TELE_MODEM "/tmp/5gmodem_tele.json"
+static const char *g5_path(const char *nw, const char *old)
+{
+    return access(nw, F_OK) == 0 ? nw : old;
+}
+
+#define TELE_MODEM g5_path("/tmp/5gmodem/tele.json", "/tmp/5gmodem_tele.json")
 #define TELE_SELF  "/tmp/almond_tele.json"
 #define TELE_STALE 90
 
@@ -2627,6 +2632,12 @@ int main(int argc, char **argv)
         tcdrain(fd);
         sleep(3);
         port_baud(57600);
+        if (board_almondplus()) {
+            struct termios t;
+            tcgetattr(fd, &t);
+            t.c_iflag |= (IXON | IXOFF);
+            tcsetattr(fd, TCSADRAIN, &t);
+        }
         remove("/tmp/.zig_flashing");
         printf("{\"ok\":1,\"blocks\":%ld,\"size\":%ld,\"tail\":\"%s\"}\n", blocks, sz, acc);
     } else if (!strcmp(cmd, "btlscan")) {

@@ -88,6 +88,9 @@ static int console_phase;
 static volatile bool snap_ready;
 static volatile bool flush_busy;
 static DEFINE_MUTEX(fb_lock);
+static DEFINE_MUTEX(bus_lock);
+static unsigned long fb_writing_since;
+static bool touch_handler_on;
 
 static int stat_rows, stat_us, stat_frames;
 
@@ -586,6 +589,7 @@ static void lcd_flush_fb(void)
 	u32 gen0;
 	bool snap_partial = false;
 
+	mutex_lock(&bus_lock);
 	if (!snap_ready) {
 		mutex_lock(&fb_lock);
 		memcpy(flush_snap, framebuffer, FB_SIZE);
@@ -670,6 +674,7 @@ static void lcd_flush_fb(void)
 		prev_valid = true;
 	}
 	flush_busy = false;
+	mutex_unlock(&bus_lock);
 }
 
 
@@ -1078,9 +1083,12 @@ static void matrix_text(u16 *fb, int ty, const char *s, u16 fg, int sc)
 
 	if (tx < 0)
 		tx = 0;
-	for (y2 = ty - 2; y2 < ty + 7 * sc + 2 && y2 < LCD_H; y2++)
+	for (y2 = ty - 2; y2 < ty + 7 * sc + 2 && y2 < LCD_H; y2++) {
+		if (y2 < 0)
+			continue;
 		for (x2 = 0; x2 < LCD_W; x2++)
 			fb[y2 * LCD_W + x2] = 0;
+	}
 	for (j = 0; s[j]; j++)
 		fb_putchar(fb, tx + j * 6 * sc, ty, s[j], fg, 0, sc);
 }
@@ -1249,19 +1257,23 @@ static int render_fn(void *data)
 		}
 		if (lcd_rot_pending) {
 			lcd_rot_pending = 0;
+			mutex_lock(&bus_lock);
 			bus_begin();
 			lcd_cmd(0x36);
 			lcd_dat(madctl());
 			bus_end();
+			mutex_unlock(&bus_lock);
 			prev_invalidate();
 			fb_dirty = 1;
 		}
 		if (panel_reinit_pending) {
 			panel_reinit_pending = 0;
+			mutex_lock(&bus_lock);
 			bus_begin();
 			lcd_hw_reset();
 			lcd_init_panel();
 			bus_end();
+			mutex_unlock(&bus_lock);
 			prev_invalidate();
 			fb_dirty = 1;
 		}
@@ -1269,11 +1281,13 @@ static int render_fn(void *data)
 			u32 pc = pcmd_q[pcmd_tail];
 			u8 c = (pc >> 16) & 0xFF, dt = (pc >> 8) & 0xFF, n = pc & 0xFF;
 
+			mutex_lock(&bus_lock);
 			bus_begin();
 			lcd_cmd(c);
 			if (n)
 				lcd_dat(dt);
 			bus_end();
+			mutex_unlock(&bus_lock);
 			pcmd_tail = (pcmd_tail + 1) & 15;
 		}
 		if (splash_active) {
@@ -1287,6 +1301,10 @@ static int render_fn(void *data)
 			msleep_interruptible(mtx ? 25 : 40);
 			if (kthread_should_stop())
 				break;
+		} else if (fb_writing && fb_writer &&
+			   time_after(jiffies, fb_writing_since + HZ)) {
+			fb_writing = 0;
+			fb_writer = NULL;
 		} else if (fb_dirty && !fb_writing) {
 			console_phase = 2;
 			fb_dirty = 0;
@@ -1473,6 +1491,14 @@ static ssize_t lcd_fb_write(struct file *f, const char __user *buf,
 	loff_t pos = *p;
 	u8 *target = (lg_w == LCD_W && lg_h == LCD_H) ? (u8 *)framebuffer : ufb;
 
+	if (pos == 0 && cnt >= 4 && cnt <= 16) {
+		char cmd[4];
+
+		if (!copy_from_user(cmd, buf, sizeof(cmd)) &&
+		    !memcmp(cmd, "fps ", sizeof(cmd)))
+			return cnt;
+	}
+
 	splash_active = 0;
 	console_phase = 2;
 
@@ -1482,6 +1508,7 @@ static ssize_t lcd_fb_write(struct file *f, const char __user *buf,
 		cnt = lg_size - pos;
 
 	if (pos == 0) {
+		fb_writing_since = jiffies;
 		fb_writing = 1;
 		fb_writer = f;
 	}
@@ -1691,9 +1718,11 @@ static long lcd_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 	}
 	case 32: {
 		char buf[128];
+		long n;
 
-		if (copy_from_user(buf, (void __user *)arg, sizeof(buf)))
-			return -EFAULT;
+		n = strncpy_from_user(buf, (const char __user *)arg, sizeof(buf));
+		if (n < 0)
+			return n;
 		buf[sizeof(buf) - 1] = 0;
 		strscpy(ext_line, buf, sizeof(ext_line));
 		ext_ttl = 40;
@@ -1707,20 +1736,19 @@ static long lcd_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		return (lg_w << 16) | lg_h;
 	case 36: {
 		u8 buf[18];
-		int n, w;
+		int n;
 
 		if (copy_from_user(buf, (void __user *)arg, 2))
 			return -EFAULT;
 		n = buf[1];
 		if (n < 1 || n > 16)
 			return -EINVAL;
-		fb_writing = 1;
-		for (w = 0; w < 200 && flush_busy; w++)
-			msleep(1);
+		if (mutex_lock_interruptible(&bus_lock))
+			return -ERESTARTSYS;
 		bus_begin();
 		lcd_read_regs(buf[0], buf + 2, n);
 		bus_end();
-		fb_writing = 0;
+		mutex_unlock(&bus_lock);
 		if (copy_to_user((void __user *)arg, buf, 2 + n))
 			return -EFAULT;
 		return 0;
@@ -1734,8 +1762,9 @@ static int lcd_mmap(struct file *f, struct vm_area_struct *vma)
 	unsigned long size = vma->vm_end - vma->vm_start;
 	int i;
 
-	if (size > (unsigned long)fb_npages * PAGE_SIZE)
+	if (vma->vm_pgoff || size > (unsigned long)fb_npages * PAGE_SIZE)
 		return -EINVAL;
+	vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP);
 	for (i = 0; i < fb_npages && (unsigned long)i * PAGE_SIZE < size; i++)
 		if (vm_insert_page(vma, vma->vm_start + i * PAGE_SIZE, fb_pages[i]))
 			return -EAGAIN;
@@ -1769,11 +1798,13 @@ static struct miscdevice lcd_dev = {
 
 static long panel_init_on_cpu(void *unused)
 {
+	mutex_lock(&bus_lock);
 	bus_begin();
 	lcd_gpio_init();
 	lcd_hw_reset();
 	lcd_init_panel();
 	bus_end();
+	mutex_unlock(&bus_lock);
 	return 0;
 }
 
@@ -1813,6 +1844,8 @@ static int __init lcd_drv_init(void)
 		ret = input_register_handler(&touch_handler);
 		if (ret)
 			pr_warn("touch handler not registered (%d)\n", ret);
+		else
+			touch_handler_on = true;
 	}
 
 	if (stage & 4)
@@ -1838,7 +1871,7 @@ static int __init lcd_drv_init(void)
 	return 0;
 
 err_dereg:
-	if (stage & 1)
+	if (touch_handler_on)
 		input_unregister_handler(&touch_handler);
 	misc_deregister(&lcd_dev);
 err_free:
@@ -1861,7 +1894,7 @@ static void __exit lcd_drv_exit(void)
 		kthread_stop(render_thread);
 	if (bl_timer_on)
 		hrtimer_cancel(&bl_timer);
-	if (stage & 1)
+	if (touch_handler_on)
 		input_unregister_handler(&touch_handler);
 	misc_deregister(&lcd_dev);
 	vfree(ufb);

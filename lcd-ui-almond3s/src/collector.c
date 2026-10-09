@@ -874,8 +874,12 @@ static int m5g_str(const char *json, const char *key, char *out, int outlen) {
 
 
 
-#define TELE_FILE   "/tmp/5gmodem_tele.json"
-#define TELE_CELL   "/tmp/5gmodem_tele_cell.json"
+static const char *g5_path(const char *nw, const char *old)
+{
+    return access(nw, F_OK) == 0 ? nw : old;
+}
+#define TELE_FILE   g5_path("/tmp/5gmodem/tele.json", "/tmp/5gmodem_tele.json")
+#define TELE_CELL   g5_path("/tmp/5gmodem/tele_cell.json", "/tmp/5gmodem_tele_cell.json")
 #define TELE_STALE  90
 
 static int tele_state;

@@ -101,9 +101,11 @@ static int recv_frame(unsigned char *out, int max, int *got_ack, int ms)
 			ck ^= d;
 		}
 		int rxck = rd_byte(ms);
-		unsigned char a = ACK;
+		unsigned char a = rxck == ck ? ACK : NAK;
 		write(fd, &a, 1);
-		(void)rxck; (void)t0;
+		(void)t0;
+		if (rxck != ck)
+			continue;
 		return len - 1;
 	}
 }

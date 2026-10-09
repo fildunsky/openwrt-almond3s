@@ -143,7 +143,7 @@ install_5g() {
 	/usr/share/5gmodem/update.sh install >/dev/null 2>&1
 	i=0
 	while [ $i -lt 150 ]; do
-		S=$(cat /tmp/5gmodem_update.json 2>/dev/null)
+		S=$(cat /tmp/5gmodem/update.json 2>/dev/null || cat /tmp/5gmodem_update.json 2>/dev/null)
 		if [ -z "$S" ] || echo "$S" | grep -q '"running":true'; then
 			# Пока идёт - держим НАШУ метку с act:install, чтобы строка
 			# показывала «Устанавливаю…», а не «Проверяю…» (у 5gmodem поля act нет).
