@@ -112,7 +112,8 @@ static int recv_frame(unsigned char *out, int max, int *got_ack, int ms)
 
 int main(int argc, char **argv)
 {
-	const char *dev = getenv("ZW_TTY") ? getenv("ZW_TTY") : "/dev/ttyS3";
+	const char *dev = getenv("ZW_TTY") ? getenv("ZW_TTY") :
+		access("/dev/ttyCS3", F_OK) == 0 ? "/dev/ttyCS3" : "/dev/ttyS3";
 	int baud = getenv("ZW_BAUD") ? atoi(getenv("ZW_BAUD")) : 115200;
 	unsigned char buf[64];
 	int n, ack = 0;

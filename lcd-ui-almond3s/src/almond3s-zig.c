@@ -1866,7 +1866,8 @@ int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
     const char *cmd = argc > 1 ? argv[1] : "info";
-    const char *dev = getenv("ZIG_TTY") ? getenv("ZIG_TTY") : "/dev/ttyS2";
+    const char *dev = getenv("ZIG_TTY") ? getenv("ZIG_TTY") :
+        access("/dev/ttyCS2", F_OK) == 0 ? "/dev/ttyCS2" : "/dev/ttyS2";
     int baud = getenv("ZIG_BAUD") ? atoi(getenv("ZIG_BAUD")) : 57600;
 
     int lk = open("/var/lock/almond3s-zig.lock", O_CREAT | O_RDWR, 0600);
